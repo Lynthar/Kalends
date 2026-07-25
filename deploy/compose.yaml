@@ -1,0 +1,13 @@
+services:
+  kalends:
+    image: kalends:local
+    container_name: kalends
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4180:4180"
+    volumes:
+      - /srv/appdata/kalends:/data
+    environment:
+      TZ: Asia/Shanghai
+      # 模块开关（默认全开）：只要续费中心改为 "renewals"，只要媒体库改为 "media"
+      # KALENDS_MODULES: renewals,media

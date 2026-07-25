@@ -1,0 +1,6 @@
+.git
+target
+data
+node_modules
+deploy
+*.md

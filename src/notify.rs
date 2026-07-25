@@ -1,0 +1,303 @@
+use anyhow::{anyhow, Result};
+use rusqlite::{params, Connection};
+use serde_json::Value;
+
+use crate::{db, engine, Db};
+
+#[derive(Clone)]
+pub struct TelegramCfg {
+    pub bot_token: String,
+    pub chat_id: String,
+    pub proxy: String,
+}
+
+#[derive(Clone)]
+pub struct EmailCfg {
+    pub host: String,
+    pub port: u16,
+    pub starttls: bool,
+    pub username: String,
+    pub password: String,
+    pub from: String,
+    pub to: String,
+}
+
+pub fn telegram_cfg(conn: &Connection) -> Option<TelegramCfg> {
+    let v: Value = serde_json::from_str(&db::get_setting(conn, "notify.telegram")?).ok()?;
+    if !v["enabled"].as_bool().unwrap_or(false) {
+        return None;
+    }
+    let cfg = TelegramCfg {
+        bot_token: v["bot_token"].as_str().unwrap_or("").trim().to_string(),
+        chat_id: v["chat_id"].as_str().unwrap_or("").trim().to_string(),
+        proxy: v["proxy"].as_str().unwrap_or("").trim().to_string(),
+    };
+    (!cfg.bot_token.is_empty() && !cfg.chat_id.is_empty()).then_some(cfg)
+}
+
+pub fn email_cfg(conn: &Connection) -> Option<EmailCfg> {
+    let v: Value = serde_json::from_str(&db::get_setting(conn, "notify.email")?).ok()?;
+    if !v["enabled"].as_bool().unwrap_or(false) {
+        return None;
+    }
+    let cfg = EmailCfg {
+        host: v["host"].as_str().unwrap_or("").trim().to_string(),
+        port: v["port"].as_u64().unwrap_or(465) as u16,
+        starttls: v["starttls"].as_bool().unwrap_or(false),
+        username: v["username"].as_str().unwrap_or("").trim().to_string(),
+        password: v["password"].as_str().unwrap_or("").to_string(),
+        from: v["from"].as_str().unwrap_or("").trim().to_string(),
+        to: v["to"].as_str().unwrap_or("").trim().to_string(),
+    };
+    (!cfg.host.is_empty() && !cfg.from.is_empty() && !cfg.to.is_empty()).then_some(cfg)
+}
+
+pub fn http_client(proxy: &str) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder();
+    if !proxy.is_empty() {
+        builder = builder.proxy(reqwest::Proxy::all(proxy)?);
+    }
+    Ok(builder.build()?)
+}
+
+pub async fn send_telegram(cfg: &TelegramCfg, text: &str) -> Result<()> {
+    let client = http_client(&cfg.proxy)?;
+    let resp = client
+        .post(format!(
+            "https://api.telegram.org/bot{}/sendMessage",
+            cfg.bot_token
+        ))
+        .json(&serde_json::json!({ "chat_id": cfg.chat_id, "text": text }))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(anyhow!(
+            "telegram {}: {}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        ));
+    }
+    Ok(())
+}
+
+pub async fn send_email(cfg: &EmailCfg, subject: &str, body: &str) -> Result<()> {
+    use lettre::message::header::ContentType;
+    use lettre::message::Mailbox;
+    use lettre::transport::smtp::authentication::Credentials;
+    use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+
+    let msg = Message::builder()
+        .from(cfg.from.parse::<Mailbox>()?)
+        .to(cfg.to.parse::<Mailbox>()?)
+        .subject(subject)
+        .header(ContentType::TEXT_PLAIN)
+        .body(body.to_string())?;
+    let builder = if cfg.starttls {
+        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&cfg.host)?
+    } else {
+        AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.host)?
+    };
+    let transport = builder
+        .port(cfg.port)
+        .credentials(Credentials::new(cfg.username.clone(), cfg.password.clone()))
+        .build();
+    transport.send(msg).await?;
+    Ok(())
+}
+
+/// 单条到期项的通知文案。
+pub fn line(it: &Value) -> String {
+    let days = it["days_left"].as_i64().unwrap_or(0);
+    let when = if days > 0 {
+        format!("{days} 天后到期")
+    } else if days == 0 {
+        "今天到期".to_string()
+    } else {
+        format!("已过期 {} 天", -days)
+    };
+    let name = it["name"].as_str().unwrap_or("");
+    let due = it["due"].as_str().unwrap_or("");
+    let mut extra = String::new();
+    if let (Some(p), Some(c)) = (it["price"].as_f64(), it["currency"].as_str()) {
+        extra.push_str(&format!("，{c} {p:.2}"));
+    }
+    if let Some(a) = it["action"].as_str() {
+        if !a.is_empty() {
+            extra.push_str(&format!("，保号：{a}"));
+        }
+    }
+    format!("{when}（{due}）：{name}{extra}")
+}
+
+struct Pending {
+    kind: String,
+    item_id: Option<i64>,
+    channel: &'static str,
+    threshold: Option<i64>,
+    covered: Vec<i64>,
+    due: String,
+    subject: String,
+    text: String,
+}
+
+fn already_sent(
+    conn: &Connection,
+    kind: &str,
+    item_id: i64,
+    due: &str,
+    threshold: i64,
+    channel: &str,
+) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM notification_log
+         WHERE kind=?1 AND item_id=?2 AND due_date=?3 AND threshold_days=?4 AND channel=?5 AND ok=1)",
+        params![kind, item_id, due, threshold, channel],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n == 1)
+    .unwrap_or(false)
+}
+
+fn digest_sent(conn: &Connection, today: &str, channel: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM notification_log
+         WHERE kind='digest' AND due_date=?1 AND channel=?2 AND ok=1)",
+        params![today, channel],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n == 1)
+    .unwrap_or(false)
+}
+
+/// 检查一轮：逐项阈值提醒（补发折叠为一条）+ 每日摘要。
+pub async fn tick(db: &Db) -> Result<()> {
+    let (pendings, tg, mail) = {
+        let conn = db.lock().unwrap();
+        let tg = telegram_cfg(&conn);
+        let mail = email_cfg(&conn);
+        if tg.is_none() && mail.is_none() {
+            return Ok(());
+        }
+        let thresholds: Vec<i64> = db::get_setting(&conn, "notify.thresholds")
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| vec![14, 7, 3, 1, 0]);
+        let window: i64 = db::get_setting(&conn, "notify.window_days")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(14);
+        let digest_time =
+            db::get_setting(&conn, "notify.digest_time").unwrap_or_else(|| "09:00".into());
+        let now_hhmm = chrono::Local::now().format("%H:%M").to_string();
+        let today = engine::today().to_string();
+        let ups = engine::upcoming(&conn)?;
+
+        let mut channels: Vec<&'static str> = Vec::new();
+        if tg.is_some() {
+            channels.push("telegram");
+        }
+        if mail.is_some() {
+            channels.push("email");
+        }
+
+        let mut pendings: Vec<Pending> = Vec::new();
+        for ch in &channels {
+            for it in &ups {
+                if it["muted"].as_bool().unwrap_or(false) {
+                    continue;
+                }
+                let days = it["days_left"].as_i64().unwrap_or(i64::MAX);
+                let due = it["due"].as_str().unwrap_or("").to_string();
+                let kind = it["kind"].as_str().unwrap_or("").to_string();
+                let id = it["id"].as_i64().unwrap_or(0);
+                let mut qualifying: Vec<i64> = thresholds
+                    .iter()
+                    .copied()
+                    .filter(|t| days <= *t)
+                    .filter(|t| !already_sent(&conn, &kind, id, &due, *t, ch))
+                    .collect();
+                if qualifying.is_empty() {
+                    continue;
+                }
+                qualifying.sort();
+                pendings.push(Pending {
+                    kind,
+                    item_id: Some(id),
+                    channel: ch,
+                    threshold: Some(qualifying[0]),
+                    covered: qualifying[1..].to_vec(),
+                    due,
+                    subject: format!("Kalends：{}", line(it)),
+                    text: format!("Kalends 提醒\n{}", line(it)),
+                });
+            }
+            if now_hhmm.as_str() >= digest_time.as_str() && !digest_sent(&conn, &today, ch) {
+                let due_items: Vec<&Value> = ups
+                    .iter()
+                    .filter(|i| i["days_left"].as_i64().unwrap_or(i64::MAX) <= window)
+                    .collect();
+                if !due_items.is_empty() {
+                    let body = due_items
+                        .iter()
+                        .map(|i| format!("· {}", line(i)))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    pendings.push(Pending {
+                        kind: "digest".into(),
+                        item_id: None,
+                        channel: ch,
+                        threshold: None,
+                        covered: Vec::new(),
+                        due: today.clone(),
+                        subject: format!("Kalends 摘要：{} 项即将到期", due_items.len()),
+                        text: format!("Kalends 摘要（{today}）\n{body}"),
+                    });
+                }
+            }
+        }
+        (pendings, tg, mail)
+    };
+
+    let mut results = Vec::new();
+    for p in pendings {
+        let res = match p.channel {
+            "telegram" => send_telegram(tg.as_ref().unwrap(), &p.text).await,
+            _ => send_email(mail.as_ref().unwrap(), &p.subject, &p.text).await,
+        };
+        results.push((p, res));
+    }
+
+    let conn = db.lock().unwrap();
+    for (p, res) in results {
+        let (ok, err) = match &res {
+            Ok(()) => (1i64, None),
+            Err(e) => (0i64, Some(format!("{e:#}"))),
+        };
+        if let Err(e) = &res {
+            tracing::warn!("notify {} failed: {e:#}", p.channel);
+        }
+        conn.execute(
+            "INSERT INTO notification_log(kind,item_id,channel,threshold_days,due_date,ok,error)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![p.kind, p.item_id, p.channel, p.threshold, p.due, ok, err],
+        )?;
+        if ok == 1 {
+            for t in p.covered {
+                conn.execute(
+                    "INSERT INTO notification_log(kind,item_id,channel,threshold_days,due_date,ok,error)
+                     VALUES(?1,?2,?3,?4,?5,1,'covered')",
+                    params![p.kind, p.item_id, p.channel, t, p.due],
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn scheduler(db: Db) {
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    loop {
+        if let Err(e) = tick(&db).await {
+            tracing::warn!("notify tick failed: {e:#}");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(900)).await;
+    }
+}

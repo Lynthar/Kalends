@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f3faf7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b1715" media="(prefers-color-scheme: dark)">
+<title>Kalends · 朔日台账</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="brand">
+    <span class="brand-moon" aria-hidden="true"></span>
+    <div class="brand-text">
+      <h1>Kalends</h1>
+      <span class="brand-sub">朔日台账</span>
+    </div>
+  </div>
+  <nav class="nav">
+    <button class="nav-tab on" data-page="renewals" type="button">续费中心</button>
+    <button class="nav-tab" data-page="media" type="button">媒体库</button>
+  </nav>
+  <button id="btn-settings" class="btn ghost" type="button">设置</button>
+</header>
+
+<main>
+<div id="page-renewals">
+  <section class="panel hero">
+    <div class="rubric-row">
+      <h2 class="rubric">即将到期</h2>
+      <span class="note" id="today-note"></span>
+    </div>
+    <ol id="up-list" class="ledger"></ol>
+    <p id="up-empty" class="empty" hidden>◌ 朔日无账，诸项安然</p>
+  </section>
+
+  <section class="panel">
+    <div class="rubric-row">
+      <h2 class="rubric">月度支出</h2>
+      <span class="note">仅在订项，分币种</span>
+    </div>
+    <div id="totals" class="totals"></div>
+  </section>
+
+  <section class="panel">
+    <div class="tabbar">
+      <div class="tabs">
+        <button class="tab on" data-tab="subs" type="button">订阅</button>
+        <button class="tab" data-tab="sims" type="button">SIM 卡</button>
+        <button class="tab" data-tab="vps" type="button">VPS</button>
+      </div>
+      <div class="tab-actions">
+        <div id="chips" class="chips"></div>
+        <button id="btn-add" class="btn primary" type="button">＋ 新增</button>
+      </div>
+    </div>
+    <div id="view-subs" class="tablewrap">
+      <table class="grid">
+        <thead><tr>
+          <th>名称</th><th>分类</th><th class="num">价格</th><th>周期</th>
+          <th>下次续费</th><th>支付方式</th><th>备注</th><th class="ops"></th>
+        </tr></thead>
+        <tbody id="subs-body"></tbody>
+      </table>
+      <p id="subs-empty" class="empty" hidden>此栏尚无记录</p>
+    </div>
+    <div id="view-sims" class="tablewrap" hidden>
+      <table class="grid">
+        <thead><tr>
+          <th>名称</th><th>形式</th><th>状态</th><th>上次续费</th>
+          <th class="wide">保号周期</th><th>保号动作</th><th class="ops"></th>
+        </tr></thead>
+        <tbody id="sims-body"></tbody>
+      </table>
+      <p id="sims-empty" class="empty" hidden>此栏尚无记录</p>
+    </div>
+    <div id="view-vps" class="tablewrap" hidden>
+      <table class="grid">
+        <thead><tr>
+          <th>商家 / 产品</th><th>地点</th><th>用途</th><th>规格</th><th>线路</th>
+          <th class="num">费用</th><th>上次续费</th><th class="wide">周期</th><th class="ops"></th>
+        </tr></thead>
+        <tbody id="vps-body"></tbody>
+      </table>
+      <p id="vps-empty" class="empty" hidden>此栏尚无记录</p>
+    </div>
+  </section>
+</div>
+
+<div id="page-media" hidden>
+  <section class="panel">
+    <div class="tabbar">
+      <div id="m-kind-chips" class="chips"></div>
+      <div class="tab-actions">
+        <input id="m-search" class="searchbox" placeholder="搜标题 / 短评 / 导演 / 主演">
+        <select id="m-sort" class="mini-select">
+          <option value="marked">标记日期</option>
+          <option value="year">年份</option>
+          <option value="rating">我的评分</option>
+          <option value="douban">豆瓣评分</option>
+        </select>
+        <button id="m-view-toggle" class="btn ghost" type="button">表格</button>
+        <button id="m-add" class="btn primary" type="button">＋ 新增</button>
+      </div>
+    </div>
+    <div id="m-status-row" class="chips" style="margin-bottom:.6rem"></div>
+    <div id="m-wall" class="wall"></div>
+    <div id="m-tablewrap" class="tablewrap" hidden>
+      <table class="grid">
+        <thead><tr>
+          <th>标题</th><th>类别</th><th>年份</th><th>我评</th><th class="num">豆瓣</th>
+          <th>状态</th><th>标记日期</th><th class="ops"></th>
+        </tr></thead>
+        <tbody id="m-body"></tbody>
+      </table>
+    </div>
+    <p id="m-empty" class="empty" hidden>◌ 空架待书</p>
+  </section>
+</div>
+</main>
+
+<footer class="colophon">KALENDAE · 罗马历朔日，收账之日</footer>
+
+<dialog id="dlg-sub">
+  <form id="form-sub" method="dialog">
+    <h3 id="dlg-sub-title">新增订阅</h3>
+    <div class="fgrid">
+      <label class="span2">名称 *<input name="name" required></label>
+      <label>状态
+        <select name="status">
+          <option value="Active">Active · 在订</option>
+          <option value="Planned">Planned · 计划</option>
+          <option value="Deferred">Deferred · 备选</option>
+          <option value="Ended">Ended · 已停</option>
+        </select>
+      </label>
+      <label>分类<input name="category" list="dl-cat"></label>
+      <label>价格<input name="price" type="number" step="0.01" min="0"></label>
+      <label>币种<input name="currency" list="dl-cur" placeholder="CNY / USD / …"></label>
+      <label>周期
+        <select name="cycle">
+          <option value="">—</option>
+          <option value="monthly">月付</option>
+          <option value="annual">年付</option>
+          <option value="biennial">两年付</option>
+          <option value="triennial">三年付</option>
+          <option value="quarterly">季付</option>
+          <option value="semiannual">半年付</option>
+          <option value="weekly">周付</option>
+          <option value="days">按天数</option>
+          <option value="lifetime">买断</option>
+        </select>
+      </label>
+      <label id="row-cycle-days" hidden>周期天数<input name="cycle_days" type="number" min="1"></label>
+      <label>下次续费<input name="next_renewal" type="date"></label>
+      <label>上级（档位所属服务）<select name="parent_id"><option value="">—</option></select></label>
+      <label>支付方式<input name="payment_method"></label>
+      <label>注册账号<input name="account"></label>
+      <label class="span2">链接<input name="url" type="url" placeholder="https://"></label>
+      <label class="span2">备注<textarea name="notes" rows="3"></textarea></label>
+    </div>
+    <div class="dlg-foot">
+      <button type="button" class="btn ghost" data-close>取消</button>
+      <button type="submit" class="btn primary">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-sim">
+  <form id="form-sim" method="dialog">
+    <h3 id="dlg-sim-title">新增 SIM 卡</h3>
+    <div class="fgrid">
+      <label class="span2">名称（运营商与国家）*<input name="name" required placeholder="🇬🇧 运营商名"></label>
+      <label>号码<input name="phone_number"></label>
+      <label>状态
+        <select name="status">
+          <option>启用</option><option>准备</option><option>未启用</option><option>已结束</option>
+        </select>
+      </label>
+      <fieldset class="span2 formset">
+        <legend>形式</legend>
+        <label class="check"><input type="checkbox" name="forms" value="SIM">SIM</label>
+        <label class="check"><input type="checkbox" name="forms" value="eSIM">eSIM</label>
+        <label class="check"><input type="checkbox" name="forms" value="VOIP">VOIP</label>
+      </fieldset>
+      <label>保号周期（天）<input name="cycle_days" type="number" min="1" placeholder="181"></label>
+      <label>上次续费<input name="last_renewed" type="date"></label>
+      <label class="span2">保号动作<input name="keepalive_action" placeholder="如：每 90 天充值一次保号"></label>
+      <label class="span2">备注<textarea name="notes" rows="3"></textarea></label>
+    </div>
+    <div class="dlg-foot">
+      <button type="button" class="btn ghost" data-close>取消</button>
+      <button type="submit" class="btn primary">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-media">
+  <form id="form-media" method="dialog">
+    <h3 id="dlg-media-title">新增条目</h3>
+    <div id="m-tmdb-box">
+      <div class="ics-row">
+        <input id="m-tmdb-q" placeholder="输入片名，从 TMDB 拉取元数据与海报…">
+        <button type="button" class="btn ghost" id="m-tmdb-go">搜索</button>
+      </div>
+      <div id="m-tmdb-results"></div>
+      <p class="note">或直接手填下方字段（游戏暂为手填，之后接 IGDB/Steam）。</p>
+    </div>
+    <div class="fgrid">
+      <label>类别
+        <select name="kind">
+          <option>电影</option><option>剧集</option><option>动画</option><option>游戏</option>
+        </select>
+      </label>
+      <label>状态
+        <select name="status">
+          <option>想看</option><option>在看</option><option>看过</option><option>弃</option>
+        </select>
+      </label>
+      <label class="span2">标题 *<input name="title" required></label>
+      <label class="span2">又名 / 原文名<input name="orig_title"></label>
+      <label>年份<input name="year" type="number" min="1870" max="2100"></label>
+      <label>我的评分
+        <span class="stars" id="m-stars">
+          <button type="button" data-v="1">★</button><button type="button" data-v="2">★</button><button type="button" data-v="3">★</button><button type="button" data-v="4">★</button><button type="button" data-v="5">★</button>
+          <button type="button" class="star-clear" data-v="">清除</button>
+        </span>
+        <input type="hidden" name="rating">
+      </label>
+      <label>标记日期<input name="marked_at" type="date"></label>
+      <label>开始日期<input name="started_at" type="date"></label>
+      <label class="span2">我的短评<textarea name="review" rows="2"></textarea></label>
+    </div>
+    <details class="fold">
+      <summary>详情字段（类型 / 主创 / 片长…）</summary>
+      <div class="fgrid">
+        <label class="span2">类型（" / " 分隔）<input name="genres"></label>
+        <label>导演<input name="directors"></label>
+        <label>编剧<input name="writers"></label>
+        <label class="span2">主演<input name="actors"></label>
+        <label>制片国家/地区<input name="countries"></label>
+        <label>语言<input name="languages"></label>
+        <label>片长<input name="runtime"></label>
+        <label>上映/首播日期<input name="release_date"></label>
+      </div>
+    </details>
+    <details class="fold">
+      <summary>豆瓣 / 外部编号</summary>
+      <div class="fgrid">
+        <label>豆瓣链接<input name="douban_url"></label>
+        <label>豆瓣编号<input name="douban_id"></label>
+        <label>豆瓣评分<input name="douban_rating" type="number" step="0.1" min="0" max="10"></label>
+        <label>评分人数<input name="douban_votes" type="number" min="0"></label>
+        <label>IMDB 编号<input name="imdb_id"></label>
+        <label>TMDB 编号<input name="tmdb_id" type="number"></label>
+      </div>
+    </details>
+    <details class="fold" id="m-game-fold">
+      <summary>游戏字段</summary>
+      <div class="fgrid">
+        <label>平台<input name="platform" placeholder="Steam / Switch / PS5…"></label>
+        <label>游玩时长（小时）<input name="playtime_hours" type="number" step="0.5" min="0"></label>
+        <label>Steam AppID<input name="steam_appid" type="number"></label>
+      </div>
+    </details>
+    <details class="fold">
+      <summary>备注 / 他人短评快照</summary>
+      <div class="fgrid">
+        <label class="span2">备注<textarea name="notes" rows="2"></textarea></label>
+        <label class="span2">短评们<textarea name="others_reviews" rows="3"></textarea></label>
+      </div>
+    </details>
+    <div class="dlg-foot">
+      <button type="button" class="btn ghost" data-close>取消</button>
+      <button type="submit" class="btn primary">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-vps">
+  <form id="form-vps" method="dialog">
+    <h3 id="dlg-vps-title">新增 VPS</h3>
+    <div class="fgrid">
+      <label>商家 *<input name="vendor" required></label>
+      <label>产品 / 套餐<input name="product"></label>
+      <label>状态
+        <select name="status">
+          <option>启用</option><option>准备</option><option>预结束</option>
+          <option>未启用</option><option>已结束</option>
+        </select>
+      </label>
+      <label>用途<input name="purpose" list="dl-purpose"></label>
+      <label>地点（逗号分隔）<input name="locations" placeholder="东京（TYO）"></label>
+      <label>线路（逗号分隔）<input name="routes" placeholder="CN2 GIA, 9929"></label>
+      <label>CPU 核数<input name="cores" type="number" step="1" min="0"></label>
+      <label>内存（GB）<input name="ram_gb" type="number" step="0.5" min="0"></label>
+      <label>存储（GB）<input name="storage_gb" type="number" step="1" min="0"></label>
+      <label>存储类型
+        <select name="storage_type"><option value=""></option><option>SSD</option><option>HDD</option></select>
+      </label>
+      <label class="span2">附加存储<input name="extra_storage"></label>
+      <label>带宽（Gbps）<input name="port_gbps" type="number" step="0.1" min="0"></label>
+      <label>流量（TB/月）<input name="traffic_tb" type="number" step="0.1" min="0"></label>
+      <label class="check span2"><input type="checkbox" name="ipv6">IPv6</label>
+      <label>费用<input name="price" type="number" step="0.01" min="0"></label>
+      <label>币种<input name="currency" list="dl-cur" placeholder="USD / CNY / …"></label>
+      <label>付费周期
+        <select name="cycle">
+          <option value="">—</option>
+          <option value="monthly">月付</option>
+          <option value="quarterly">季付</option>
+          <option value="semiannual">半年付</option>
+          <option value="annual">年付</option>
+          <option value="biennial">两年付</option>
+          <option value="triennial">三年付</option>
+          <option value="weekly">周付</option>
+          <option value="days">按天数</option>
+          <option value="lifetime">买断</option>
+        </select>
+      </label>
+      <label id="vps-cycle-days" hidden>周期天数<input name="cycle_days" type="number" min="1"></label>
+      <label>上次续费<input name="last_renewed" type="date"></label>
+      <label class="span2">面板 / 商家链接<input name="url" type="url" placeholder="https://"></label>
+      <label>注册账号<input name="account"></label>
+      <label class="span2">备注<textarea name="notes" rows="2"></textarea></label>
+    </div>
+    <div class="dlg-foot">
+      <button type="button" class="btn ghost" data-close>取消</button>
+      <button type="submit" class="btn primary">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-settings">
+  <form id="form-settings" method="dialog">
+    <h3>设置</h3>
+    <div id="settings-renewals">
+    <div class="fgrid">
+      <label>提醒阈值（提前天数）<input name="thresholds" placeholder="14,7,3,1,0"></label>
+      <label>摘要发送时间<input name="digest_time" type="time"></label>
+      <label>摘要窗口（天）<input name="window_days" type="number" min="1"></label>
+    </div>
+    <fieldset class="chanset">
+      <legend><label class="check"><input type="checkbox" name="tg_enabled">Telegram</label></legend>
+      <div class="fgrid">
+        <label class="span2">Bot Token<input name="tg_token" autocomplete="off"></label>
+        <label>Chat ID<input name="tg_chat"></label>
+        <label>代理（可选）<input name="tg_proxy" placeholder="socks5://127.0.0.1:1080"></label>
+      </div>
+      <button type="button" class="btn ghost" data-test="telegram">发送测试</button>
+    </fieldset>
+    <fieldset class="chanset">
+      <legend><label class="check"><input type="checkbox" name="em_enabled">邮件（SMTP）</label></legend>
+      <div class="fgrid">
+        <label>服务器<input name="em_host" placeholder="smtp.example.com"></label>
+        <label>端口<input name="em_port" type="number" placeholder="465"></label>
+        <label class="check span2"><input type="checkbox" name="em_starttls">STARTTLS（587 端口时勾选）</label>
+        <label>用户名<input name="em_user" autocomplete="off"></label>
+        <label>密码<input name="em_pass" type="password" autocomplete="off"></label>
+        <label>发件人<input name="em_from" placeholder="Kalends <k@example.com>"></label>
+        <label>收件人<input name="em_to"></label>
+      </div>
+      <button type="button" class="btn ghost" data-test="email">发送测试</button>
+    </fieldset>
+    <fieldset class="chanset">
+      <legend>日历订阅（ICS）</legend>
+      <div class="ics-row">
+        <input id="ics-url" readonly>
+        <button type="button" class="btn ghost" id="btn-copy-ics">复制</button>
+      </div>
+      <p class="note">在手机/电脑日历中「订阅日历」粘贴此地址，续费与保号事件自动同步。</p>
+    </fieldset>
+    </div>
+    <div id="settings-media">
+    <fieldset class="chanset">
+      <legend>元数据抓取</legend>
+      <div class="fgrid">
+        <label class="span2">TMDB API Key（v3 短 key 或 v4 令牌，themoviedb.org 免费申请）<input name="tmdb_key" autocomplete="off"></label>
+        <label class="span2">元数据代理（可选，TMDB 被墙时用）<input name="meta_proxy" placeholder="socks5://127.0.0.1:1080"></label>
+      </div>
+    </fieldset>
+    </div>
+    <fieldset class="chanset">
+      <legend>安全与数据</legend>
+      <div class="fgrid">
+        <label>访问 PIN（留空不启用；限字母数字）<input name="pin" autocomplete="off"></label>
+      </div>
+      <button type="button" class="btn ghost" id="btn-backup">立即备份</button>
+      <p class="note">每日 03:30 自动快照（保留 14 份）并导出 JSONL 明文到数据目录，重启会补跑当日份。</p>
+    </fieldset>
+    <div class="dlg-foot">
+      <button type="button" class="btn ghost" data-close>取消</button>
+      <button type="submit" class="btn primary">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<datalist id="dl-purpose">
+  <option>代理入口</option><option>代理出口</option><option>建站</option><option>任务</option>
+</datalist>
+<datalist id="dl-cat">
+  <option>NetInfra</option><option>CloudSvc</option><option>DevTools</option><option>AI</option>
+  <option>Social</option><option>Life</option><option>Music</option><option>Streaming</option>
+  <option>Game</option><option>News</option><option>EDU</option><option>VPN</option>
+</datalist>
+<datalist id="dl-cur">
+  <option>CNY</option><option>USD</option><option>EUR</option><option>GBP</option>
+  <option>JPY</option><option>HKD</option><option>SGD</option><option>TWD</option>
+</datalist>
+
+<div id="toast" hidden></div>
+<script src="/config.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
