@@ -56,155 +56,162 @@ pub fn cycle_label(cycle: &str, cycle_days: Option<i64>) -> String {
     }
 }
 
-/// 合并到期时间线：订阅(Active) + SIM(Active)，按到期日升序。
+/// 状态的三层语义：计不计支出 / 发不发提醒 / 上不上到期时间线。
+/// 以前这三件事散在各表的 SQL 字面量里（`status='Active'`、`IN ('Active','Ending')`），
+/// 现在集中于此；后续可由库自己的状态词表覆写，默认值就是内置六值的既有含义。
+#[derive(Clone, Copy)]
+pub struct StatusSem {
+    pub spend: bool,
+    pub alert: bool,
+    pub timeline: bool,
+}
+
+pub fn status_sem(status: &str) -> StatusSem {
+    let (spend, alert, timeline) = match status {
+        "Active" => (true, true, true),
+        // 到期不续：时间线与日历仍可见，但不提醒、不计支出
+        "Ending" => (false, false, true),
+        // Planned 计划中 / Deferred 比价目录 / Unused 未启用 / Ended 已结束
+        _ => (false, false, false),
+    };
+    StatusSem {
+        spend,
+        alert,
+        timeline,
+    }
+}
+
+/// 一个条目在到期时间线上的样子；跨库统一，engine 之外只认这个形状。
+struct Row {
+    key: String,
+    verb: String,
+    note_field: Option<String>,
+    subtitle: Option<String>,
+    id: i64,
+    name: String,
+    status: String,
+    price: Option<f64>,
+    currency: Option<String>,
+    cycle: Option<String>,
+    cycle_days: Option<i64>,
+    next_renewal: Option<String>,
+    last_renewed: Option<String>,
+    due_anchor: String,
+    extra: Value,
+}
+
+impl Row {
+    /// 到期日：库按 due_anchor 决定是直接读下次续费日，还是从上次续费按周期推。
+    fn due(&self) -> Option<NaiveDate> {
+        let cycle = self.cycle.as_deref().unwrap_or("");
+        if cycle == "lifetime" {
+            return None;
+        }
+        if self.due_anchor == "next" {
+            return NaiveDate::parse_from_str(self.next_renewal.as_deref()?, "%Y-%m-%d").ok();
+        }
+        let last = NaiveDate::parse_from_str(self.last_renewed.as_deref()?, "%Y-%m-%d").ok()?;
+        advance(last, cycle, self.cycle_days)
+    }
+
+    /// 显示名：库配了副标题字段且该条目有值时拼上（VPS 的"商家 · 产品"）。
+    fn title(&self) -> String {
+        let sub = self
+            .subtitle
+            .as_deref()
+            .and_then(|k| self.extra.get(k))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        match sub {
+            Some(s) => format!("{} · {}", self.name, s),
+            None => self.name.clone(),
+        }
+    }
+}
+
+fn rows(conn: &Connection) -> Result<Vec<Row>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.key, c.verb, c.note_field, c.subtitle, c.due_anchor,
+                i.id, i.name, i.status, i.price, i.currency, i.cycle, i.cycle_days,
+                i.next_renewal, i.last_renewed, i.extra
+         FROM items i JOIN collections c ON c.id = i.collection_id
+         ORDER BY c.pos, i.id",
+    )?;
+    let out = stmt
+        .query_map([], |r| {
+            let extra: Option<String> = r.get(14)?;
+            Ok(Row {
+                key: r.get(0)?,
+                verb: r.get::<_, Option<String>>(1)?.unwrap_or_else(|| "续费".into()),
+                note_field: r.get(2)?,
+                subtitle: r.get(3)?,
+                due_anchor: r.get(4)?,
+                id: r.get(5)?,
+                name: r.get(6)?,
+                status: r.get(7)?,
+                price: r.get(8)?,
+                currency: r.get(9)?,
+                cycle: r.get(10)?,
+                cycle_days: r.get(11)?,
+                next_renewal: r.get(12)?,
+                last_renewed: r.get(13)?,
+                extra: crate::api::extra_json(extra),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(out)
+}
+
+/// 合并到期时间线：所有库里状态语义为"上时间线"的条目，按到期日升序。
 pub fn upcoming(conn: &Connection) -> Result<Vec<Value>> {
     let t = today();
     let mut items: Vec<(NaiveDate, Value)> = Vec::new();
-
-    let mut stmt = conn.prepare(
-        "SELECT id,name,price,currency,cycle,cycle_days,next_renewal FROM subscriptions
-         WHERE status='Active' AND next_renewal IS NOT NULL AND ifnull(cycle,'')!='lifetime'",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, Option<f64>>(2)?,
-            r.get::<_, Option<String>>(3)?,
-            r.get::<_, Option<String>>(4)?,
-            r.get::<_, Option<i64>>(5)?,
-            r.get::<_, String>(6)?,
-        ))
-    })?;
-    for row in rows {
-        let (id, name, price, currency, cycle, cycle_days, next) = row?;
-        if let Ok(due) = NaiveDate::parse_from_str(&next, "%Y-%m-%d") {
-            items.push((
-                due,
-                json!({
-                    "kind": "subscription",
-                    "id": id,
-                    "name": name,
-                    "due": next,
-                    "days_left": (due - t).num_days(),
-                    "price": price,
-                    "currency": currency,
-                    "cycle": cycle_label(cycle.as_deref().unwrap_or(""), cycle_days),
-                }),
-            ));
+    for r in rows(conn)? {
+        let sem = status_sem(&r.status);
+        if !sem.timeline {
+            continue;
         }
-    }
-
-    let mut stmt = conn.prepare(
-        "SELECT id,name,keepalive_action,cycle_days,last_renewed FROM sim_cards
-         WHERE status='Active' AND last_renewed IS NOT NULL AND ifnull(cycle_days,0)>0",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, Option<String>>(2)?,
-            r.get::<_, i64>(3)?,
-            r.get::<_, String>(4)?,
-        ))
-    })?;
-    for row in rows {
-        let (id, name, action, cycle_days, last) = row?;
-        let Ok(last) = NaiveDate::parse_from_str(&last, "%Y-%m-%d") else {
-            continue;
-        };
-        let Some(due) = last.checked_add_days(Days::new(cycle_days as u64)) else {
-            continue;
-        };
+        let Some(due) = r.due() else { continue };
+        let note = r
+            .note_field
+            .as_deref()
+            .and_then(|k| r.extra.get(k))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
         items.push((
             due,
             json!({
-                "kind": "sim",
-                "id": id,
-                "name": name,
+                "kind": r.key,
+                "id": r.id,
+                "name": r.title(),
+                "verb": r.verb,
                 "due": due.to_string(),
                 "days_left": (due - t).num_days(),
-                "action": action,
-                "cycle": format!("每 {cycle_days} 天"),
+                "price": r.price,
+                "currency": r.currency,
+                "cycle": cycle_label(r.cycle.as_deref().unwrap_or(""), r.cycle_days),
+                "action": note,
+                // 不提醒但仍显示的状态（Ending）在前端与通知里都要能识别
+                "muted": !sem.alert,
             }),
         ));
     }
-
-    let mut stmt = conn.prepare(
-        "SELECT id,vendor,product,price,currency,cycle,cycle_days,last_renewed,status FROM vps_instances
-         WHERE status IN ('Active','Ending') AND last_renewed IS NOT NULL",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, Option<String>>(2)?,
-            r.get::<_, Option<f64>>(3)?,
-            r.get::<_, Option<String>>(4)?,
-            r.get::<_, Option<String>>(5)?,
-            r.get::<_, Option<i64>>(6)?,
-            r.get::<_, String>(7)?,
-            r.get::<_, String>(8)?,
-        ))
-    })?;
-    for row in rows {
-        let (id, vendor, product, price, currency, cycle, cycle_days, last, status) = row?;
-        let Ok(last) = NaiveDate::parse_from_str(&last, "%Y-%m-%d") else {
-            continue;
-        };
-        let cy = cycle.as_deref().unwrap_or("");
-        let Some(due) = advance(last, cy, cycle_days) else {
-            continue;
-        };
-        let name = match product.filter(|p| !p.is_empty()) {
-            Some(p) => format!("{vendor} · {p}"),
-            None => vendor,
-        };
-        items.push((
-            due,
-            json!({
-                "kind": "vps",
-                "id": id,
-                "name": name,
-                "due": due.to_string(),
-                "days_left": (due - t).num_days(),
-                "price": price,
-                "currency": currency,
-                "cycle": cycle_label(cy, cycle_days),
-                // Ending（预结束）= 到期不续：时间线/日历可见，但不发提醒
-                "muted": status == "Ending",
-            }),
-        ));
-    }
-
     items.sort_by_key(|(d, _)| *d);
     Ok(items.into_iter().map(|(_, v)| v).collect())
 }
 
-/// 分币种月/年支出（仅 Active 且可折算的订阅）。
+/// 分币种月/年支出：状态语义为"计支出"且周期可折算的条目。
 pub fn totals(conn: &Connection) -> Result<Vec<Value>> {
     let mut map: BTreeMap<String, f64> = BTreeMap::new();
-    let sources = [
-        "SELECT price,currency,cycle,cycle_days FROM subscriptions
-         WHERE status='Active' AND price IS NOT NULL AND currency IS NOT NULL",
-        "SELECT price,currency,cycle,cycle_days FROM vps_instances
-         WHERE status='Active' AND price IS NOT NULL AND currency IS NOT NULL",
-    ];
-    for sql in sources {
-        let mut stmt = conn.prepare(sql)?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, f64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, Option<i64>>(3)?,
-            ))
-        })?;
-        for row in rows {
-            let (price, currency, cycle, cycle_days) = row?;
-            if let Some(f) = monthly_factor(cycle.as_deref().unwrap_or(""), cycle_days) {
-                *map.entry(currency).or_insert(0.0) += price * f;
-            }
+    for r in rows(conn)? {
+        if !status_sem(&r.status).spend {
+            continue;
+        }
+        let (Some(price), Some(currency)) = (r.price, r.currency.clone()) else {
+            continue;
+        };
+        if let Some(f) = monthly_factor(r.cycle.as_deref().unwrap_or(""), r.cycle_days) {
+            *map.entry(currency).or_insert(0.0) += price * f;
         }
     }
     Ok(map

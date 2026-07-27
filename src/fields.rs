@@ -15,22 +15,31 @@ use crate::App;
 
 const FTYPES: &[&str] = &["text", "num", "sel", "multi", "date", "star"];
 
-// (前端表名, SQL 表名)
-const TBLS: &[(&str, &str)] = &[
-    ("subs", "subscriptions"),
-    ("sims", "sim_cards"),
-    ("vps", "vps_instances"),
-    ("media", "media_items"),
-];
+/// 字段所属的数据源：库（值在 items.extra，按 collection_id 圈定）或独立表（媒体库）。
+enum Owner {
+    Collection(i64),
+    Table(&'static str),
+}
 
-// 内置列里允许编辑选项的自由词表列：(tbl, key, SQL 列名, 值是否 JSON 数组)
-const BUILTIN_OPT: &[(&str, &str, &str, bool)] = &[
-    ("subs", "category", "category", false),
-    ("subs", "payment_method", "payment_method", false),
-    ("vps", "purpose", "purpose", false),
-    ("vps", "locations", "locations", true),
-    ("vps", "routes", "routes", true),
-    ("sims", "forms", "forms", true),
+/// tbl 既可能是库键，也可能是 'media' 这种独立表；库表已泛化，不再有按表名写死的映射。
+fn owner(conn: &Connection, tbl: &str) -> anyhow::Result<Owner> {
+    if tbl == "media" {
+        return Ok(Owner::Table("media_items"));
+    }
+    conn.query_row("SELECT id FROM collections WHERE key=?1", [tbl], |r| r.get(0))
+        .map(Owner::Collection)
+        .map_err(|_| anyhow!("未知表：{tbl}"))
+}
+
+// 预置库里允许编辑选项的自由词表字段。泛化后它们的值都在 extra 里，
+// 不再需要区分 SQL 列还是 JSON 数组列——swap_extra_value 按实际值形态处理。
+const BUILTIN_OPT: &[(&str, &str, &str)] = &[
+    ("subs", "category", "sel"),
+    ("subs", "payment_method", "sel"),
+    ("vps", "purpose", "sel"),
+    ("vps", "locations", "multi"),
+    ("vps", "routes", "multi"),
+    ("sims", "forms", "multi"),
 ];
 
 pub fn router() -> Router<App> {
@@ -42,11 +51,12 @@ pub fn router() -> Router<App> {
         .route("/api/fields/{id}", put(update).delete(delete_field))
 }
 
-fn sql_table(tbl: &str) -> anyhow::Result<&'static str> {
-    TBLS.iter()
-        .find(|(t, _)| *t == tbl)
-        .map(|(_, sql)| *sql)
-        .ok_or_else(|| anyhow!("未知表：{tbl}"))
+/// 逐行改写时的定位条件：库按 collection_id 圈定，独立表全表。
+fn scope(conn: &Connection, tbl: &str) -> anyhow::Result<(&'static str, String)> {
+    Ok(match owner(conn, tbl)? {
+        Owner::Collection(id) => ("items", format!("collection_id={id}")),
+        Owner::Table(t) => (t, "1".into()),
+    })
 }
 
 // 选项存对象数组 [{v, c?}]：v=值，c=标签调色板号 0..9（缺省=前端按值哈希定色）。
@@ -98,13 +108,13 @@ async fn list(State(app): State<App>) -> R {
 // 新建自定义列：key 用 c<id>，值挂在实体行 extra JSON 里
 async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
     let tbl = s(&b, "tbl").ok_or_else(|| anyhow!("缺少 tbl"))?;
-    sql_table(&tbl)?;
     let name = s(&b, "name").ok_or_else(|| anyhow!("列名不能为空"))?;
     let ftype = s(&b, "ftype").unwrap_or_else(|| "text".into());
     if !FTYPES.contains(&ftype.as_str()) {
         return Err(anyhow!("未知类型：{ftype}").into());
     }
     let conn = app.db.lock().unwrap();
+    owner(&conn, &tbl)?;
     let pos: i64 = conn.query_row(
         "SELECT coalesce(max(pos),0)+1 FROM fields WHERE tbl=?1",
         [&tbl],
@@ -151,23 +161,33 @@ async fn delete_field(State(app): State<App>, Path(id): Path<i64>) -> R {
     let Some((tbl, key)) = row else {
         return Err(anyhow!("列不存在或不可删除").into());
     };
-    let table = sql_table(&tbl)?;
-    rewrite_extra(&conn, table, |obj| obj.remove(&key).is_some())?;
+    let (table, cond) = scope(&conn, &tbl)?;
+    let t = Target { table, cond, key: key.clone(), seed_ftype: None };
+    rewrite_extra(&conn, &t, |obj| obj.remove(&key).is_some())?;
     conn.execute("DELETE FROM fields WHERE id=?1", [id])?;
     Ok(Json(json!({ "ok": true })))
 }
 
-// 定位一个可管理选项的字段：内置白名单列，或本表的自定义 sel/multi 列
-enum Target {
-    Col(&'static str, &'static str),      // 单值 SQL 列
-    ArrCol(&'static str, &'static str),   // JSON 数组 SQL 列
-    Extra(&'static str, String),          // 自定义列：extra[key]
+// 一个可管理选项的字段：预置库的自由词表字段，或本库/本表的自定义 sel/multi 字段。
+// 泛化后两者的值都在 extra 里，所以定位结果只需要"改哪张表的哪些行、哪个键"。
+struct Target {
+    table: &'static str,
+    cond: String,
+    key: String,
+    /// 预置词表字段首次编辑选项时要补一行 fields 记录，这里给它的类型
+    seed_ftype: Option<&'static str>,
 }
 
 fn resolve(conn: &Connection, tbl: &str, key: &str) -> anyhow::Result<Target> {
-    if let Some((_, _, col, arr)) = BUILTIN_OPT.iter().find(|(t, k, _, _)| *t == tbl && *k == key) {
-        let table = sql_table(tbl)?;
-        return Ok(if *arr { Target::ArrCol(table, col) } else { Target::Col(table, col) });
+    let (table, cond) = scope(conn, tbl)?;
+    let mk = |seed_ftype| Target {
+        table,
+        cond: cond.clone(),
+        key: key.to_string(),
+        seed_ftype,
+    };
+    if let Some((_, _, ft)) = BUILTIN_OPT.iter().find(|(t, k, _)| *t == tbl && *k == key) {
+        return Ok(mk(Some(ft)));
     }
     let custom: Option<String> = conn
         .query_row(
@@ -177,7 +197,7 @@ fn resolve(conn: &Connection, tbl: &str, key: &str) -> anyhow::Result<Target> {
         )
         .ok();
     match custom.as_deref() {
-        Some("sel") | Some("multi") => Ok(Target::Extra(sql_table(tbl)?, key.to_string())),
+        Some("sel") | Some("multi") => Ok(mk(None)),
         Some(_) => Err(anyhow!("该列类型没有选项")),
         None => Err(anyhow!("该列不支持编辑选项")),
     }
@@ -189,24 +209,18 @@ async fn set_options(State(app): State<App>, Json(b): Json<Value>) -> R {
     let key = s(&b, "key").ok_or_else(|| anyhow!("缺少 key"))?;
     let conn = app.db.lock().unwrap();
     let target = resolve(&conn, &tbl, &key)?;
-    let ftype = match target {
-        Target::Col(..) => "sel",
-        Target::ArrCol(..) => "multi",
-        Target::Extra(..) => "",
-    };
     let opts = serde_json::to_string(&opts_array(&b))?;
-    if ftype.is_empty() {
-        conn.execute(
-            "UPDATE fields SET options=?1 WHERE tbl=?2 AND key=?3",
-            params![opts, tbl, key],
-        )?;
-    } else {
-        conn.execute(
+    match target.seed_ftype {
+        Some(ftype) => conn.execute(
             "INSERT INTO fields(tbl,key,ftype,options,builtin) VALUES(?1,?2,?3,?4,1)
              ON CONFLICT(tbl,key) DO UPDATE SET options=excluded.options",
             params![tbl, key, ftype, opts],
-        )?;
-    }
+        )?,
+        None => conn.execute(
+            "UPDATE fields SET options=?1 WHERE tbl=?2 AND key=?3",
+            params![opts, tbl, key],
+        )?,
+    };
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -220,18 +234,11 @@ async fn rename_option(State(app): State<App>, Json(b): Json<Value>) -> R {
         return Ok(Json(json!({ "ok": true })));
     }
     let conn = app.db.lock().unwrap();
-    let target = resolve(&conn, &tbl, &key)?;
+    let t = resolve(&conn, &tbl, &key)?;
     swap_option_in_list(&conn, &tbl, &key, &from, Some(&to))?;
-    match target {
-        Target::Col(table, col) => {
-            conn.execute(
-                &format!("UPDATE {table} SET {col}=?1,updated_at=datetime('now') WHERE {col}=?2"),
-                params![to, from],
-            )?;
-        }
-        Target::ArrCol(table, col) => rewrite_arr_col(&conn, table, col, &from, Some(&to))?,
-        Target::Extra(table, k) => rewrite_extra(&conn, table, |obj| swap_extra_value(obj, &k, &from, Some(&to)))?,
-    }
+    rewrite_extra(&conn, &t, |obj| {
+        swap_extra_value(obj, &t.key, &from, Some(&to))
+    })?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -241,18 +248,9 @@ async fn remove_option(State(app): State<App>, Json(b): Json<Value>) -> R {
     let key = s(&b, "key").ok_or_else(|| anyhow!("缺少 key"))?;
     let value = s(&b, "value").ok_or_else(|| anyhow!("缺少 value"))?;
     let conn = app.db.lock().unwrap();
-    let target = resolve(&conn, &tbl, &key)?;
+    let t = resolve(&conn, &tbl, &key)?;
     swap_option_in_list(&conn, &tbl, &key, &value, None)?;
-    match target {
-        Target::Col(table, col) => {
-            conn.execute(
-                &format!("UPDATE {table} SET {col}=NULL,updated_at=datetime('now') WHERE {col}=?1"),
-                params![value],
-            )?;
-        }
-        Target::ArrCol(table, col) => rewrite_arr_col(&conn, table, col, &value, None)?,
-        Target::Extra(table, k) => rewrite_extra(&conn, table, |obj| swap_extra_value(obj, &k, &value, None))?,
-    }
+    rewrite_extra(&conn, &t, |obj| swap_extra_value(obj, &t.key, &value, None))?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -285,26 +283,6 @@ fn swap_option_in_list(conn: &Connection, tbl: &str, key: &str, from: &str, to: 
         "UPDATE fields SET options=?1 WHERE tbl=?2 AND key=?3",
         params![serde_json::to_string(&opts)?, tbl, key],
     )?;
-    Ok(())
-}
-
-// JSON 数组列逐行改写（表都很小，读改写最直白）
-fn rewrite_arr_col(conn: &Connection, table: &str, col: &str, from: &str, to: Option<&str>) -> anyhow::Result<()> {
-    let mut stmt = conn.prepare(&format!("SELECT id,{col} FROM {table} WHERE {col} IS NOT NULL"))?;
-    let rows: Vec<(i64, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    for (id, text) in rows {
-        let Ok(mut arr) = serde_json::from_str::<Vec<String>>(&text) else { continue };
-        if !arr.iter().any(|x| x == from) {
-            continue;
-        }
-        swap_in_vec(&mut arr, from, to);
-        conn.execute(
-            &format!("UPDATE {table} SET {col}=?1,updated_at=datetime('now') WHERE id=?2"),
-            params![serde_json::to_string(&arr)?, id],
-        )?;
-    }
     Ok(())
 }
 
@@ -343,10 +321,12 @@ fn swap_extra_value(obj: &mut serde_json::Map<String, Value>, key: &str, from: &
 // 逐行改写 extra JSON；f 返回是否有改动
 fn rewrite_extra(
     conn: &Connection,
-    table: &str,
+    t: &Target,
     mut f: impl FnMut(&mut serde_json::Map<String, Value>) -> bool,
 ) -> anyhow::Result<()> {
-    let mut stmt = conn.prepare(&format!("SELECT id,extra FROM {table} WHERE extra IS NOT NULL"))?;
+    let (table, cond) = (t.table, &t.cond);
+    let mut stmt =
+        conn.prepare(&format!("SELECT id,extra FROM {table} WHERE {cond} AND extra IS NOT NULL"))?;
     let rows: Vec<(i64, String)> = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;

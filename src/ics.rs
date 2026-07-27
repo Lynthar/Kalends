@@ -20,11 +20,9 @@ pub fn calendar(items: &[Value]) -> String {
         let due = it["due"].as_str().unwrap_or("");
         let date = due.replace('-', "");
         let name = it["name"].as_str().unwrap_or("");
-        let summary = if kind == "sim" {
-            format!("保号：{name}")
-        } else {
-            format!("续费：{name}")
-        };
+        // 到期动作说法由库给（SIM 是"保号"），不再按类型特判
+        let verb = it["verb"].as_str().unwrap_or("续费");
+        let summary = format!("{verb}：{name}");
         let mut desc = String::new();
         if let (Some(p), Some(c)) = (it["price"].as_f64(), it["currency"].as_str()) {
             desc.push_str(&format!("{c} {p:.2}"));

@@ -10,6 +10,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0004_fields.sql"),
     include_str!("../migrations/0005_sub_logo.sql"),
     include_str!("../migrations/0006_status_en.sql"),
+    include_str!("../migrations/0007_collections.sql"),
 ];
 
 pub fn open(data_dir: &Path) -> Result<Connection> {
@@ -56,13 +57,25 @@ pub fn seed_defaults(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// 每个迁移单独一个事务：搬数据的迁移半途失败时要么整个生效、要么原样退回，
+/// user_version 也跟着一起提交，不会出现"表建了但版本没推进"的中间态。
 fn migrate(conn: &Connection) -> Result<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     for (i, sql) in MIGRATIONS.iter().enumerate() {
         let target = (i + 1) as i64;
-        if current < target {
-            conn.execute_batch(sql)?;
-            conn.pragma_update(None, "user_version", target)?;
+        if current >= target {
+            continue;
+        }
+        conn.execute_batch("BEGIN")?;
+        let done = conn
+            .execute_batch(sql)
+            .and_then(|_| conn.pragma_update(None, "user_version", target));
+        match done {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                conn.execute_batch("ROLLBACK")?;
+                return Err(anyhow::anyhow!("迁移 {target:04} 失败：{e}"));
+            }
         }
     }
     Ok(())

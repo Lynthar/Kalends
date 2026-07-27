@@ -1,8 +1,10 @@
 mod api;
 mod backup;
+mod collections;
 mod db;
 mod engine;
 mod fields;
+mod legacy;
 mod ics;
 mod media;
 mod notify;

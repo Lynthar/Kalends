@@ -99,6 +99,8 @@ function renderAll() {
 }
 
 /* ── 即将到期 ── */
+// 到期时间线里的 kind 是库键；库名与到期动作说法都由后端随 overview 给下来
+const collName = key => (state.overview?.collections || []).find(c => c.key === key)?.name || key;
 function renderUpcoming() {
   const { upcoming, today } = state.overview;
   $('#today-note').textContent = `今日 ${today}`;
@@ -116,7 +118,7 @@ function renderUpcoming() {
     const d = it.days_left;
     const cls = d < 0 ? 'd-over' : d <= 3 ? 'd-soon' : d <= 7 ? 'd-week' : 'd-far';
     const daysTxt = d < 0 ? `${-d}<small>天前</small>` : d === 0 ? `今<small>到期</small>` : `${d}<small>天后</small>`;
-    const meta = [it.kind === 'sim' ? 'SIM' : '订阅', it.cycle, it.action].filter(Boolean).join(' · ');
+    const meta = [collName(it.kind), it.cycle, it.action].filter(Boolean).join(' · ');
     const li = document.createElement('li');
     li.className = cls;
     li.style.setProperty('--i', idx);
@@ -125,7 +127,7 @@ function renderUpcoming() {
       <span class="due">${esc(it.due)}</span>
       <span class="what"><div class="nm">${esc(it.name)}</div><div class="meta">${esc(meta)}</div></span>
       <span class="amt">${esc(money(it.currency, it.price))}</span>
-      <button class="btn mini ghost" data-renew="${it.kind}:${it.id}" type="button">${it.kind === 'sim' ? '已保号' : '已续费'}</button>`;
+      <button class="btn mini ghost" data-renew="${it.kind}:${it.id}" type="button">已${esc(it.verb || '续费')}</button>`;
     ol.appendChild(li);
   });
   ol.querySelectorAll('[data-renew]').forEach(b => b.onclick = () => doRenew(b.dataset.renew));
@@ -170,15 +172,10 @@ $('#up-more').onclick = () => setUpWindow('all');
 
 async function doRenew(key) {
   const [kind, id] = key.split(':');
-  const list = kind === 'sim' ? state.sims : kind === 'vps' ? state.vps : state.subs;
-  const item = list.find(x => x.id === +id);
-  const label = item ? (item.name || item.vendor || '') : '';
-  if (!confirm(`记一笔「${label}」的${kind === 'sim' ? '保号' : '续费'}？`)) return;
-  const path = kind === 'sim' ? `/api/sims/${id}/renew`
-    : kind === 'vps' ? `/api/vps/${id}/renew`
-    : `/api/subscriptions/${id}/renew`;
+  const it = (state.overview?.upcoming || []).find(u => u.kind === kind && u.id === +id);
+  if (!confirm(`记一笔「${it?.name || ''}」的${it?.verb || '续费'}？`)) return;
   try {
-    await api(path, { method: 'POST', body: '{}' });
+    await api(`/api/items/${id}/renew`, { method: 'POST', body: '{}' });
     toast('已记账，周期已推进');
     await loadAll();
   } catch (e) { toast(e.message, true); }

@@ -8,6 +8,9 @@ use rusqlite::{types::ValueRef, Connection};
 use serde_json::{Map, Value};
 
 const TABLES: &[&str] = &[
+    "collections",
+    "items",
+    // 旧三表在库泛化后只作回滚兜底，仍一并导出，等确认无需回退再从这里摘掉
     "subscriptions",
     "sim_cards",
     "vps_instances",
