@@ -43,20 +43,20 @@ pub fn monthly_factor(cycle: &str, cycle_days: Option<i64>) -> Option<f64> {
 
 pub fn cycle_label(cycle: &str, cycle_days: Option<i64>) -> String {
     match cycle {
-        "weekly" => "周付".into(),
-        "monthly" => "月付".into(),
-        "quarterly" => "季付".into(),
-        "semiannual" => "半年付".into(),
-        "annual" => "年付".into(),
-        "biennial" => "两年付".into(),
-        "triennial" => "三年付".into(),
-        "lifetime" => "买断".into(),
-        "days" => format!("每 {} 天", cycle_days.unwrap_or(0)),
+        "weekly" => "Weekly".into(),
+        "monthly" => "Monthly".into(),
+        "quarterly" => "Quarterly".into(),
+        "semiannual" => "Semiannual".into(),
+        "annual" => "Annual".into(),
+        "biennial" => "Biennial".into(),
+        "triennial" => "Triennial".into(),
+        "lifetime" => "Lifetime".into(),
+        "days" => format!("Every {} days", cycle_days.unwrap_or(0)),
         other => other.into(),
     }
 }
 
-/// 合并到期时间线：订阅(Active) + SIM(启用)，按到期日升序。
+/// 合并到期时间线：订阅(Active) + SIM(Active)，按到期日升序。
 pub fn upcoming(conn: &Connection) -> Result<Vec<Value>> {
     let t = today();
     let mut items: Vec<(NaiveDate, Value)> = Vec::new();
@@ -97,7 +97,7 @@ pub fn upcoming(conn: &Connection) -> Result<Vec<Value>> {
 
     let mut stmt = conn.prepare(
         "SELECT id,name,keepalive_action,cycle_days,last_renewed FROM sim_cards
-         WHERE status='启用' AND last_renewed IS NOT NULL AND ifnull(cycle_days,0)>0",
+         WHERE status='Active' AND last_renewed IS NOT NULL AND ifnull(cycle_days,0)>0",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -132,7 +132,7 @@ pub fn upcoming(conn: &Connection) -> Result<Vec<Value>> {
 
     let mut stmt = conn.prepare(
         "SELECT id,vendor,product,price,currency,cycle,cycle_days,last_renewed,status FROM vps_instances
-         WHERE status IN ('启用','预结束') AND last_renewed IS NOT NULL",
+         WHERE status IN ('Active','Ending') AND last_renewed IS NOT NULL",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -171,8 +171,8 @@ pub fn upcoming(conn: &Connection) -> Result<Vec<Value>> {
                 "price": price,
                 "currency": currency,
                 "cycle": cycle_label(cy, cycle_days),
-                // 预结束 = 到期不续：时间线/日历可见，但不发提醒
-                "muted": status == "预结束",
+                // Ending（预结束）= 到期不续：时间线/日历可见，但不发提醒
+                "muted": status == "Ending",
             }),
         ));
     }
@@ -188,7 +188,7 @@ pub fn totals(conn: &Connection) -> Result<Vec<Value>> {
         "SELECT price,currency,cycle,cycle_days FROM subscriptions
          WHERE status='Active' AND price IS NOT NULL AND currency IS NOT NULL",
         "SELECT price,currency,cycle,cycle_days FROM vps_instances
-         WHERE status='启用' AND price IS NOT NULL AND currency IS NOT NULL",
+         WHERE status='Active' AND price IS NOT NULL AND currency IS NOT NULL",
     ];
     for sql in sources {
         let mut stmt = conn.prepare(sql)?;

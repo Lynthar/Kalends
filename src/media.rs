@@ -27,6 +27,7 @@ pub fn router() -> Router<App> {
         .route("/api/media/{id}", put(update).delete(delete))
         .route("/api/media/import", post(import))
         .route("/api/media/from_tmdb", post(from_tmdb))
+        .route("/api/media/{id}/fetch_cover", post(fetch_cover))
         .route("/api/tmdb/search", get(tmdb_search))
         .route("/covers/{name}", get(cover_file))
 }
@@ -59,6 +60,8 @@ fn values_of(b: &Value) -> (Vec<&'static str>, Vec<SqlValue>) {
         cols.push(*k);
         vals.push(f(b, k).map(SqlValue::from).unwrap_or(SqlValue::Null));
     }
+    cols.push("extra");
+    vals.push(crate::api::extra_str(b).map(SqlValue::from).unwrap_or(SqlValue::Null));
     (cols, vals)
 }
 
@@ -83,7 +86,14 @@ fn row_to_json(row: &rusqlite::Row, cols: &[String]) -> rusqlite::Result<Value> 
             rusqlite::types::ValueRef::Null => Value::Null,
             rusqlite::types::ValueRef::Integer(n) => Value::from(n),
             rusqlite::types::ValueRef::Real(x) => Value::from(x),
-            rusqlite::types::ValueRef::Text(t) => Value::from(String::from_utf8_lossy(t).into_owned()),
+            rusqlite::types::ValueRef::Text(t) => {
+                let text = String::from_utf8_lossy(t).into_owned();
+                if c == "extra" {
+                    serde_json::from_str(&text).unwrap_or(Value::from(text))
+                } else {
+                    Value::from(text)
+                }
+            }
             rusqlite::types::ValueRef::Blob(_) => Value::Null,
         };
         obj.insert(c.clone(), v);
@@ -253,6 +263,76 @@ async fn from_tmdb(State(app): State<App>, Json(b): Json<Value>) -> R {
         }
     }
     Ok(Json(json!({ "id": id })))
+}
+
+/// 去掉"第N季"式后缀，剧集每季一条时用底本剧名去 TMDB 搜索。
+fn base_title(t: &str) -> &str {
+    let t = t.trim();
+    if t.ends_with('季') {
+        if let Some(pos) = t.rfind('第') {
+            return t[..pos].trim();
+        }
+    }
+    t
+}
+
+/// 为已有条目补抓海报：有 tmdb_id 直接取详情，否则按标题（年份差 ≤1 优先）搜索匹配。
+async fn fetch_cover(State(app): State<App>, Path(id): Path<i64>) -> R {
+    let (kind, title, orig_title, year, tmdb_id, key, proxy) = {
+        let conn = app.db.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT kind,title,ifnull(orig_title,''),year,tmdb_id FROM media_items WHERE id=?1",
+                [id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<i64>>(3)?,
+                        r.get::<_, Option<i64>>(4)?,
+                    ))
+                },
+            )
+            .map_err(|_| anyhow!("条目不存在"))?;
+        let (key, proxy) = meta_cfg(&conn);
+        (row.0, row.1, row.2, row.3, row.4, key, proxy)
+    };
+    if kind == "游戏" {
+        return Err(anyhow!("游戏封面暂不支持（后续接 IGDB）").into());
+    }
+    let tv = matches!(kind.as_str(), "剧集" | "动画");
+    let client = tmdb::Tmdb::new(&key, &proxy)?;
+    let found = match tmdb_id {
+        Some(t) => t,
+        None => {
+            let mut hits = client.search(tv, base_title(&title)).await?;
+            if hits.is_empty() && !orig_title.is_empty() {
+                hits = client.search(tv, base_title(&orig_title)).await?;
+            }
+            let pick = hits
+                .iter()
+                .find(|h| matches!((year, h["year"].as_i64()), (Some(y), Some(hy)) if (y - hy).abs() <= 1))
+                .or_else(|| hits.first())
+                .ok_or_else(|| anyhow!("TMDB 无匹配：{title}"))?;
+            pick["tmdb_id"].as_i64().ok_or_else(|| anyhow!("TMDB 结果异常"))?
+        }
+    };
+    let (_, poster) = client.details(tv, found).await?;
+    let p = poster.ok_or_else(|| anyhow!("TMDB 该条目没有海报：{title}"))?;
+    let bytes = client.poster(&p).await?;
+    let dir = app.data_dir.join("covers");
+    std::fs::create_dir_all(&dir)?;
+    let name = format!("{id}.jpg");
+    std::fs::write(dir.join(&name), bytes)?;
+    {
+        let conn = app.db.lock().unwrap();
+        conn.execute(
+            "UPDATE media_items SET cover=?1, tmdb_id=ifnull(tmdb_id,?2), updated_at=datetime('now') WHERE id=?3",
+            params![name, found, id],
+        )?;
+    }
+    Ok(Json(json!({ "ok": true, "cover": name, "tmdb_id": found })))
 }
 
 async fn cover_file(

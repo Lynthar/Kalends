@@ -7,6 +7,9 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_renewal_center.sql"),
     include_str!("../migrations/0002_media.sql"),
     include_str!("../migrations/0003_vps.sql"),
+    include_str!("../migrations/0004_fields.sql"),
+    include_str!("../migrations/0005_sub_logo.sql"),
+    include_str!("../migrations/0006_status_en.sql"),
 ];
 
 pub fn open(data_dir: &Path) -> Result<Connection> {

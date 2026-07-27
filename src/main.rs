@@ -2,6 +2,7 @@ mod api;
 mod backup;
 mod db;
 mod engine;
+mod fields;
 mod ics;
 mod media;
 mod notify;
@@ -68,7 +69,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/config.js", get(config_js))
         .route("/manifest.webmanifest", get(manifest))
         .route("/icon.svg", get(icon))
-        .merge(api::core_router());
+        .merge(api::core_router())
+        .merge(fields::router());
     if modules.iter().any(|m| m == "renewals") {
         router = router.merge(api::renewals_router());
     }
@@ -94,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
 /// 静态页与 /calendar.ics（自带令牌）不拦。
 async fn pin_gate(State(app): State<App>, req: Request, next: Next) -> Response {
     let path = req.uri().path();
-    if !path.starts_with("/api") && !path.starts_with("/covers") {
+    if !path.starts_with("/api") && !path.starts_with("/covers") && !path.starts_with("/logos") {
         return next.run(req).await;
     }
     let required = {

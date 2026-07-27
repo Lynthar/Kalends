@@ -47,6 +47,8 @@ pub fn renewals_router() -> Router<App> {
         .route("/api/subscriptions", get(subs_list).post(subs_create))
         .route("/api/subscriptions/{id}", axum::routing::put(subs_update).delete(subs_delete))
         .route("/api/subscriptions/{id}/renew", post(subs_renew))
+        .route("/api/subscriptions/{id}/logo", post(subs_logo_set).delete(subs_logo_clear))
+        .route("/logos/{name}", get(logo_file))
         .route("/api/sims", get(sims_list).post(sims_create))
         .route("/api/sims/{id}", axum::routing::put(sims_update).delete(sims_delete))
         .route("/api/sims/{id}/renew", post(sims_renew))
@@ -71,6 +73,18 @@ pub fn f(v: &Value, k: &str) -> Option<f64> {
 
 pub fn i(v: &Value, k: &str) -> Option<i64> {
     v.get(k).and_then(|x| x.as_i64())
+}
+
+// 自定义列挂载点：body.extra 仅接受对象，存 JSON 文本
+pub fn extra_str(v: &Value) -> Option<String> {
+    v.get("extra").filter(|x| x.is_object()).map(|x| x.to_string())
+}
+
+// 读侧：extra 文本解析为对象，空/坏值给 {}
+pub fn extra_json(text: Option<String>) -> Value {
+    text.and_then(|x| serde_json::from_str::<Value>(&x).ok())
+        .filter(|x| x.is_object())
+        .unwrap_or_else(|| json!({}))
 }
 
 async fn health(State(app): State<App>) -> R {
@@ -100,7 +114,7 @@ async fn overview(State(app): State<App>) -> R {
     })))
 }
 
-const SUB_COLS: &str = "id,name,parent_id,category,status,price,currency,cycle,cycle_days,next_renewal,payment_method,account,url,notes,created_at,updated_at";
+const SUB_COLS: &str = "id,name,parent_id,category,status,price,currency,cycle,cycle_days,next_renewal,payment_method,account,url,notes,created_at,updated_at,extra,logo";
 
 fn sub_row(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -120,6 +134,8 @@ fn sub_row(r: &rusqlite::Row) -> rusqlite::Result<Value> {
         "notes": r.get::<_, Option<String>>(13)?,
         "created_at": r.get::<_, String>(14)?,
         "updated_at": r.get::<_, String>(15)?,
+        "extra": extra_json(r.get::<_, Option<String>>(16)?),
+        "logo": r.get::<_, Option<String>>(17)?,
     }))
 }
 
@@ -138,8 +154,8 @@ async fn subs_create(State(app): State<App>, Json(b): Json<Value>) -> R {
     let conn = app.db.lock().unwrap();
     let name = s(&b, "name").ok_or_else(|| anyhow!("名称不能为空"))?;
     conn.execute(
-        "INSERT INTO subscriptions(name,parent_id,category,status,price,currency,cycle,cycle_days,next_renewal,payment_method,account,url,notes)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+        "INSERT INTO subscriptions(name,parent_id,category,status,price,currency,cycle,cycle_days,next_renewal,payment_method,account,url,notes,extra,logo)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
         params![
             name,
             i(&b, "parent_id"),
@@ -154,6 +170,8 @@ async fn subs_create(State(app): State<App>, Json(b): Json<Value>) -> R {
             s(&b, "account"),
             s(&b, "url"),
             s(&b, "notes"),
+            extra_str(&b),
+            s(&b, "logo"),
         ],
     )?;
     let id = conn.last_insert_rowid();
@@ -179,7 +197,7 @@ async fn subs_update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<
         return Err(anyhow!("条目不存在").into());
     };
     conn.execute(
-        "UPDATE subscriptions SET name=?1,parent_id=?2,category=?3,status=?4,price=?5,currency=?6,cycle=?7,cycle_days=?8,next_renewal=?9,payment_method=?10,account=?11,url=?12,notes=?13,updated_at=datetime('now') WHERE id=?14",
+        "UPDATE subscriptions SET name=?1,parent_id=?2,category=?3,status=?4,price=?5,currency=?6,cycle=?7,cycle_days=?8,next_renewal=?9,payment_method=?10,account=?11,url=?12,notes=?13,extra=?14,logo=?15,updated_at=datetime('now') WHERE id=?16",
         params![
             s(&b, "name").ok_or_else(|| anyhow!("名称不能为空"))?,
             i(&b, "parent_id"),
@@ -194,6 +212,8 @@ async fn subs_update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<
             s(&b, "account"),
             s(&b, "url"),
             s(&b, "notes"),
+            extra_str(&b),
+            s(&b, "logo"),
             id,
         ],
     )?;
@@ -263,8 +283,127 @@ async fn subs_renew(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<V
     Ok(Json(json!({ "next_renewal": new_next })))
 }
 
+/* ── 订阅 logo：原始字节上传（?ext= 定格式），文件存数据目录 logos/，列存文件名 ── */
+
+fn logo_name_ok(n: &str) -> bool {
+    !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+// 上传字节的魔数须与声明格式一致，防止把可执行内容伪装成图片存进来
+fn logo_bytes_ok(ext: &str, b: &[u8]) -> bool {
+    match ext {
+        "png" => b.starts_with(b"\x89PNG"),
+        "jpg" | "jpeg" => b.starts_with(&[0xFF, 0xD8, 0xFF]),
+        "gif" => b.starts_with(b"GIF8"),
+        "webp" => b.len() > 12 && b.starts_with(b"RIFF") && &b[8..12] == b"WEBP",
+        "ico" => b.starts_with(&[0x00, 0x00, 0x01, 0x00]),
+        "svg" => {
+            let head = String::from_utf8_lossy(&b[..b.len().min(256)]).to_lowercase();
+            let head = head.trim_start_matches('\u{feff}').trim_start();
+            head.starts_with("<svg") || head.starts_with("<?xml")
+        }
+        _ => false,
+    }
+}
+
+fn remove_logo_file(app: &App, name: Option<String>) {
+    if let Some(n) = name.filter(|n| logo_name_ok(n)) {
+        let _ = std::fs::remove_file(app.data_dir.join("logos").join(n));
+    }
+}
+
+async fn subs_logo_set(
+    State(app): State<App>,
+    Path(id): Path<i64>,
+    Query(q): Query<HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> R {
+    let ext = match q.get("ext").map(String::as_str) {
+        Some(e @ ("png" | "jpg" | "jpeg" | "webp" | "svg" | "gif" | "ico")) => e,
+        _ => return Err(anyhow!("不支持的图片格式").into()),
+    };
+    if body.is_empty() || body.len() > 1_000_000 {
+        return Err(anyhow!("图片为空或超过 1MB").into());
+    }
+    if !logo_bytes_ok(ext, &body) {
+        return Err(anyhow!("图片内容与声明格式不符").into());
+    }
+    let conn = app.db.lock().unwrap();
+    let old: Option<Option<String>> = conn
+        .query_row("SELECT logo FROM subscriptions WHERE id=?1", [id], |r| r.get(0))
+        .ok();
+    let Some(old) = old else {
+        return Err(anyhow!("条目不存在").into());
+    };
+    let dir = app.data_dir.join("logos");
+    std::fs::create_dir_all(&dir)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let name = format!("sub-{id}-{stamp}.{ext}");
+    std::fs::write(dir.join(&name), &body)?;
+    conn.execute(
+        "UPDATE subscriptions SET logo=?1,updated_at=datetime('now') WHERE id=?2",
+        params![name, id],
+    )?;
+    remove_logo_file(&app, old);
+    Ok(Json(json!({ "logo": name })))
+}
+
+async fn subs_logo_clear(State(app): State<App>, Path(id): Path<i64>) -> R {
+    let conn = app.db.lock().unwrap();
+    let old: Option<Option<String>> = conn
+        .query_row("SELECT logo FROM subscriptions WHERE id=?1", [id], |r| r.get(0))
+        .ok();
+    let Some(old) = old else {
+        return Err(anyhow!("条目不存在").into());
+    };
+    conn.execute(
+        "UPDATE subscriptions SET logo=NULL,updated_at=datetime('now') WHERE id=?1",
+        [id],
+    )?;
+    remove_logo_file(&app, old);
+    Ok(Json(json!({ "ok": true })))
+}
+
+// 与媒体封面同款：文件名白名单 + 静态读 + 长缓存
+async fn logo_file(State(app): State<App>, Path(name): Path<String>) -> Result<Response, ApiError> {
+    if !logo_name_ok(&name) {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    }
+    let path = app.data_dir.join("logos").join(&name);
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    let mime = match path.extension().and_then(|e| e.to_str()) {
+        Some("png") => "image/png",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("gif") => "image/gif",
+        Some("ico") => "image/x-icon",
+        _ => "image/jpeg",
+    };
+    let mut resp = (
+        [
+            (header::CONTENT_TYPE, mime),
+            (header::CACHE_CONTROL, "public, max-age=604800"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        bytes,
+    )
+        .into_response();
+    if mime == "image/svg+xml" {
+        // SVG 可携带脚本：<img> 引用本就不执行，这里再把直接打开的场景沙箱化
+        resp.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            header::HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; sandbox"),
+        );
+    }
+    Ok(resp)
+}
+
 const SIM_COLS: &str =
-    "id,name,phone_number,forms,status,keepalive_action,cycle_days,last_renewed,notes,created_at,updated_at";
+    "id,name,phone_number,forms,status,keepalive_action,cycle_days,last_renewed,notes,created_at,updated_at,extra";
 
 fn sim_row(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     let forms: Option<String> = r.get(3)?;
@@ -282,6 +421,7 @@ fn sim_row(r: &rusqlite::Row) -> rusqlite::Result<Value> {
         "notes": r.get::<_, Option<String>>(8)?,
         "created_at": r.get::<_, String>(9)?,
         "updated_at": r.get::<_, String>(10)?,
+        "extra": extra_json(r.get::<_, Option<String>>(11)?),
     }))
 }
 
@@ -305,17 +445,18 @@ fn forms_str(b: &Value) -> Option<String> {
 async fn sims_create(State(app): State<App>, Json(b): Json<Value>) -> R {
     let conn = app.db.lock().unwrap();
     conn.execute(
-        "INSERT INTO sim_cards(name,phone_number,forms,status,keepalive_action,cycle_days,last_renewed,notes)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+        "INSERT INTO sim_cards(name,phone_number,forms,status,keepalive_action,cycle_days,last_renewed,notes,extra)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
         params![
             s(&b, "name").ok_or_else(|| anyhow!("名称不能为空"))?,
             s(&b, "phone_number"),
             forms_str(&b),
-            s(&b, "status").unwrap_or_else(|| "未启用".into()),
+            s(&b, "status").unwrap_or_else(|| "Unused".into()),
             s(&b, "keepalive_action"),
             i(&b, "cycle_days"),
             s(&b, "last_renewed"),
             s(&b, "notes"),
+            extra_str(&b),
         ],
     )?;
     Ok(Json(json!({ "id": conn.last_insert_rowid() })))
@@ -324,16 +465,17 @@ async fn sims_create(State(app): State<App>, Json(b): Json<Value>) -> R {
 async fn sims_update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value>) -> R {
     let conn = app.db.lock().unwrap();
     let n = conn.execute(
-        "UPDATE sim_cards SET name=?1,phone_number=?2,forms=?3,status=?4,keepalive_action=?5,cycle_days=?6,last_renewed=?7,notes=?8,updated_at=datetime('now') WHERE id=?9",
+        "UPDATE sim_cards SET name=?1,phone_number=?2,forms=?3,status=?4,keepalive_action=?5,cycle_days=?6,last_renewed=?7,notes=?8,extra=?9,updated_at=datetime('now') WHERE id=?10",
         params![
             s(&b, "name").ok_or_else(|| anyhow!("名称不能为空"))?,
             s(&b, "phone_number"),
             forms_str(&b),
-            s(&b, "status").unwrap_or_else(|| "未启用".into()),
+            s(&b, "status").unwrap_or_else(|| "Unused".into()),
             s(&b, "keepalive_action"),
             i(&b, "cycle_days"),
             s(&b, "last_renewed"),
             s(&b, "notes"),
+            extra_str(&b),
             id,
         ],
     )?;
@@ -397,6 +539,8 @@ fn vps_values(b: &Value) -> (Vec<&'static str>, Vec<rusqlite::types::Value>) {
         let v = b.get(*k).filter(|x| x.is_array()).map(|x| x.to_string());
         vals.push(v.map(V::from).unwrap_or(V::Null));
     }
+    cols.push("extra");
+    vals.push(extra_str(b).map(V::from).unwrap_or(V::Null));
     (cols, vals)
 }
 
@@ -409,7 +553,7 @@ fn vps_row(r: &rusqlite::Row, cols: &[String]) -> rusqlite::Result<Value> {
             rusqlite::types::ValueRef::Real(x) => Value::from(x),
             rusqlite::types::ValueRef::Text(t) => {
                 let text = String::from_utf8_lossy(t).into_owned();
-                if VPS_ARR.contains(&c.as_str()) {
+                if VPS_ARR.contains(&c.as_str()) || c == "extra" {
                     serde_json::from_str(&text).unwrap_or(Value::from(text))
                 } else {
                     Value::from(text)

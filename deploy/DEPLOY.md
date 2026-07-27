@@ -47,5 +47,5 @@ KALENDS_DATA=/path/to/data ./target/release/kalends
 ## 注意
 
 - **SQLite 数据文件必须在本地磁盘**，不要放 SMB/NFS 网络挂载路径（网络文件系统的锁不可靠）。
-- 数据目录（db + covers + backups + export）纳入主机的整机备份即可；应用自身每日 03:30 做快照轮转与 JSONL 明文导出。
+- 数据目录（db + covers + logos + backups + export）纳入主机的整机备份即可；应用自身每日 03:30 做快照轮转与 JSONL 明文导出。
 - 出门在外访问建议走 Tailscale/WireGuard 之类的私网方案，不要直接暴露公网端口；对外暴露前先在设置页启用 PIN。

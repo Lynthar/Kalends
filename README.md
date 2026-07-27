@@ -9,10 +9,12 @@ Named after the Roman *Kalendae*: the first day of the month, when debts came du
 ## Features
 
 - **Renewal center** — three kinds of recurring things, one merged due timeline:
-  - *Subscriptions*: multi-currency native pricing (no forced conversion), service → tier hierarchy, price history, statuses for active / planned / comparison-shopping / ended
-  - *SIM keep-alive*: custom day cycles (90 / 181 / 365…), keep-alive action notes, remaining-days progress
-  - *VPS / cloud servers*: specs, network routes, locations, monthly through triennial cycles, and an "ending" state that stays visible on the timeline without alerting
+  - *Subscriptions*: multi-currency native pricing (no forced conversion), service → tier hierarchy, price history, per-service logos
+  - *SIM keep-alive*: custom day cycles (90 / 181 / 365…), keep-alive action notes, remaining days
+  - *VPS / cloud servers*: specs, network routes, locations, monthly through triennial cycles
+  - One shared status vocabulary: only `Active` counts toward spend and alerts; `Deferred` is a comparison-shopping catalogue that counts toward neither; `Ending` stays on the timeline and in the calendar feed but stops alerting
 - **One-click renewal logging** — advances the cycle and writes a ledger entry
+- **Notion-style tables** — every column carries a field type (text / number / select / multi-select / status / date / rating) that drives its sort order, filter UI and cell rendering. Click a cell to edit it in place. Add your own columns; rename, recolor and reorder select options and the change propagates to every row. Drag column widths and order, hide columns, collapse sub-items. Sort and filter state lives in the browser, so two devices can look at the same table differently.
 - **Notifications** — Telegram bot and SMTP email, N-days-before thresholds plus a daily digest, per-channel proxy support, deduplicated and catch-up-safe; plus an **ICS calendar feed** your phone subscribes to natively
 - **Media library** — douban-style metadata fields, 5-star ratings, poster wall / table views, on-demand TMDB fetch (zh-CN) with posters cached locally, bulk import API
 - **Local-first by construction** — nightly rotating SQLite snapshots + plain-text JSONL exports, optional PIN gate, PWA, no telemetry; the only network egress is metadata fetch and the notification channels you configure
@@ -42,10 +44,13 @@ For production use, see [deploy/DEPLOY.md](deploy/DEPLOY.md) (Docker Compose + r
 
 **续费中心**：三类周期性事物共用一条合并到期时间线与统一提醒。
 
-- 订阅：原币记账（CNY/USD/EUR… 各算各的，不强制折算）、"服务 → 套餐档位"父子结构、涨价历史；状态覆盖在订 / 计划 / 比价观望 / 已停
-- SIM 保号：自定义周期天数（90 / 181 / 365…）、保号动作备注、剩余天数进度条
-- VPS：规格 / 线路 / 地点、月付到三年付全周期；"预结束"状态保留在时间线上但不再提醒、不计支出
+- 订阅：原币记账（CNY/USD/EUR… 各算各的，不强制折算）、"服务 → 套餐档位"父子结构、涨价历史、各服务的 logo
+- SIM 保号：自定义周期天数（90 / 181 / 365…）、保号动作备注、剩余天数
+- VPS：规格 / 线路 / 地点、月付到三年付全周期
+- 三表共用一套状态词表：只有 `Active` 计支出、发提醒；`Deferred` 是比价目录，两样都不算；`Ending` 是到期不续，留在时间线和日历订阅里但不再提醒
 - 一键「已续费 / 已保号」：推进周期并写入台账
+
+**表格视图**：照着 Notion 的数据库表做——每列都属于一种字段类型（文本 / 数字 / 单选 / 多选 / 状态 / 日期 / 星级），类型决定这列怎么排序、筛选面板长什么样、单元格怎么渲染。点格子就地改，不用开表单。可以自己加列；单选多选的选项能改名、配色、手动调序，改动传播到所有行。列宽列序随手拖，列能隐藏，套餐档位那种子行能折叠。排序筛选这些视图状态存在浏览器本地，所以手机和电脑可以各看各的。
 
 **提醒**：Telegram Bot 与 SMTP 邮件双渠道，提前 N 天逐档提醒 + 每日摘要，去重、宕机补发、渠道可单独配代理；另有 **ICS 日历订阅地址**，手机日历原生提醒，零推送依赖。
 
@@ -67,6 +72,6 @@ cargo run    # http://127.0.0.1:4180
 src/            axum 服务、到期引擎、通知、备份、TMDB 客户端
 migrations/     数据库迁移（编译期嵌入，PRAGMA user_version 版本控制）
 assets/         前端（原生 JS，无构建步骤，编译期嵌入二进制）
-scripts/        Notion 迁移示例脚本
+scripts/        Notion 迁移示例脚本、前端端到端验证
 deploy/         Docker Compose 与部署文档
 ```

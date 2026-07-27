@@ -10,6 +10,9 @@ use serde_json::{Map, Value};
 const TABLES: &[&str] = &[
     "subscriptions",
     "sim_cards",
+    "vps_instances",
+    "media_items",
+    "fields",
     "price_history",
     "renewal_ledger",
     "notification_log",
