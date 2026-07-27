@@ -692,3 +692,8 @@ dialog h3 {
 @media (min-width: 1200px) {
   .grid .clip { max-width: 24rem; }
 }
+
+/* 新建库入口：与表标签同排，但读起来是动作不是某张表 */
+.tab.tab-add { color: var(--ink-2); opacity: .75; }
+.tab.tab-add:hover { color: var(--aqua-deep); opacity: 1; }
+.tab.tab-add::after { display: none; }

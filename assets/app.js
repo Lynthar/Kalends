@@ -86,15 +86,26 @@ async function loadAll() {
   const wins = ['7', '14', '30', '60', '90', '180', 'all'];
   state.upWindow = wins.includes(state.settings['ui.upcoming_days'])
     ? state.settings['ui.upcoming_days'] : '30';
+  // 表格的列如今由字段注册表决定，所以每次全量加载都要一并刷新，
+  // 否则新建库/加列之后前端还按旧字段集渲染（会渲染出没有名称格的空行）
+  try { await refreshFields(); } catch (e) { toast('字段注册加载失败：' + e.message, true); }
+  // 自建库的条目走通用端点；预置三库暂仍由上面的旧端点取（切片 B2b 一并收敛）
+  if (hasR) {
+    await Promise.all(userColls().map(async c => {
+      state[c.key] = await api(`/api/collections/${encodeURIComponent(c.key)}/items`);
+    }));
+  }
   renderAll();
 }
 
 function renderAll() {
   renderUpcoming();
   renderTotals();
+  syncColls();
   renderSubs();
   renderSims();
   renderVps();
+  for (const c of userColls()) renderColl(c.key);
   renderMedia();
 }
 
@@ -2290,19 +2301,25 @@ $('#btn-settings').onclick = openSettings;
 $('#btn-add').onclick = () => {
   if (state.tab === 'subs') openSubDialog(null);
   else if (state.tab === 'sims') openSimDialog(null);
-  else openVpsDialog(null);
+  else if (state.tab === 'vps') openVpsDialog(null);
+  else openItemDialog(state.tab, null);
 };
-document.querySelectorAll('.tab[data-tab]').forEach(b => b.onclick = () => {
-  state.tab = b.dataset.tab;
+// 切表：视图容器由库决定，不再逐个写死
+function switchTab(key) {
+  state.tab = key;
   closePop();
-  $('#t-search').value = views[state.tab].q || '';
-  document.querySelectorAll('.tab[data-tab]').forEach(x => x.classList.toggle('on', x === b));
-  $('#view-subs').hidden = state.tab !== 'subs';
-  $('#view-sims').hidden = state.tab !== 'sims';
-  $('#view-vps').hidden = state.tab !== 'vps';
-  applyWidths(state.tab); // 隐藏页里量不到自然宽，可见了补排
-  renderViewPills(state.tab); // 共用的胶囊行切到当前表
-});
+  $('#t-search').value = views[key]?.q || '';
+  document.querySelectorAll('.tab[data-tab]').forEach(x => x.classList.toggle('on', x.dataset.tab === key));
+  document.querySelectorAll('.tablewrap[data-tab]').forEach(w => { w.hidden = w.dataset.tab !== key; });
+  applyWidths(key); // 隐藏页里量不到自然宽，可见了补排
+  renderViewPills(key); // 共用的胶囊行切到当前表
+}
+function bindTabs() {
+  document.querySelectorAll('.tab[data-tab]').forEach(b => {
+    b.onclick = () => switchTab(b.dataset.tab);
+  });
+}
+bindTabs();
 document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => b.closest('dialog').close());
 
 let tSearchTimer;
@@ -2345,3 +2362,407 @@ async function boot() {
 }
 
 boot().catch(e => toast('加载失败：' + e.message, true));
+
+/* ══ 用户自建库：标签页 / 表头 / 行 / 详情表单全部由 /api/collections + /api/fields 生成 ══
+   预置三库（订阅 / SIM / VPS）暂时仍走各自的专用渲染器，切片 B2b 会一并收敛到这里。 */
+
+const collOf = key => (state.overview?.collections || []).find(c => c.key === key);
+const userColls = () => (state.overview?.collections || []).filter(c => !c.builtin);
+const fieldsOf = key => state.fields
+  .filter(f => f.tbl === key)
+  .sort((a, b) => a.pos - b.pos || a.id - b.id);
+const shownFields = key => fieldsOf(key).filter(f => f.shown);
+
+// 状态语义：以库的状态词表标记为准，读不到就回落到内置六值的既有含义（与后端 status_sem 同源）
+const SEM_DEFAULT = {
+  Active: { spend: 1, alert: 1, timeline: 1 },
+  Ending: { spend: 0, alert: 0, timeline: 1 },
+};
+function semOf(key, status) {
+  const o = (fieldOf(key, 'status')?.options || []).find(x => x.v === status);
+  if (o && ['spend', 'alert', 'timeline'].some(f => f in o)) return o;
+  return SEM_DEFAULT[status] || { spend: 0, alert: 0, timeline: 0 };
+}
+const statusOrder = key => (fieldOf(key, 'status')?.options || []).map(o => o.v);
+
+// 字段取值：真列直接读、extra 读挂载点、calc 由服务端或模板算出
+function fieldVal(f, r) {
+  if (f.src === 'col') return f.key === 'cycle' ? cycleText(r) : r[f.key];
+  if (f.src === 'extra') return (r.extra || {})[f.key];
+  if (f.key === 'left') return r.days_left;
+  if (f.ftype === 'tpl') return tplText(f, r);
+  return null;
+}
+
+// 模板列：按 ' / ' 分段，段首占位字段为空则整段不出现（复刻 VPS「规格」的既有观感）
+function tplText(f, r) {
+  const tpl = f.config?.tpl || '';
+  const get = k => {
+    const v = (r.extra || {})[k] ?? r[k];
+    return v == null || v === '' ? '' : String(v);
+  };
+  return tpl.split(' / ').map(seg => {
+    const keys = [...seg.matchAll(/\{(\w+)\}/g)].map(m => m[1]);
+    if (!keys.length) return seg;
+    if (!get(keys[0])) return '';
+    return seg.replace(/\{(\w+)\}/g, (_, k) => get(k)).replace(/\s+/g, ' ').trim();
+  }).filter(Boolean).join(' / ');
+}
+
+// 字段 → COLS 条目（类型驱动排序/筛选，与内置列同权）
+function colFromField(key, f) {
+  const t = f.ftype === 'tpl' ? 'text' : f.ftype;
+  const numeric = t === 'num' || t === 'star';
+  const get = r => fieldVal(f, r);
+  return {
+    t, fkey: f.key,
+    conv: CONV_TYPES.includes(t) ? 1 : 0,
+    ord: f.key === 'status' ? statusOrder(key) : (t === 'star' ? ['1', '2', '3', '4', '5'] : null),
+    str: numeric ? 0 : 1,
+    val: f.key === 'status' ? ordVal(statusOrder(key), r => r.status)
+      : numeric ? r => { const v = get(r); return v == null || v === '' ? null : +v; }
+      : get,
+    fvals: r => {
+      const v = get(r);
+      return v == null || v === '' ? [] : Array.isArray(v) ? v.map(String) : [String(v)];
+    },
+  };
+}
+
+/* ── 库的 DOM：标签按钮 + 表格容器 + 由字段生成的表头 ── */
+function collThead(key) {
+  return shownFields(key).map(f => {
+    const cls = f.ftype === 'num' && f.key !== 'left' ? ' class="num"' : (f.key === 'left' ? ' class="wide"' : '');
+    return `<th${cls} data-k="${esc(f.key)}">${esc(f.name || f.key)}</th>`;
+  }).join('') + '<th class="ops" data-k="ops"></th>';
+}
+
+function ensureCollDom(c) {
+  const key = c.key;
+  const label = (c.icon ? c.icon + ' ' : '') + c.name;
+  let btn = document.querySelector(`.tab[data-tab="${key}"]`);
+  if (!btn) {
+    btn = document.createElement('button');
+    btn.className = 'tab';
+    btn.type = 'button';
+    btn.dataset.tab = key;
+    $('#coll-add').before(btn);
+    btn.onclick = () => switchTab(key);
+    // 当前库的标签上右键 / 长按开库设置
+    btn.oncontextmenu = e => { e.preventDefault(); openCollDialog(c); };
+  }
+  btn.textContent = label;
+  let wrap = document.querySelector(`.tablewrap[data-tab="${key}"]`);
+  if (!wrap) {
+    wrap = document.createElement('div');
+    wrap.className = 'tablewrap';
+    wrap.dataset.tab = key;
+    wrap.hidden = state.tab !== key;
+    wrap.innerHTML = `<table class="grid"><thead><tr></tr></thead><tbody id="${esc(key)}-body"></tbody></table>
+      <p class="empty" id="${esc(key)}-empty" hidden>◌ 空架待书</p>`;
+    document.querySelector('.tablewrap[data-tab="vps"]').after(wrap);
+  }
+  HEAD_SEL[key] = `.tablewrap[data-tab="${key}"] thead`;
+  SEARCH_FIELDS[key] = r => [r.name, r.notes, ...Object.values(r.extra || {}).flatMap(v => Array.isArray(v) ? v : [v])];
+  RENDER[key] = () => renderColl(key);
+  views[key] = { sort: null, filters: {}, q: '', widths: {}, order: null, hiddenCols: [], types: {}, keys: null, collapsed: [], ...views[key] };
+  COLS[key] = Object.fromEntries(shownFields(key).map(f => [f.key, colFromField(key, f)]));
+  const head = $(HEAD_SEL[key]);
+  const want = collThead(key);
+  if (head.rows[0].innerHTML !== want) {
+    head.rows[0].innerHTML = want;
+    THEAD_HTML[key] = want;
+    head.closest('.tablewrap').querySelector('.newrow')?.remove();
+    initHead(key);
+  }
+}
+
+// 每次渲染前对账：新库补 DOM，删掉的库连标签带容器一起撤
+function syncColls() {
+  const keys = new Set(userColls().map(c => c.key));
+  for (const c of userColls()) ensureCollDom(c);
+  document.querySelectorAll('.tablewrap[data-tab]').forEach(w => {
+    const k = w.dataset.tab;
+    if (['subs', 'sims', 'vps'].includes(k) || keys.has(k)) return;
+    document.querySelector(`.tab[data-tab="${k}"]`)?.remove();
+    w.remove();
+    if (state.tab === k) switchTab('subs');
+  });
+}
+
+/* ── 通用行渲染 ── */
+function leftBar(it) {
+  if (it.days_left == null) return '<span class="muted">—</span>';
+  const left = it.days_left;
+  if (it.last_renewed && it.due) {
+    const total = dayDiff(new Date(it.due + 'T00:00:00'), new Date(it.last_renewed + 'T00:00:00'));
+    if (total > 0) {
+      const pct = Math.min(100, Math.max(0, (total - left) / total * 100));
+      const lbl = left < 0 ? `已超期 ${-left} 天` : `剩 ${left} 天 / ${total}`;
+      return `<div class="bar"><div class="track"><div class="fill" style="width:${pct}%"></div></div><div class="lbl">${lbl}</div></div>`;
+    }
+  }
+  return esc(left < 0 ? `已超期 ${-left} 天` : `剩 ${left} 天`);
+}
+
+function renderColl(key) {
+  const c = collOf(key);
+  if (!c) return;
+  const all = state[key] || [];
+  const tb = $(`#${key}-body`);
+  if (!tb) return;
+  tb.innerHTML = '';
+  const byId = Object.fromEntries(all.map(x => [x.id, x]));
+  let rows = applyView(key, all);
+  if (!views[key].sort) rows = [...rows].sort((a, b) => cmpZh(a.name, b.name));
+  const vis = new Set(rows.map(r => r.id));
+  const kids = new Map();
+  const top = [];
+  for (const r of rows) {
+    if (r.parent_id && vis.has(r.parent_id)) {
+      if (!kids.has(r.parent_id)) kids.set(r.parent_id, []);
+      kids.get(r.parent_id).push(r);
+    } else top.push(r);
+  }
+  const collapsed = new Set(views[key].collapsed || []);
+  setEmpty(`#${key}-empty`, rows.length, all.length);
+  // 字段集里必须有名称格：它承载折叠钮、logo、⤢ 详情入口。
+  // 万一注册表还没到（或用户把名称列隐藏了），补一个，免得整行没有入口。
+  const fields = shownFields(key);
+  if (!fields.some(f => f.key === 'name')) {
+    fields.unshift({ key: 'name', name: '名称', ftype: 'text', src: 'col', shown: true });
+  }
+  const cycleShown = fields.some(f => f.key === 'cycle');
+  const logoOf = r => r.logo || (r.parent_id && byId[r.parent_id]?.logo) || '';
+
+  const emit = (it, depth) => {
+    const parent = it.parent_id ? byId[it.parent_id] : null;
+    const hasKids = kids.has(it.id);
+    const sub = c.subline ? ((it.extra || {})[c.subline] ?? it[c.subline]) : '';
+    const tr = document.createElement('tr');
+    tr.dataset.id = it.id;
+    if (depth) tr.classList.add('subrow');
+    const tds = fields.map(f => {
+      const v = fieldVal(f, it);
+      if (f.key === 'name') {
+        return `<td>${hasKids ? `<button class="tgl" data-tgl type="button" title="折叠 / 展开子行">${collapsed.has(it.id) ? '▸' : '▾'}</button>` : ''}${(!depth && parent) ? `<span class="sub-parent">${esc(parent.name)} ↳ </span>` : ''}${logoOf(it) ? `<img class="slogo" src="/logos/${esc(logoOf(it))}" alt="" loading="lazy">` : ''}${esc(it.name)}${safeUrl(it.url) ? ` <a class="btn link" href="${esc(safeUrl(it.url))}" target="_blank" rel="noreferrer">↗</a>` : ''}<button class="rowopen" data-open type="button" title="打开详情">⤢</button>${sub ? `<div class="muted" style="font-size:.75rem">${esc(sub)}</div>` : ''}</td>`;
+      }
+      if (f.key === 'status') return `<td>${stPill(it.status)}</td>`;
+      if (f.key === 'left') return `<td class="wide">${leftBar(it)}</td>`;
+      if (f.key === 'price') {
+        const cyc = cycleShown ? '' : cycleText(it);
+        return `<td class="amt">${esc(money(it.currency, it.price))}${cyc ? `<div class="muted" style="font-size:.72rem">${esc(cyc)}</div>` : ''}</td>`;
+      }
+      if (f.ftype === 'date') return `<td class="cdate">${esc(v || '')}</td>`;
+      if (f.ftype === 'tpl') return `<td class="cdate">${esc(v || '')}</td>`;
+      if (f.ftype === 'text') return `<td class="muted clip" title="${esc(v ?? '')}">${cellVal(key, f.key, v)}</td>`;
+      if (f.ftype === 'num') return `<td class="amt">${v == null || v === '' ? '' : esc(String(v))}</td>`;
+      return `<td>${cellVal(key, f.key, v)}</td>`;
+    }).join('');
+    const sem = semOf(key, it.status);
+    const canRenew = sem.timeline && (c.due_anchor === 'last' || it.next_renewal);
+    tr.innerHTML = `${tds}<td class="ops">
+        ${canRenew ? `<button class="btn link" data-renew type="button">已${esc(c.verb || '续费')}</button>` : ''}
+        <button class="btn link" data-del type="button">删</button>
+      </td>`;
+    tr.querySelector('[data-open]').onclick = () => openItemDialog(key, it);
+    tr.querySelector('[data-del]').onclick = () => delColItem(key, it);
+    const rb = tr.querySelector('[data-renew]');
+    if (rb) rb.onclick = () => doRenew(`${key}:${it.id}`);
+    const tg = tr.querySelector('[data-tgl]');
+    if (tg) tg.onclick = () => {
+      const s = new Set(views[key].collapsed || []);
+      s.has(it.id) ? s.delete(it.id) : s.add(it.id);
+      views[key].collapsed = [...s];
+      saveViews();
+      renderColl(key);
+    };
+    tb.appendChild(tr);
+  };
+  for (const it of top) {
+    emit(it, 0);
+    if (kids.has(it.id) && !collapsed.has(it.id)) for (const k of kids.get(it.id)) emit(k, 1);
+  }
+  syncTable(key);
+}
+
+async function delColItem(key, it) {
+  if (!confirm(`删除「${it.name}」？`)) return;
+  try {
+    await api(`/api/items/${it.id}`, { method: 'DELETE' });
+    toast('已删除');
+    await loadAll();
+  } catch (e) { toast(e.message, true); }
+}
+
+/* ── 通用详情表单：按字段集生成 ── */
+function itemDialog() {
+  let d = $('#dlg-item');
+  if (d) return d;
+  d = document.createElement('dialog');
+  d.id = 'dlg-item';
+  d.className = 'sheet';
+  d.innerHTML = `<form id="form-item" method="dialog">
+      <h3 id="dlg-item-title">条目</h3>
+      <div id="item-fields" class="fgrid"></div>
+      <footer>
+        <button type="button" class="btn ghost" data-close>取消</button>
+        <button type="submit" class="btn primary">保存</button>
+      </footer>
+    </form>`;
+  document.body.appendChild(d);
+  d.querySelector('[data-close]').onclick = () => d.close();
+  return d;
+}
+
+let editingItem = null;
+function openItemDialog(key, it) {
+  const c = collOf(key);
+  editingItem = it ? { key, id: it.id } : { key, id: null };
+  const d = itemDialog();
+  $('#dlg-item-title').textContent = `${it ? '编辑' : '新增'}${c?.name || ''}`;
+  const box = $('#item-fields');
+  box.innerHTML = '';
+  for (const f of fieldsOf(key)) {
+    if (f.src === 'calc') continue; // 算出来的列不可编辑
+    const v = it ? fieldVal(f, it) : '';
+    const val = Array.isArray(v) ? v.join(', ') : (v ?? '');
+    const lab = document.createElement('label');
+    if (f.ftype === 'sel' || f.ftype === 'multi') {
+      const opts = (f.options || []).map(o => o.v);
+      const cur = Array.isArray(v) ? v : (v ? [String(v)] : []);
+      for (const x of cur) if (!opts.includes(x)) opts.push(x);
+      lab.innerHTML = `<span>${esc(f.name || f.key)}</span>`
+        + (f.ftype === 'multi'
+          ? `<input data-f="${esc(f.key)}" list="opts-${esc(f.key)}" value="${esc(val)}" placeholder="逗号分隔">`
+          : `<select data-f="${esc(f.key)}"><option value=""></option>${opts.map(o => `<option${o === val ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`)
+        + `<datalist id="opts-${esc(f.key)}">${opts.map(o => `<option>${esc(o)}</option>`).join('')}</datalist>`;
+    } else if (f.ftype === 'status') {
+      const opts = statusOrder(key);
+      lab.innerHTML = `<span>${esc(f.name || f.key)}</span><select data-f="${esc(f.key)}">${opts.map(o => `<option${o === (val || 'Planned') ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+    } else {
+      const type = f.ftype === 'num' ? 'number' : f.ftype === 'date' ? 'date' : 'text';
+      lab.innerHTML = `<span>${esc(f.name || f.key)}</span><input type="${type}"${type === 'number' ? ' step="any"' : ''} data-f="${esc(f.key)}" value="${esc(val)}">`;
+    }
+    box.appendChild(lab);
+  }
+  d.showModal();
+}
+
+// 表单 → 整行 PUT/POST 的 body：真列放顶层，extra 字段收进 extra
+function itemBody(key) {
+  const b = { extra: {} };
+  for (const f of fieldsOf(key)) {
+    if (f.src === 'calc') continue;
+    const el = document.querySelector(`#item-fields [data-f="${f.key}"]`);
+    if (!el) continue;
+    let v = el.value.trim();
+    if (f.ftype === 'multi') {
+      const arr = splitVals(v);
+      if (f.src === 'col') b[f.key] = arr; else b.extra[f.key] = arr;
+      continue;
+    }
+    if (f.ftype === 'num') {
+      const n = v === '' ? undefined : Number(v);
+      if (f.src === 'col') b[f.key] = n; else if (n !== undefined) b.extra[f.key] = n;
+      continue;
+    }
+    if (f.src === 'col') b[f.key] = v; else if (v !== '') b.extra[f.key] = v;
+  }
+  return b;
+}
+
+document.addEventListener('submit', async e => {
+  if (e.target.id !== 'form-item') return;
+  e.preventDefault();
+  const { key, id } = editingItem || {};
+  if (!key) return;
+  const body = itemBody(key);
+  if (!body.name) { toast('名称不能为空', true); return; }
+  try {
+    if (id) await api(`/api/items/${id}`, { method: 'PUT', body: JSON.stringify(body) });
+    else await api(`/api/collections/${encodeURIComponent(key)}/items`, { method: 'POST', body: JSON.stringify(body) });
+    $('#dlg-item').close();
+    toast('已保存');
+    await loadAll();
+  } catch (err) { toast(err.message, true); }
+});
+
+/* ── 库管理：新建 / 改名 / 图标 / 到期模型 / 删除 ── */
+function collDialog() {
+  let d = $('#dlg-coll');
+  if (d) return d;
+  d = document.createElement('dialog');
+  d.id = 'dlg-coll';
+  d.className = 'sheet';
+  d.innerHTML = `<form id="form-coll" method="dialog">
+      <h3 id="dlg-coll-title">新建库</h3>
+      <div class="fgrid">
+        <label><span>库名</span><input data-c="name" required></label>
+        <label><span>图标（emoji，可空）</span><input data-c="icon" maxlength="4"></label>
+        <label><span>到期模型</span><select data-c="due_anchor">
+          <option value="last">上次续费 + 周期</option>
+          <option value="next">直接记下次到期日</option>
+        </select></label>
+        <label><span>到期动作说法</span><input data-c="verb" placeholder="续费"></label>
+      </div>
+      <footer>
+        <button type="button" class="btn ghost" id="coll-del" hidden>删除本库</button>
+        <button type="button" class="btn ghost" data-close>取消</button>
+        <button type="submit" class="btn primary">保存</button>
+      </footer>
+    </form>`;
+  document.body.appendChild(d);
+  d.querySelector('[data-close]').onclick = () => d.close();
+  return d;
+}
+
+let editingColl = null;
+function openCollDialog(c) {
+  editingColl = c || null;
+  const d = collDialog();
+  $('#dlg-coll-title').textContent = c ? `库设置 · ${c.name}` : '新建库';
+  const g = k => d.querySelector(`[data-c="${k}"]`);
+  g('name').value = c?.name || '';
+  g('icon').value = c?.icon || '';
+  g('due_anchor').value = c?.due_anchor || 'last';
+  g('verb').value = c?.verb || '';
+  const del = $('#coll-del');
+  del.hidden = !c || c.builtin;
+  del.onclick = async () => {
+    if (!confirm(`删除库「${c.name}」及其全部条目？此操作不可撤销。`)) return;
+    try {
+      await api(`/api/collections/${c.id}`, { method: 'DELETE' });
+      d.close();
+      toast('已删除');
+      if (state.tab === c.key) switchTab('subs');
+      await loadAll();
+    } catch (e) { toast(e.message, true); }
+  };
+  d.showModal();
+}
+
+document.addEventListener('submit', async e => {
+  if (e.target.id !== 'form-coll') return;
+  e.preventDefault();
+  const d = $('#dlg-coll');
+  const g = k => d.querySelector(`[data-c="${k}"]`).value.trim();
+  const body = { name: g('name'), icon: g('icon'), due_anchor: g('due_anchor'), verb: g('verb') };
+  if (!body.name) { toast('库名不能为空', true); return; }
+  try {
+    if (editingColl) await api(`/api/collections/${editingColl.id}`, { method: 'PUT', body: JSON.stringify(body) });
+    else {
+      const c = await api('/api/collections', { method: 'POST', body: JSON.stringify(body) });
+      await loadAll();
+      switchTab(c.key);
+      d.close();
+      toast('库已建好，先在表头「＋」里加列');
+      return;
+    }
+    d.close();
+    toast('已保存');
+    await loadAll();
+  } catch (err) { toast(err.message, true); }
+});
+
+$('#coll-add').onclick = () => openCollDialog(null);

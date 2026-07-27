@@ -578,6 +578,59 @@ check('SIM 编辑后无错误提示', await evl(`(() => { const t = document.que
 await evl(`document.querySelector('.tab[data-tab="subs"]').click()`);
 await sleep(200);
 
+/* 12g. 自建库：新建 → 默认字段集 → 表头/行由字段生成 → 语义驱动的续费按钮 → 删库 */
+const nc = await post('/api/collections', { name: '域名', icon: '🌐', due_anchor: 'next' });
+check('新建库返回库键', /^k\d+$/.test(nc.key || ''), JSON.stringify(nc));
+const NK = nc.key;
+const ncf = (await (await fetch(`${APP}api/fields`)).json()).filter(f => f.tbl === NK);
+check('新库播了默认字段集', ncf.length >= 8 && ncf.some(f => f.key === 'status'), ncf.map(f => f.key));
+check('新库到期字段随模型给 next_renewal',
+  ncf.some(f => f.key === 'next_renewal') && !ncf.some(f => f.key === 'last_renewed'));
+await post(`/api/collections/${NK}/items`, {
+  name: 'lynthar.com', status: 'Active', price: 12.5, currency: 'USD',
+  cycle: 'annual', next_renewal: day(9), extra: {},
+});
+await post(`/api/collections/${NK}/items`, {
+  name: 'kalends.dev', status: 'Planned', price: 9, currency: 'USD',
+  cycle: 'annual', next_renewal: day(180), extra: {},
+});
+await post('/api/fields', { tbl: NK, name: '注册商', ftype: 'sel' });
+await evl(`loadAll()`);
+await sleep(900);
+check('自建库出现在标签行',
+  await evl(`!!document.querySelector('.tab[data-tab="${NK}"]')`) === true);
+await evl(`switchTab('${NK}')`);
+await sleep(400);
+const nheads = await evl(`[...document.querySelectorAll('.tablewrap[data-tab="${NK}"] thead th')].map(t => t.dataset.k)`);
+check('表头由字段注册表生成（自定义列在操作列前）',
+  nheads.slice(0, 7).join() === 'name,status,price,currency,cycle,next_renewal,notes'
+  && nheads.at(-1) === 'ops' && nheads.some(k => /^c\d+$/.test(k)), nheads);
+check('两行条目渲染', await evl(`document.querySelectorAll('#${NK}-body tr').length`) === 2);
+check('Active 行有续费按钮、Planned 行没有（状态语义驱动）', await evl(`(() => {
+  const rows = [...document.querySelectorAll('#${NK}-body tr')];
+  const a = rows.find(r => r.textContent.includes('lynthar'));
+  const p = rows.find(r => r.textContent.includes('kalends.dev'));
+  return !!a.querySelector('[data-renew]') && !p.querySelector('[data-renew]');
+})()`) === true);
+check('自建库条目进了合并到期时间线',
+  (await (await fetch(APP + 'api/overview')).json()).upcoming.some(u => u.kind === NK));
+await evl(`document.querySelector('#${NK}-body tr [data-open]').click()`);
+await sleep(350);
+check('详情表单按字段集生成且排除算出来的列', await evl(`(() => {
+  const ks = [...document.querySelectorAll('#item-fields [data-f]')].map(e => e.dataset.f);
+  return ks.includes('name') && ks.includes('status') && !ks.includes('left');
+})()`) === true);
+await evl(`document.querySelector('#dlg-item').close()`);
+await sleep(150);
+check('删库', (await fetch(`${APP}api/collections/${nc.id}`, { method: 'DELETE' })).ok);
+await evl(`loadAll()`);
+await sleep(800);
+check('删库后标签与容器都撤掉', await evl(`!document.querySelector('.tab[data-tab="${NK}"]') && !document.querySelector('.tablewrap[data-tab="${NK}"]')`) === true);
+check('删库后字段注册表也清了',
+  (await (await fetch(`${APP}api/fields`)).json()).every(f => f.tbl !== NK));
+await evl(`switchTab('subs')`);
+await sleep(300);
+
 /* 13. 媒体表格 */
 await evl(`document.querySelector('.nav-tab[data-page="media"]').click()`);
 await sleep(200);

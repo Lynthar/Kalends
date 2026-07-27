@@ -33,7 +33,8 @@ pub fn router() -> Router<App> {
 
 /* ── 库 ─────────────────────────────────────────────────────────── */
 
-const COLL_COLS: &str = "id,key,name,icon,due_anchor,subtitle,verb,note_field,pos,builtin";
+const COLL_COLS: &str =
+    "id,key,name,icon,due_anchor,subtitle,subline,verb,note_field,pos,builtin";
 
 fn coll_row(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -43,10 +44,11 @@ fn coll_row(r: &rusqlite::Row) -> rusqlite::Result<Value> {
         "icon": r.get::<_, Option<String>>(3)?,
         "due_anchor": r.get::<_, String>(4)?,
         "subtitle": r.get::<_, Option<String>>(5)?,
-        "verb": r.get::<_, Option<String>>(6)?,
-        "note_field": r.get::<_, Option<String>>(7)?,
-        "pos": r.get::<_, i64>(8)?,
-        "builtin": r.get::<_, i64>(9)? != 0,
+        "subline": r.get::<_, Option<String>>(6)?,
+        "verb": r.get::<_, Option<String>>(7)?,
+        "note_field": r.get::<_, Option<String>>(8)?,
+        "pos": r.get::<_, i64>(9)?,
+        "builtin": r.get::<_, i64>(10)? != 0,
     }))
 }
 
@@ -89,18 +91,57 @@ async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
     })?;
     // key 由 id 派生，避免用户起名撞上内置键或包含路径字符
     conn.execute(
-        "INSERT INTO collections(key,name,icon,due_anchor,subtitle,verb,note_field,pos,builtin)
-         VALUES('',?1,?2,?3,NULL,?4,NULL,?5,0)",
+        "INSERT INTO collections(key,name,icon,due_anchor,subtitle,subline,verb,note_field,pos,builtin)
+         VALUES('',?1,?2,?3,NULL,NULL,?4,NULL,?5,0)",
         params![name, s(&b, "icon"), anchor, s(&b, "verb"), pos],
     )?;
     let id = conn.last_insert_rowid();
     conn.execute("UPDATE collections SET key='k'||id WHERE id=?1", [id])?;
+    let key: String = conn.query_row("SELECT key FROM collections WHERE id=?1", [id], |r| r.get(0))?;
+    seed_fields(&conn, &key, &anchor)?;
     let row = conn.query_row(
         &format!("SELECT {COLL_COLS} FROM collections WHERE id=?1"),
         [id],
         coll_row,
     )?;
     Ok(Json(row))
+}
+
+/// 新建的库要能直接用：播一套默认字段集，否则表格没有列、详情表单是空的。
+/// 到期锚点决定给"下次到期日"还是"上次续费 + 剩余天数"。
+const STATUS_VOCAB: &str = r#"[{"v":"Active","spend":1,"alert":1,"timeline":1},
+  {"v":"Planned","spend":0,"alert":0,"timeline":0},
+  {"v":"Ending","spend":0,"alert":0,"timeline":1},
+  {"v":"Ended","spend":0,"alert":0,"timeline":0}]"#;
+
+fn seed_fields(conn: &Connection, key: &str, anchor: &str) -> anyhow::Result<()> {
+    // (键, 显示名, 类型, 数据源, 默认上表, 序)
+    let mut defs: Vec<(&str, &str, &str, &str, i64, i64)> = vec![
+        ("name", "名称", "text", "col", 1, 1),
+        ("status", "状态", "status", "col", 1, 2),
+        ("price", "费用", "num", "col", 1, 3),
+        ("currency", "币种", "sel", "col", 1, 4),
+        ("cycle", "周期", "sel", "col", 1, 5),
+    ];
+    if anchor == "next" {
+        defs.push(("next_renewal", "下次到期", "date", "col", 1, 6));
+    } else {
+        defs.push(("last_renewed", "上次续费", "date", "col", 1, 6));
+        defs.push(("left", "剩余天数", "num", "calc", 1, 7));
+    }
+    defs.push(("notes", "备注", "text", "col", 1, 8));
+    defs.push(("cycle_days", "周期天数", "num", "col", 0, 20));
+    defs.push(("url", "链接", "text", "col", 0, 21));
+    for (k, name, ftype, src, shown, pos) in defs {
+        let options = if k == "status" { STATUS_VOCAB } else { "[]" };
+        conn.execute(
+            "INSERT INTO fields(tbl,key,name,ftype,src,shown,pos,builtin,options)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,1,?8)
+             ON CONFLICT(tbl,key) DO NOTHING",
+            params![key, k, name, ftype, src, shown, pos, options],
+        )?;
+    }
+    Ok(())
 }
 
 async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value>) -> R {
@@ -131,13 +172,14 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
     };
     let pos = i(&b, "pos").unwrap_or_else(|| cur["pos"].as_i64().unwrap());
     conn.execute(
-        "UPDATE collections SET name=?1,icon=?2,due_anchor=?3,subtitle=?4,verb=?5,note_field=?6,pos=?7
-         WHERE id=?8",
+        "UPDATE collections SET name=?1,icon=?2,due_anchor=?3,subtitle=?4,subline=?5,
+         verb=?6,note_field=?7,pos=?8 WHERE id=?9",
         params![
             name,
             take("icon"),
             anchor,
             take("subtitle"),
+            take("subline"),
             take("verb"),
             take("note_field"),
             pos,

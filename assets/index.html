@@ -69,6 +69,7 @@
         <button class="tab on" data-tab="subs" type="button">订阅</button>
         <button class="tab" data-tab="sims" type="button">SIM 卡</button>
         <button class="tab" data-tab="vps" type="button">VPS</button>
+        <button id="coll-add" class="tab tab-add" type="button" title="新建库">＋ 库</button>
       </div>
       <div class="tab-actions">
         <input id="t-search" class="searchbox slim" placeholder="搜索本表…">
@@ -76,7 +77,7 @@
       </div>
     </div>
     <div id="view-pills" class="vpills" hidden></div>
-    <div id="view-subs" class="tablewrap">
+    <div id="view-subs" class="tablewrap" data-tab="subs">
       <table class="grid">
         <thead><tr>
           <th data-k="name">名称</th><th data-k="status">状态</th><th data-k="category">分类</th><th class="num" data-k="price">价格</th><th data-k="currency">币种</th><th data-k="cycle">周期</th>
@@ -86,7 +87,7 @@
       </table>
       <p id="subs-empty" class="empty" hidden>此栏尚无记录</p>
     </div>
-    <div id="view-sims" class="tablewrap" hidden>
+    <div id="view-sims" class="tablewrap" data-tab="sims" hidden>
       <table class="grid">
         <thead><tr>
           <th data-k="name">名称</th><th data-k="forms">形式</th><th data-k="status">状态</th><th data-k="last_renewed">上次续费</th>
@@ -96,7 +97,7 @@
       </table>
       <p id="sims-empty" class="empty" hidden>此栏尚无记录</p>
     </div>
-    <div id="view-vps" class="tablewrap" hidden>
+    <div id="view-vps" class="tablewrap" data-tab="vps" hidden>
       <table class="grid">
         <thead><tr>
           <th data-k="vendor">商家 / 产品</th><th data-k="status">状态</th><th data-k="locations">地点</th><th data-k="purpose">用途</th><th data-k="spec">规格</th><th data-k="routes">线路</th>
