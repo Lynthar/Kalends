@@ -72,6 +72,6 @@ cargo run    # http://127.0.0.1:4180
 src/            axum 服务、到期引擎、通知、备份、TMDB 客户端
 migrations/     数据库迁移（编译期嵌入，PRAGMA user_version 版本控制）
 assets/         前端（原生 JS，无构建步骤，编译期嵌入二进制）
-scripts/        Notion 迁移示例脚本、前端端到端验证
+scripts/        Notion 迁移示例脚本、前端端到端验证、数据迁移演练与接口对拍
 deploy/         Docker Compose 与部署文档
 ```
