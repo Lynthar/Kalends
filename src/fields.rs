@@ -59,26 +59,48 @@ fn scope(conn: &Connection, tbl: &str) -> anyhow::Result<(&'static str, String)>
     })
 }
 
-// 选项存对象数组 [{v, c?}]：v=值，c=标签调色板号 0..9（缺省=前端按值哈希定色）。
-// 入参兼容纯字符串（老形态/顺手写法），一律常规化并按 v 去重。
+// 选项存对象数组 [{v, c?, spend?, alert?, timeline?}]：v=值，c=标签调色板号 0..9
+//（缺省=前端按值哈希定色）；状态词表的选项另带三个语义标记，engine 据此判断
+// 计支出 / 发提醒 / 上到期时间线。入参兼容纯字符串（老形态/顺手写法），一律常规化并按 v 去重。
+const SEM_FLAGS: &[&str] = &["spend", "alert", "timeline"];
+
+fn truthy(v: Option<&Value>) -> bool {
+    match v {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0) != 0.0,
+        Some(Value::String(s)) => !s.is_empty() && s != "0" && s != "false",
+        _ => false,
+    }
+}
+
 fn opts_array(b: &Value) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     for x in b.get("options").and_then(|x| x.as_array()).into_iter().flatten() {
-        let (v, c) = match x {
-            Value::String(s) => (s.trim().to_string(), None),
+        let (v, c, obj) = match x {
+            Value::String(s) => (s.trim().to_string(), None, None),
             Value::Object(o) => (
                 o.get("v").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).unwrap_or_default(),
                 o.get("c").and_then(|c| c.as_i64()).filter(|c| (0..10).contains(c)),
+                Some(o),
             ),
-            _ => (String::new(), None),
+            _ => (String::new(), None, None),
         };
         if v.is_empty() || out.iter().any(|o| o["v"] == v.as_str()) {
             continue;
         }
-        out.push(match c {
-            Some(c) => json!({ "v": v, "c": c }),
-            None => json!({ "v": v }),
-        });
+        let mut item = json!({ "v": v });
+        if let Some(c) = c {
+            item["c"] = json!(c);
+        }
+        // 语义标记只在传了的时候落表，没传的选项不凭空获得语义
+        for flag in SEM_FLAGS {
+            if let Some(o) = obj {
+                if o.contains_key(*flag) {
+                    item[*flag] = json!(i64::from(truthy(o.get(*flag))));
+                }
+            }
+        }
+        out.push(item);
     }
     out
 }
@@ -94,13 +116,19 @@ fn field_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
         "options": serde_json::from_str::<Value>(&options).unwrap_or_else(|_| json!([])),
         "builtin": r.get::<_, i64>(6)? != 0,
         "pos": r.get::<_, i64>(7)?,
+        "src": r.get::<_, String>(8)?,
+        "shown": r.get::<_, i64>(9)? != 0,
+        "config": r
+            .get::<_, Option<String>>(10)?
+            .and_then(|x| serde_json::from_str::<Value>(&x).ok())
+            .unwrap_or(Value::Null),
     }))
 }
 
 async fn list(State(app): State<App>) -> R {
     let conn = app.db.lock().unwrap();
     let mut stmt = conn
-        .prepare("SELECT id,tbl,key,name,ftype,options,builtin,pos FROM fields ORDER BY tbl,pos,id")?;
+        .prepare("SELECT id,tbl,key,name,ftype,options,builtin,pos,src,shown,config FROM fields ORDER BY tbl,pos,id")?;
     let rows: Vec<Value> = stmt.query_map([], field_json)?.collect::<rusqlite::Result<_>>()?;
     Ok(Json(json!(rows)))
 }
@@ -127,33 +155,37 @@ async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
     let id = conn.last_insert_rowid();
     conn.execute("UPDATE fields SET key='c'||id WHERE id=?1", [id])?;
     let row = conn.query_row(
-        "SELECT id,tbl,key,name,ftype,options,builtin,pos FROM fields WHERE id=?1",
+        "SELECT id,tbl,key,name,ftype,options,builtin,pos,src,shown,config FROM fields WHERE id=?1",
         [id],
         field_json,
     )?;
     Ok(Json(row))
 }
 
-// 重命名自定义列
+// 改列的显示名与是否默认上表；显示名纯属呈现，引擎字段也可以改
 async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value>) -> R {
     let name = s(&b, "name").ok_or_else(|| anyhow!("列名不能为空"))?;
     let conn = app.db.lock().unwrap();
-    let n = conn.execute(
-        "UPDATE fields SET name=?1 WHERE id=?2 AND builtin=0",
-        params![name, id],
-    )?;
+    let n = match b.get("shown") {
+        Some(v) => conn.execute(
+            "UPDATE fields SET name=?1,shown=?2 WHERE id=?3",
+            params![name, i64::from(truthy(Some(v))), id],
+        )?,
+        None => conn.execute("UPDATE fields SET name=?1 WHERE id=?2", params![name, id])?,
+    };
     if n == 0 {
-        return Err(anyhow!("列不存在或不可改名").into());
+        return Err(anyhow!("列不存在").into());
     }
     Ok(Json(json!({ "ok": true })))
 }
 
-// 删除自定义列：连同各行 extra 里挂的值一起清掉
+// 删除列：只有值挂在 extra 里的列可删（引擎真列与算出来的列删了没有意义），
+// 连同各行 extra 里挂的值一起清掉
 async fn delete_field(State(app): State<App>, Path(id): Path<i64>) -> R {
     let conn = app.db.lock().unwrap();
     let row: Option<(String, String)> = conn
         .query_row(
-            "SELECT tbl,key FROM fields WHERE id=?1 AND builtin=0",
+            "SELECT tbl,key FROM fields WHERE id=?1 AND src='extra'",
             [id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )

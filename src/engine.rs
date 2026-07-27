@@ -58,7 +58,7 @@ pub fn cycle_label(cycle: &str, cycle_days: Option<i64>) -> String {
 
 /// 状态的三层语义：计不计支出 / 发不发提醒 / 上不上到期时间线。
 /// 以前这三件事散在各表的 SQL 字面量里（`status='Active'`、`IN ('Active','Ending')`），
-/// 现在集中于此；后续可由库自己的状态词表覆写，默认值就是内置六值的既有含义。
+/// 现在以各库状态词表里的选项标记为准（见 `sem_map`），读不到就回落到内置六值的既有含义。
 #[derive(Clone, Copy)]
 pub struct StatusSem {
     pub spend: bool,
@@ -79,6 +79,57 @@ pub fn status_sem(status: &str) -> StatusSem {
         alert,
         timeline,
     }
+}
+
+/// 各库状态词表里的语义标记：库键 → 状态值 → 语义。用户在选项浮层里改的就是这份。
+type SemMap = std::collections::HashMap<String, std::collections::HashMap<String, StatusSem>>;
+
+fn truthy(v: Option<&Value>) -> bool {
+    match v {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0) != 0.0,
+        Some(Value::String(s)) => !s.is_empty() && s != "0" && s != "false",
+        _ => false,
+    }
+}
+
+fn sem_map(conn: &Connection) -> Result<SemMap> {
+    let mut out: SemMap = Default::default();
+    let mut stmt = conn.prepare("SELECT tbl,options FROM fields WHERE key='status'")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (tbl, options) = row?;
+        let Ok(Value::Array(opts)) = serde_json::from_str::<Value>(&options) else {
+            continue;
+        };
+        let mut m = std::collections::HashMap::new();
+        for o in opts {
+            let Some(v) = o.get("v").and_then(|v| v.as_str()) else { continue };
+            // 没带标记的选项（例如用户手加的状态）按内置默认理解，不是一律无语义
+            let has_flags = ["spend", "alert", "timeline"].iter().any(|f| o.get(*f).is_some());
+            let sem = if has_flags {
+                StatusSem {
+                    spend: truthy(o.get("spend")),
+                    alert: truthy(o.get("alert")),
+                    timeline: truthy(o.get("timeline")),
+                }
+            } else {
+                status_sem(v)
+            };
+            m.insert(v.to_string(), sem);
+        }
+        out.insert(tbl, m);
+    }
+    Ok(out)
+}
+
+fn sem_of(map: &SemMap, coll: &str, status: &str) -> StatusSem {
+    map.get(coll)
+        .and_then(|m| m.get(status))
+        .copied()
+        .unwrap_or_else(|| status_sem(status))
 }
 
 /// 一个条目在到期时间线上的样子；跨库统一，engine 之外只认这个形状。
@@ -165,9 +216,10 @@ fn rows(conn: &Connection) -> Result<Vec<Row>> {
 /// 合并到期时间线：所有库里状态语义为"上时间线"的条目，按到期日升序。
 pub fn upcoming(conn: &Connection) -> Result<Vec<Value>> {
     let t = today();
+    let sems = sem_map(conn)?;
     let mut items: Vec<(NaiveDate, Value)> = Vec::new();
     for r in rows(conn)? {
-        let sem = status_sem(&r.status);
+        let sem = sem_of(&sems, &r.key, &r.status);
         if !sem.timeline {
             continue;
         }
@@ -203,8 +255,9 @@ pub fn upcoming(conn: &Connection) -> Result<Vec<Value>> {
 /// 分币种月/年支出：状态语义为"计支出"且周期可折算的条目。
 pub fn totals(conn: &Connection) -> Result<Vec<Value>> {
     let mut map: BTreeMap<String, f64> = BTreeMap::new();
+    let sems = sem_map(conn)?;
     for r in rows(conn)? {
-        if !status_sem(&r.status).spend {
+        if !sem_of(&sems, &r.key, &r.status).spend {
             continue;
         }
         let (Some(price), Some(currency)) = (r.price, r.currency.clone()) else {
