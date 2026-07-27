@@ -47,7 +47,6 @@ pub fn renewals_router() -> Router<App> {
         .route("/api/notify/test", post(notify_test))
         .route("/calendar.ics", get(calendar))
         .merge(crate::collections::router())
-        .merge(crate::legacy::router())
 }
 
 pub fn s(v: &Value, k: &str) -> Option<String> {

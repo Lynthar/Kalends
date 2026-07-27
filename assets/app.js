@@ -74,27 +74,22 @@ function safeUrl(u) {
 async function loadAll() {
   const hasR = MODULES.includes('renewals');
   const hasM = MODULES.includes('media');
-  [state.overview, state.subs, state.sims, state.vps, state.settings, state.media] =
-    await Promise.all([
-      hasR ? api('/api/overview') : { today: '', upcoming: [], totals: [] },
-      hasR ? api('/api/subscriptions') : [],
-      hasR ? api('/api/sims') : [],
-      hasR ? api('/api/vps') : [],
-      api('/api/settings'),
-      hasM ? api('/api/media') : [],
-    ]);
+  // 先取概览（里面带库清单）与设置，之后才知道有哪些库要拉条目
+  [state.overview, state.settings, state.media] = await Promise.all([
+    hasR ? api('/api/overview') : { today: '', upcoming: [], totals: [], collections: [] },
+    api('/api/settings'),
+    hasM ? api('/api/media') : [],
+  ]);
   const wins = ['7', '14', '30', '60', '90', '180', 'all'];
   state.upWindow = wins.includes(state.settings['ui.upcoming_days'])
     ? state.settings['ui.upcoming_days'] : '30';
-  // 表格的列如今由字段注册表决定，所以每次全量加载都要一并刷新，
+  // 表格的列由字段注册表决定，所以每次全量加载都要一并刷新，
   // 否则新建库/加列之后前端还按旧字段集渲染（会渲染出没有名称格的空行）
   try { await refreshFields(); } catch (e) { toast('字段注册加载失败：' + e.message, true); }
-  // 自建库的条目走通用端点；预置三库暂仍由上面的旧端点取（切片 B2b 一并收敛）
-  if (hasR) {
-    await Promise.all(userColls().map(async c => {
-      state[c.key] = await api(`/api/collections/${encodeURIComponent(c.key)}/items`);
-    }));
-  }
+  // 所有库（含三个预置库）的条目都走同一条通用端点
+  await Promise.all(colls().map(async c => {
+    state[c.key] = await api(`/api/collections/${encodeURIComponent(c.key)}/items`);
+  }));
   renderAll();
 }
 
@@ -102,10 +97,7 @@ function renderAll() {
   renderUpcoming();
   renderTotals();
   syncColls();
-  renderSubs();
-  renderSims();
-  renderVps();
-  for (const c of userColls()) renderColl(c.key);
+  for (const c of colls()) renderColl(c.key);
   renderMedia();
 }
 
@@ -214,15 +206,7 @@ const CYCLE_RANK = { weekly: 7, monthly: 30, quarterly: 91, semiannual: 182, ann
 const dayDiff = (a, b) => Math.round((a - b) / 864e5);
 const todayDate = () => new Date((state.overview?.today || '1970-01-01') + 'T00:00:00');
 
-function simLeft(it) {
-  if (!it.last_renewed || !(it.cycle_days > 0)) return null;
-  return it.cycle_days - dayDiff(todayDate(), new Date(it.last_renewed + 'T00:00:00'));
-}
 
-function vpsLeft(it) {
-  const due = vpsDue(it);
-  return due ? dayDiff(due, todayDate()) : null;
-}
 
 const cycleText = it => it.cycle === 'days' ? `Every ${it.cycle_days ?? '?'} days` : (CYCLE_LABEL[it.cycle] || '');
 
@@ -255,37 +239,6 @@ const colType = (tab, k) => views[tab].types?.[k] || COLS[tab][k].t;
 // val：取排序值（str=1 按中文串比较，否则按数值）；fvals：取筛选值列表（无值行归入 BLANK）
 const ordVal = (ord, get) => r => { const i = ord.indexOf(get(r)); return i < 0 ? null : i; };
 const COLS = {
-  subs: {
-    name: { t: 'text', val: r => r.name, str: 1, fvals: r => r.name ? [r.name] : [] },
-    status: { t: 'status', ord: R_STATUSES, val: ordVal(R_STATUSES, r => r.status), fvals: r => r.status ? [r.status] : [] },
-    category: { t: 'sel', conv: 1, val: r => r.category, str: 1, fvals: r => r.category ? [r.category] : [] },
-    price: { t: 'num', val: r => r.price },
-    currency: { t: 'sel', conv: 1, val: r => r.currency, str: 1, fvals: r => r.currency ? [r.currency] : [] },
-    cycle: { t: 'sel', conv: 1, val: r => r.cycle === 'days' ? r.cycle_days : CYCLE_RANK[r.cycle], fvals: r => r.cycle ? [cycleText(r)] : [] },
-    next_renewal: { t: 'date', val: r => r.next_renewal, str: 1 },
-    payment_method: { t: 'sel', conv: 1, val: r => r.payment_method, str: 1, fvals: r => r.payment_method ? [r.payment_method] : [] },
-    notes: { t: 'text', conv: 1, val: r => r.notes, str: 1, fvals: r => r.notes ? [r.notes] : [] },
-  },
-  sims: {
-    name: { t: 'text', val: r => r.name, str: 1, fvals: r => r.name ? [r.name] : [] },
-    forms: { t: 'multi', val: r => (r.forms || []).join(' '), str: 1, fvals: r => r.forms || [] },
-    status: { t: 'status', ord: R_STATUSES, val: ordVal(R_STATUSES, r => r.status), fvals: r => r.status ? [r.status] : [] },
-    last_renewed: { t: 'date', val: r => r.last_renewed, str: 1 },
-    left: { t: 'num', val: simLeft },
-    keepalive_action: { t: 'text', conv: 1, val: r => r.keepalive_action, str: 1, fvals: r => r.keepalive_action ? [r.keepalive_action] : [] },
-  },
-  vps: {
-    vendor: { t: 'text', val: r => r.vendor + ' ' + (r.product || ''), str: 1, fvals: r => [r.vendor, r.product].filter(Boolean) },
-    status: { t: 'status', ord: R_STATUSES, val: ordVal(R_STATUSES, r => r.status), fvals: r => r.status ? [r.status] : [] },
-    locations: { t: 'multi', val: r => (r.locations || []).join(' '), str: 1, fvals: r => r.locations || [] },
-    purpose: { t: 'sel', conv: 1, val: r => r.purpose, str: 1, fvals: r => r.purpose ? [r.purpose] : [] },
-    spec: { t: 'text', conv: 1, val: r => (r.cores || r.ram_gb) ? (r.cores || 0) * 1024 + (r.ram_gb || 0) : null, fvals: r => vpsSpec(r) ? [vpsSpec(r)] : [] },
-    routes: { t: 'multi', val: r => (r.routes || []).join(' '), str: 1, fvals: r => r.routes || [] },
-    price: { t: 'num', val: r => r.price },
-    currency: { t: 'sel', conv: 1, val: r => r.currency, str: 1, fvals: r => r.currency ? [r.currency] : [] },
-    last_renewed: { t: 'date', val: r => r.last_renewed, str: 1 },
-    left: { t: 'num', val: vpsLeft },
-  },
   media: {
     title: { t: 'text', val: r => r.title, str: 1, fvals: r => [r.title, r.orig_title].filter(Boolean) },
     kind: { t: 'sel', conv: 1, ord: M_KINDS, val: ordVal(M_KINDS, r => r.kind), fvals: r => r.kind ? [r.kind] : [] },
@@ -376,7 +329,15 @@ const tagsFor = (tab, k, arr) => (arr || []).map(v => tagFor(tab, k, v)).join(''
 
 // 加删列后重建表头：回到模板再注入，视图偏好走 initHead 的温和迁移
 const THEAD_HTML = {};
-function rebuildHead(tab) {
+async function rebuildHead(tab) {
+  // 库的表头由字段注册表生成：先刷字段，再交给 ensureCollDom 重建，不走下面媒体表那条模板路
+  const c = collOf(tab);
+  if (c) {
+    await refreshFields();
+    ensureCollDom(c);
+    renderColl(tab);
+    return;
+  }
   const thead = $(HEAD_SEL[tab]);
   thead.rows[0].innerHTML = THEAD_HTML[tab];
   thead.closest('.tablewrap').querySelector('.newrow')?.remove();
@@ -394,17 +355,7 @@ function customTds(tab, it) {
   return h;
 }
 
-const vpsSpec = it => [
-  it.cores ? `${it.cores}C` : '',
-  it.ram_gb ? `${it.ram_gb}G` : '',
-  it.storage_gb ? `${it.storage_gb}G ${it.storage_type || ''}`.trim() : '',
-].filter(Boolean).join(' / ');
 
-const SEARCH_FIELDS = {
-  subs: r => [r.name, r.category, r.notes, r.account, r.payment_method],
-  sims: r => [r.name, r.phone_number, r.keepalive_action, r.notes, ...(r.forms || [])],
-  vps: r => [r.vendor, r.product, r.purpose, r.notes, r.account, ...(r.locations || []), ...(r.routes || [])],
-};
 
 const filterActive = f => Array.isArray(f)
   ? f.length > 0
@@ -477,8 +428,10 @@ function setEmpty(sel, shown, base) {
   el.textContent = base > 0 ? '无匹配项，试试清除筛选' : '此栏尚无记录';
 }
 
-const RENDER = { subs: renderSubs, sims: renderSims, vps: renderVps, media: renderMedia };
-const HEAD_SEL = { subs: '#view-subs thead', sims: '#view-sims thead', vps: '#view-vps thead', media: '#m-tablewrap thead' };
+// 表内搜索取哪些字段：库的由 ensureCollDom 按字段集注册；媒体走自己的搜索框
+const SEARCH_FIELDS = {};
+const RENDER = { media: renderMedia };   // 库的渲染器由 ensureCollDom 注册
+const HEAD_SEL = { media: '#m-tablewrap thead' };   // 库的表头选择器由 ensureCollDom 注册
 const M_DIR_DEFAULT = { marked: -1, year: -1, rating: -1, douban: -1, title: 1 };
 
 // dir: 1 升 / -1 降 / null 清除（媒体表的默认序 标记日期↓ 视同无排序）
@@ -565,7 +518,7 @@ function initHead(tab) {
   const nr = document.createElement('div');
   nr.className = 'newrow';
   nr.textContent = '＋ 新建';
-  nr.onclick = { subs: () => openSubDialog(null), sims: () => openSimDialog(null), vps: () => openVpsDialog(null), media: () => openMediaDialog(null) }[tab];
+  nr.onclick = () => (tab === 'media' ? openMediaDialog(null) : openItemDialog(tab, null));
   thead.closest('.tablewrap').appendChild(nr);
   applyColumns(tab);
   applyWidths(tab);
@@ -1087,7 +1040,7 @@ function openNewColPop(tab, anchor) {
     if (!name) { toast('列名不能为空', true); return; }
     const ftype = popEl.querySelector('[data-type]').value;
     closePop();
-    if (await fieldCall('/api/fields', 'POST', { tbl: tab, name, ftype })) rebuildHead(tab);
+    if (await fieldCall('/api/fields', 'POST', { tbl: tab, name, ftype })) await rebuildHead(tab);
   };
   popEl.querySelector('[data-go]').onclick = go;
   popEl.querySelector('[data-name]').addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
@@ -1110,7 +1063,7 @@ function openRenameColPop(tab, k, th) {
     const name = inp.value.trim();
     if (!name || name === f.name) { closePop(); return; }
     closePop();
-    if (await fieldCall(`/api/fields/${f.id}`, 'PUT', { name })) rebuildHead(tab);
+    if (await fieldCall(`/api/fields/${f.id}`, 'PUT', { name })) await rebuildHead(tab);
   });
   placePop(popEl, th);
   inp.focus();
@@ -1184,7 +1137,7 @@ function openHeadMenu(tab, th) {
     items.push({ ic: '✎', t: '重命名列', act: () => openRenameColPop(tab, k, th), keepPop: true });
     items.push({ ic: '✕', t: '删除列', act: async () => {
       if (!confirm(`删除列「${th.dataset.label}」？该列在所有行的值将被清除，不可撤销。`)) return;
-      if (await fieldCall(`/api/fields/${COLS[tab][k].custom}`, 'DELETE', {})) rebuildHead(tab);
+      if (await fieldCall(`/api/fields/${COLS[tab][k].custom}`, 'DELETE', {})) await rebuildHead(tab);
     } });
   }
   popEl = document.createElement('div');
@@ -1285,33 +1238,9 @@ function renderViewPills(tab) {
 /* ── 点格即编：点单元格就地编辑，保存 = 整行 PUT（后端是全量替换语义）──
    复合格（名称/商家产品/规格/周期）弹多输入迷你表单；表外字段仍走「编辑」全表单。 */
 const API_PATH = { subs: 'subscriptions', sims: 'sims', vps: 'vps', media: 'media' };
-const NATIVE_ARR = { sims: ['forms'], vps: ['locations', 'routes'] };
 
 // 行对象 → PUT 全量体（与各编辑表单发的字段集一致，缺一项就会被后端置空）
 const ROW_BODY = {
-  subs: it => ({
-    name: it.name, parent_id: it.parent_id ?? undefined, category: it.category ?? '',
-    status: it.status, price: it.price ?? undefined, currency: it.currency ?? '',
-    cycle: it.cycle ?? '', cycle_days: it.cycle_days ?? undefined,
-    next_renewal: it.next_renewal ?? '', payment_method: it.payment_method ?? '',
-    account: it.account ?? '', url: it.url ?? '', notes: it.notes ?? '', logo: it.logo ?? '',
-    extra: it.extra || {},
-  }),
-  sims: it => ({
-    name: it.name, phone_number: it.phone_number ?? '', status: it.status,
-    keepalive_action: it.keepalive_action ?? '', cycle_days: it.cycle_days ?? undefined,
-    last_renewed: it.last_renewed ?? '', notes: it.notes ?? '', forms: it.forms || [], extra: it.extra || {},
-  }),
-  vps: it => ({
-    vendor: it.vendor, product: it.product ?? '', status: it.status, purpose: it.purpose ?? '',
-    storage_type: it.storage_type ?? '', extra_storage: it.extra_storage ?? '',
-    currency: it.currency ?? '', cycle: it.cycle ?? '', last_renewed: it.last_renewed ?? '',
-    url: it.url ?? '', account: it.account ?? '', notes: it.notes ?? '',
-    cycle_days: it.cycle_days ?? undefined, ipv6: it.ipv6 ?? 0,
-    cores: it.cores ?? undefined, ram_gb: it.ram_gb ?? undefined, storage_gb: it.storage_gb ?? undefined,
-    port_gbps: it.port_gbps ?? undefined, traffic_tb: it.traffic_tb ?? undefined, price: it.price ?? undefined,
-    locations: it.locations || [], routes: it.routes || [], extra: it.extra || {},
-  }),
   media: it => {
     const b = { extra: it.extra || {} };
     for (const k of M_STR) b[k] = it[k] ?? '';
@@ -1321,30 +1250,37 @@ const ROW_BODY = {
   },
 };
 
+// 行对象 → 整行 PUT 的体。后端是全量替换语义：字段集漏一项就被置空，
+// 所以按注册表把每个可写字段都带上。**parent_id 与 logo 没被注册成字段**
+// （子行归属与图标由专门的 UI 管），必须在这里显式带回去，否则一次编辑就清掉它们。
+function itemBodyFromRow(key, r) {
+  const b = { extra: { ...(r.extra || {}) } };
+  for (const f of fieldsOf(key)) {
+    if (f.src === 'calc') continue;
+    if (f.src === 'col') {
+      const v = r[f.key];
+      b[f.key] = f.ftype === 'num' ? (v ?? undefined) : (Array.isArray(v) ? v : (v ?? ''));
+    }
+  }
+  b.name = r.name ?? '';
+  if (r.parent_id != null) b.parent_id = r.parent_id;
+  if (r.logo) b.logo = r.logo;
+  return b;
+}
+
 async function patchRow(tab, it, patch) {
   try {
-    await api(`/api/${API_PATH[tab]}/${it.id}`, { method: 'PUT', body: JSON.stringify(ROW_BODY[tab]({ ...it, ...patch })) });
+    const body = tab === 'media'
+      ? ROW_BODY.media({ ...it, ...patch })
+      : itemBodyFromRow(tab, { ...it, ...patch });
+    const path = tab === 'media' ? `/api/media/${it.id}` : `/api/items/${it.id}`;
+    await api(path, { method: 'PUT', body: JSON.stringify(body) });
     await loadAll();
   } catch (err) { toast(err.message, true); }
 }
 
 // 复合格与字段名映射；没列出的格按列的有效类型走通用编辑器（字段名=列键）
 const CELL_SPEC = {
-  subs: {
-    name: { inputs: [['name', '名称', 'text']] },
-    price: { inputs: [['price', '价格', 'number']] },
-    cycle: { cycle: 1 },
-  },
-  sims: {
-    name: { inputs: [['name', '名称', 'text'], ['phone_number', '号码', 'text']] },
-    left: { inputs: [['cycle_days', '保号周期（天）', 'number']] },
-  },
-  vps: {
-    vendor: { inputs: [['vendor', '商家', 'text'], ['product', '产品 / 套餐', 'text']] },
-    spec: { inputs: [['cores', 'CPU 核数', 'number'], ['ram_gb', '内存（GB）', 'number'], ['storage_gb', '存储（GB）', 'number'], ['storage_type', '存储类型', 'text']] },
-    price: { inputs: [['price', '费用', 'number']] },
-    left: { cycle: 1 },
-  },
   media: {
     title: { inputs: [['title', '标题', 'text'], ['orig_title', '又名 / 原文名', 'text']] },
     year: { inputs: [['year', '年份', 'number']] },
@@ -1534,22 +1470,26 @@ function openCellPop(tab, it, k, td) {
   if (!col) return;
   const spec = CELL_SPEC[tab]?.[k] || {};
   const t = colType(tab, k);
-  const save = v => patchRow(tab, it, col.custom ? extraPatch(it, k, v) : { [spec.f || k]: v });
-  if (spec.cycle) return cycleEditor(tab, it, td);
+  const toExtra = col.src ? col.src === 'extra' : !!col.custom;
+  // 算出来的列（剩余天数 / 模板列）不能就地编辑，点它开详情表单去改源字段
+  if (col.src === 'calc') return openItemDialog(tab, it);
+  // 周期是复合格：周期枚举 + 自定义天数
+  if (spec.cycle || k === 'cycle') return cycleEditor(tab, it, td);
+  const save = v => patchRow(tab, it, toExtra ? extraPatch(it, k, v) : { [spec.f || k]: v });
   if (spec.inputs) return inputsEditor(tab, it, td, spec.inputs, patch => patchRow(tab, it, patch));
   if (t === 'sel' || t === 'status') return pickEditor(tab, it, td, k, save);
   if (t === 'star') return starEditor(tab, it, td, k, save);
   if (t === 'multi') {
     return multiEditor(tab, it, td, k, sel => {
-      if (col.custom) return patchRow(tab, it, extraPatch(it, k, sel));
-      if ((NATIVE_ARR[tab] || []).includes(k)) return patchRow(tab, it, { [k]: sel });
+      if (toExtra) return patchRow(tab, it, extraPatch(it, k, sel));
+      if (col.src === 'col') return patchRow(tab, it, { [k]: sel });
       return patchRow(tab, it, { [k]: sel.join(', ') }); // 文本列的多选呈现：拼回字符串
     });
   }
   const f = spec.f || k;
   const type = t === 'num' ? 'number' : t === 'date' ? 'date' : 'text';
   return inputsEditor(tab, it, td, [[f, colLabel(tab, k), type]], patch => {
-    if (col.custom) return patchRow(tab, it, extraPatch(it, k, patch[f] ?? ''));
+    if (toExtra) return patchRow(tab, it, extraPatch(it, k, patch[f] ?? ''));
     return patchRow(tab, it, patch);
   });
 }
@@ -1566,221 +1506,6 @@ for (const [tab, sel] of Object.entries({ subs: '#subs-body', sims: '#sims-body'
 }
 
 /* ── 订阅表（Notion 式子行：服务→套餐档位可折叠，比价一目了然）── */
-function renderSubs() {
-  const tb = $('#subs-body');
-  tb.innerHTML = '';
-  const byId = Object.fromEntries(state.subs.map(x => [x.id, x]));
-  const base = state.subs.length;
-  let rows = applyView('subs', state.subs);
-  if (!views.subs.sort) rows = [...rows].sort((a, b) => cmpZh(a.name, b.name));
-  // 父行可见则子行吸附其下（受折叠控制）；父行被筛掉的子行原位平铺、保留归属前缀
-  const vis = new Set(rows.map(r => r.id));
-  const kids = new Map();
-  const top = [];
-  for (const r of rows) {
-    if (r.parent_id && vis.has(r.parent_id)) {
-      if (!kids.has(r.parent_id)) kids.set(r.parent_id, []);
-      kids.get(r.parent_id).push(r);
-    } else {
-      top.push(r);
-    }
-  }
-  const collapsed = new Set(views.subs.collapsed || []);
-  setEmpty('#subs-empty', rows.length, base);
-  const logoOf = r => r.logo || (r.parent_id && byId[r.parent_id]?.logo) || '';
-  const emit = (it, depth) => {
-    const parent = it.parent_id ? byId[it.parent_id] : null;
-    const hasKids = kids.has(it.id);
-    const tr = document.createElement('tr');
-    tr.dataset.id = it.id;
-    if (depth) tr.classList.add('subrow');
-    tr.innerHTML = `
-      <td>${hasKids ? `<button class="tgl" data-tgl type="button" title="折叠 / 展开子行">${collapsed.has(it.id) ? '▸' : '▾'}</button>` : ''}${(!depth && parent) ? `<span class="sub-parent">${esc(parent.name)} ↳ </span>` : ''}${logoOf(it) ? `<img class="slogo" src="/logos/${esc(logoOf(it))}" alt="" loading="lazy">` : ''}${esc(it.name)}
-        ${safeUrl(it.url) ? ` <a class="btn link" href="${esc(safeUrl(it.url))}" target="_blank" rel="noreferrer">↗</a>` : ''}<button class="rowopen" data-open type="button" title="打开详情">⤢</button></td>
-      <td>${stPill(it.status)}</td>
-      <td>${cellVal('subs', 'category', it.category)}</td>
-      <td class="amt">${esc(money(it.currency, it.price))}</td>
-      <td>${cellVal('subs', 'currency', it.currency)}</td>
-      <td>${cellVal('subs', 'cycle', cycleText(it))}</td>
-      <td class="cdate">${esc(it.next_renewal || '')}</td>
-      <td>${cellVal('subs', 'payment_method', it.payment_method)}</td>
-      <td class="muted clip" title="${esc(it.notes || '')}">${cellVal('subs', 'notes', it.notes)}</td>
-      ${customTds('subs', it)}<td class="ops">
-        ${it.status === 'Active' && it.next_renewal ? `<button class="btn link" data-renew type="button">记续费</button>` : ''}
-        <button class="btn link" data-del type="button">删</button>
-      </td>`;
-    tr.querySelector('[data-open]').onclick = () => openSubDialog(it);
-    tr.querySelector('[data-del]').onclick = () => delItem('subscriptions', it);
-    const rb = tr.querySelector('[data-renew]');
-    if (rb) rb.onclick = () => doRenew(`subscription:${it.id}`);
-    const tg = tr.querySelector('[data-tgl]');
-    if (tg) tg.onclick = () => {
-      const c = new Set(views.subs.collapsed || []);
-      if (c.has(it.id)) c.delete(it.id);
-      else c.add(it.id);
-      views.subs.collapsed = [...c];
-      saveViews();
-      renderSubs();
-    };
-    tb.appendChild(tr);
-  };
-  for (const it of top) {
-    emit(it, 0);
-    if (kids.has(it.id) && !collapsed.has(it.id)) {
-      for (const c of kids.get(it.id)) emit(c, 1);
-    }
-  }
-  syncTable('subs');
-}
-
-/* ── SIM 表 ── */
-function renderSims() {
-  const tb = $('#sims-body');
-  tb.innerHTML = '';
-  const base = state.sims.length;
-  const rows = applyView('sims', state.sims);
-  setEmpty('#sims-empty', rows.length, base);
-  for (const it of rows) {
-    let barHtml = '<span class="muted">—</span>';
-    const left = simLeft(it);
-    if (left != null) {
-      const elapsed = it.cycle_days - left;
-      const pct = Math.min(100, Math.max(0, elapsed / it.cycle_days * 100));
-      const lbl = left < 0 ? `已超期 ${-left} 天` : `剩 ${left} 天 / ${it.cycle_days}`;
-      barHtml = `<div class="bar"><div class="track"><div class="fill" style="width:${pct}%"></div></div><div class="lbl">${lbl}</div></div>`;
-    }
-    const tr = document.createElement('tr');
-    tr.dataset.id = it.id;
-    tr.innerHTML = `
-      <td>${esc(it.name)}<button class="rowopen" data-open type="button" title="打开详情">⤢</button>${it.phone_number ? `<div class="muted" style="font-size:.75rem">${esc(it.phone_number)}</div>` : ''}</td>
-      <td>${tagsFor('sims', 'forms', it.forms)}</td>
-      <td>${stPill(it.status)}</td>
-      <td class="cdate">${esc(it.last_renewed || '')}</td>
-      <td class="wide">${barHtml}</td>
-      <td class="muted clip" title="${esc(it.keepalive_action || '')}">${cellVal('sims', 'keepalive_action', it.keepalive_action)}</td>
-      ${customTds('sims', it)}<td class="ops">
-        ${it.status === 'Active' ? `<button class="btn link" data-renew type="button">已保号</button>` : ''}
-        <button class="btn link" data-del type="button">删</button>
-      </td>`;
-    tr.querySelector('[data-open]').onclick = () => openSimDialog(it);
-    tr.querySelector('[data-del]').onclick = () => delItem('sims', it);
-    const rb = tr.querySelector('[data-renew]');
-    if (rb) rb.onclick = () => doRenew(`sim:${it.id}`);
-    tb.appendChild(tr);
-  }
-  syncTable('sims');
-}
-
-/* ── VPS 表 ── */
-function addMonths(d, n) {
-  const x = new Date(d);
-  x.setMonth(x.getMonth() + n);
-  return x;
-}
-
-function vpsDue(it) {
-  if (!it.last_renewed) return null;
-  const last = new Date(it.last_renewed + 'T00:00:00');
-  if (it.cycle === 'weekly') return new Date(last.getTime() + 7 * 864e5);
-  if (it.cycle === 'days') return it.cycle_days > 0 ? new Date(last.getTime() + it.cycle_days * 864e5) : null;
-  const months = { monthly: 1, quarterly: 3, semiannual: 6, annual: 12, biennial: 24, triennial: 36 }[it.cycle];
-  return months ? addMonths(last, months) : null;
-}
-
-function renderVps() {
-  const tb = $('#vps-body');
-  tb.innerHTML = '';
-  const base = state.vps.length;
-  const rows = applyView('vps', state.vps);
-  setEmpty('#vps-empty', rows.length, base);
-  const today = todayDate();
-  for (const it of rows) {
-    const due = vpsDue(it);
-    let barHtml = '<span class="muted">—</span>';
-    if (due) {
-      const last = new Date(it.last_renewed + 'T00:00:00');
-      const total = Math.round((due - last) / 864e5);
-      const elapsed = Math.floor((today - last) / 864e5);
-      const left = total - elapsed;
-      const pct = Math.min(100, Math.max(0, elapsed / total * 100));
-      const lbl = left < 0 ? `已超期 ${-left} 天` : `剩 ${left} 天 / ${total}`;
-      barHtml = `<div class="bar"><div class="track"><div class="fill" style="width:${pct}%"></div></div><div class="lbl">${lbl}</div></div>`;
-    }
-    const routes = (it.routes || []).join(' / ');
-    const cyc = cycleText(it);
-    const tr = document.createElement('tr');
-    tr.dataset.id = it.id;
-    tr.innerHTML = `
-      <td>${esc(it.vendor)}<button class="rowopen" data-open type="button" title="打开详情">⤢</button>${it.product ? `<div class="muted" style="font-size:.75rem">${esc(it.product)}</div>` : ''}</td>
-      <td>${stPill(it.status)}</td>
-      <td>${tagsFor('vps', 'locations', it.locations)}</td>
-      <td>${cellVal('vps', 'purpose', it.purpose)}</td>
-      <td class="cdate">${cellVal('vps', 'spec', vpsSpec(it))}</td>
-      <td class="clip" title="${esc(routes)}">${tagsFor('vps', 'routes', it.routes)}</td>
-      <td class="amt">${esc(money(it.currency, it.price))}${cyc ? `<div class="muted" style="font-size:.72rem">${esc(cyc)}</div>` : ''}</td>
-      <td>${cellVal('vps', 'currency', it.currency)}</td>
-      <td class="cdate">${esc(it.last_renewed || '')}</td>
-      <td class="wide">${barHtml}</td>
-      ${customTds('vps', it)}<td class="ops">
-        ${(it.status === 'Active' || it.status === 'Ending') ? `<button class="btn link" data-renew type="button">已续费</button>` : ''}
-        <button class="btn link" data-del type="button">删</button>
-      </td>`;
-    tr.querySelector('[data-open]').onclick = () => openVpsDialog(it);
-    tr.querySelector('[data-del]').onclick = () => delItem('vps', it);
-    const rb = tr.querySelector('[data-renew]');
-    if (rb) rb.onclick = () => doRenew(`vps:${it.id}`);
-    tb.appendChild(tr);
-  }
-  syncTable('vps');
-}
-
-let editingVps = null;
-const V_STR = ['vendor', 'product', 'status', 'purpose', 'storage_type', 'extra_storage',
-  'currency', 'cycle', 'last_renewed', 'url', 'account', 'notes'];
-const V_NUM = ['cores', 'ram_gb', 'storage_gb', 'port_gbps', 'traffic_tb', 'price', 'cycle_days'];
-
-function openVpsDialog(it) {
-  editingVps = it || null;
-  const form = $('#form-vps');
-  form.reset();
-  $('#dlg-vps-title').textContent = it ? '编辑 VPS' : '新增 VPS';
-  const f = form.elements;
-  if (it) {
-    for (const k of V_STR) f[k].value = it[k] ?? '';
-    for (const k of V_NUM) f[k].value = it[k] ?? '';
-    f.ipv6.checked = it.ipv6 === 1;
-    f.locations.value = (it.locations || []).join(', ');
-    f.routes.value = (it.routes || []).join(', ');
-  }
-  syncVpsCycleDays();
-  $('#dlg-vps').showModal();
-}
-
-function syncVpsCycleDays() {
-  $('#vps-cycle-days').hidden = $('#form-vps').elements.cycle.value !== 'days';
-}
-
-$('#form-vps').elements.cycle.addEventListener('change', syncVpsCycleDays);
-$('#form-vps').addEventListener('submit', async e => {
-  e.preventDefault();
-  const f = e.target.elements;
-  const body = {};
-  for (const k of V_STR) body[k] = f[k].value;
-  for (const k of V_NUM) body[k] = f[k].value === '' ? undefined : +f[k].value;
-  body.currency = f.currency.value.toUpperCase();
-  body.ipv6 = f.ipv6.checked ? 1 : 0;
-  const splitArr = v => v.split(/[,，、]+/).map(x => x.trim()).filter(Boolean);
-  body.locations = splitArr(f.locations.value);
-  body.routes = splitArr(f.routes.value);
-  try {
-    if (editingVps) await api(`/api/vps/${editingVps.id}`, { method: 'PUT', body: JSON.stringify(body) });
-    else await api('/api/vps', { method: 'POST', body: JSON.stringify(body) });
-    $('#dlg-vps').close();
-    toast('已保存');
-    await loadAll();
-  } catch (err) { toast(err.message, true); }
-});
-
 async function delItem(kind, it) {
   if (!confirm(`删除「${it.name || it.vendor || it.title || ''}」？此操作不可撤销。`)) return;
   try {
@@ -1791,123 +1516,6 @@ async function delItem(kind, it) {
 }
 
 /* ── 订阅表单 ── */
-let editingSub = null;
-function openSubDialog(it) {
-  editingSub = it || null;
-  const f = $('#form-sub');
-  f.reset();
-  $('#dlg-sub-title').textContent = it ? '编辑订阅' : '新增订阅';
-  const sel = f.elements.parent_id;
-  sel.innerHTML = '<option value="">—</option>';
-  for (const s of state.subs) {
-    if (it && s.id === it.id) continue;
-    const o = document.createElement('option');
-    o.value = s.id;
-    o.textContent = s.name;
-    sel.appendChild(o);
-  }
-  if (it) {
-    for (const k of ['name', 'category', 'status', 'currency', 'cycle', 'next_renewal', 'payment_method', 'account', 'url', 'notes']) {
-      f.elements[k].value = it[k] ?? '';
-    }
-    f.elements.price.value = it.price ?? '';
-    f.elements.cycle_days.value = it.cycle_days ?? '';
-    f.elements.parent_id.value = it.parent_id ?? '';
-  }
-  const lv = $('#sub-logo-view');
-  const lc = $('#sub-logo-clear');
-  lv.hidden = !(it && it.logo);
-  lc.hidden = !(it && it.logo);
-  if (it && it.logo) lv.src = `/logos/${it.logo}`;
-  lc.onclick = async () => {
-    if (!confirm('清除该服务的 logo？')) return;
-    try {
-      await api(`/api/subscriptions/${it.id}/logo`, { method: 'DELETE' });
-      it.logo = null;
-      lv.hidden = true;
-      lc.hidden = true;
-      await loadAll();
-    } catch (err) { toast(err.message, true); }
-  };
-  syncCycleDays();
-  $('#dlg-sub').showModal();
-}
-
-function syncCycleDays() {
-  $('#row-cycle-days').hidden = $('#form-sub').elements.cycle.value !== 'days';
-}
-
-$('#form-sub').elements.cycle.addEventListener('change', syncCycleDays);
-$('#form-sub').addEventListener('submit', async e => {
-  e.preventDefault();
-  const f = e.target.elements;
-  const body = {
-    name: f.name.value, category: f.category.value, status: f.status.value,
-    price: f.price.value === '' ? undefined : +f.price.value,
-    currency: f.currency.value.toUpperCase(), cycle: f.cycle.value,
-    cycle_days: f.cycle_days.value === '' ? undefined : +f.cycle_days.value,
-    next_renewal: f.next_renewal.value, payment_method: f.payment_method.value,
-    account: f.account.value, url: f.url.value, notes: f.notes.value,
-    logo: editingSub?.logo ?? '',
-    parent_id: f.parent_id.value === '' ? undefined : +f.parent_id.value,
-  };
-  try {
-    let id = editingSub?.id;
-    if (editingSub) await api(`/api/subscriptions/${editingSub.id}`, { method: 'PUT', body: JSON.stringify(body) });
-    else id = (await api('/api/subscriptions', { method: 'POST', body: JSON.stringify(body) })).id;
-    const lf = f.logo_file?.files?.[0];
-    if (lf && id != null) {
-      const ext = ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/svg+xml': 'svg', 'image/gif': 'gif', 'image/x-icon': 'ico' })[lf.type]
-        || lf.name.split('.').pop().toLowerCase();
-      const up = await fetch(`/api/subscriptions/${id}/logo?ext=${encodeURIComponent(ext)}`, { method: 'POST', body: lf });
-      if (!up.ok) throw new Error((await up.json().catch(() => ({}))).error || 'logo 上传失败');
-    }
-    $('#dlg-sub').close();
-    toast('已保存');
-    await loadAll();
-  } catch (err) { toast(err.message, true); }
-});
-
-/* ── SIM 表单 ── */
-let editingSim = null;
-function openSimDialog(it) {
-  editingSim = it || null;
-  const f = $('#form-sim');
-  f.reset();
-  $('#dlg-sim-title').textContent = it ? '编辑 SIM 卡' : '新增 SIM 卡';
-  if (it) {
-    for (const k of ['name', 'phone_number', 'status', 'keepalive_action', 'last_renewed', 'notes']) {
-      f.elements[k].value = it[k] ?? '';
-    }
-    f.elements.cycle_days.value = it.cycle_days ?? '';
-    for (const cb of f.querySelectorAll('input[name="forms"]')) {
-      cb.checked = (it.forms || []).includes(cb.value);
-    }
-  }
-  $('#dlg-sim').showModal();
-}
-
-$('#form-sim').addEventListener('submit', async e => {
-  e.preventDefault();
-  const f = e.target;
-  const el = f.elements;
-  const body = {
-    name: el.name.value, phone_number: el.phone_number.value, status: el.status.value,
-    keepalive_action: el.keepalive_action.value,
-    cycle_days: el.cycle_days.value === '' ? undefined : +el.cycle_days.value,
-    last_renewed: el.last_renewed.value, notes: el.notes.value,
-    forms: [...f.querySelectorAll('input[name="forms"]:checked')].map(x => x.value),
-  };
-  try {
-    if (editingSim) await api(`/api/sims/${editingSim.id}`, { method: 'PUT', body: JSON.stringify(body) });
-    else await api('/api/sims', { method: 'POST', body: JSON.stringify(body) });
-    $('#dlg-sim').close();
-    toast('已保存');
-    await loadAll();
-  } catch (err) { toast(err.message, true); }
-});
-
-/* ── 设置 ── */
 function openSettings() {
   const st = state.settings;
   const f = $('#form-settings').elements;
@@ -2299,10 +1907,7 @@ document.querySelectorAll('.nav-tab[data-page]').forEach(b => b.onclick = () => 
 
 $('#btn-settings').onclick = openSettings;
 $('#btn-add').onclick = () => {
-  if (state.tab === 'subs') openSubDialog(null);
-  else if (state.tab === 'sims') openSimDialog(null);
-  else if (state.tab === 'vps') openVpsDialog(null);
-  else openItemDialog(state.tab, null);
+  openItemDialog(state.tab, null);
 };
 // 切表：视图容器由库决定，不再逐个写死
 function switchTab(key) {
@@ -2344,20 +1949,18 @@ window.addEventListener('resize', () => {
 
 $('#up-panel').classList.toggle('folded', state.upFolded);
 $('#up-toggle').setAttribute('aria-expanded', String(!state.upFolded));
-$('#t-search').value = views.subs.q || '';
+$('#t-search').value = views[state.tab]?.q || '';
 $('#m-sort').value = views.media.sort?.key || 'marked';
 
 async function boot() {
-  for (const tab of ['subs', 'sims', 'vps', 'media']) {
-    THEAD_HTML[tab] = $(HEAD_SEL[tab]).rows[0].innerHTML; // 模板快照，rebuildHead 用
-  }
+  // 媒体表的表头写在 index.html 里，仍走模板快照 + 自定义列注入那条老路；
+  // 各库的表头与 COLS 由 loadAll → syncColls → ensureCollDom 按字段注册表生成。
+  THEAD_HTML.media = $(HEAD_SEL.media).rows[0].innerHTML;
   try {
     await refreshFields();
   } catch (e) { toast('字段注册加载失败：' + e.message, true); }
-  for (const tab of ['subs', 'sims', 'vps', 'media']) {
-    injectCustomCols(tab);
-    initHead(tab);
-  }
+  injectCustomCols('media');
+  initHead('media');
   await loadAll();
 }
 
@@ -2367,7 +1970,8 @@ boot().catch(e => toast('加载失败：' + e.message, true));
    预置三库（订阅 / SIM / VPS）暂时仍走各自的专用渲染器，切片 B2b 会一并收敛到这里。 */
 
 const collOf = key => (state.overview?.collections || []).find(c => c.key === key);
-const userColls = () => (state.overview?.collections || []).filter(c => !c.builtin);
+const colls = () => state.overview?.collections || [];
+const userColls = () => colls().filter(c => !c.builtin);
 const fieldsOf = key => state.fields
   .filter(f => f.tbl === key)
   .sort((a, b) => a.pos - b.pos || a.id - b.id);
@@ -2415,7 +2019,7 @@ function colFromField(key, f) {
   const numeric = t === 'num' || t === 'star';
   const get = r => fieldVal(f, r);
   return {
-    t, fkey: f.key,
+    t, fkey: f.key, src: f.src, custom: f.builtin ? 0 : f.id,
     conv: CONV_TYPES.includes(t) ? 1 : 0,
     ord: f.key === 'status' ? statusOrder(key) : (t === 'star' ? ['1', '2', '3', '4', '5'] : null),
     str: numeric ? 0 : 1,
@@ -2479,14 +2083,15 @@ function ensureCollDom(c) {
 
 // 每次渲染前对账：新库补 DOM，删掉的库连标签带容器一起撤
 function syncColls() {
-  const keys = new Set(userColls().map(c => c.key));
-  for (const c of userColls()) ensureCollDom(c);
+  const keys = new Set(colls().map(c => c.key));
+  for (const c of colls()) ensureCollDom(c);
+  // 库被删掉了就连标签带容器一起撤；三个预置库的容器写在 index.html 里，删库时同样该撤
   document.querySelectorAll('.tablewrap[data-tab]').forEach(w => {
     const k = w.dataset.tab;
-    if (['subs', 'sims', 'vps'].includes(k) || keys.has(k)) return;
+    if (keys.has(k)) return;
     document.querySelector(`.tab[data-tab="${k}"]`)?.remove();
     w.remove();
-    if (state.tab === k) switchTab('subs');
+    if (state.tab === k) switchTab(colls()[0]?.key || 'subs');
   });
 }
 
@@ -2618,7 +2223,7 @@ function itemDialog() {
 let editingItem = null;
 function openItemDialog(key, it) {
   const c = collOf(key);
-  editingItem = it ? { key, id: it.id } : { key, id: null };
+  editingItem = { key, id: it?.id ?? null, row: it || {} };
   const d = itemDialog();
   $('#dlg-item-title').textContent = `${it ? '编辑' : '新增'}${c?.name || ''}`;
   const box = $('#item-fields');
@@ -2650,34 +2255,31 @@ function openItemDialog(key, it) {
 }
 
 // 表单 → 整行 PUT/POST 的 body：真列放顶层，extra 字段收进 extra
-function itemBody(key) {
-  const b = { extra: {} };
+// 表单 → 整行 PUT/POST 的体：先按表单值攒一个补丁，再交给 itemBodyFromRow 补全字段集
+function itemBody(key, row) {
+  const patch = { extra: { ...(row.extra || {}) } };
   for (const f of fieldsOf(key)) {
     if (f.src === 'calc') continue;
     const el = document.querySelector(`#item-fields [data-f="${f.key}"]`);
     if (!el) continue;
     let v = el.value.trim();
-    if (f.ftype === 'multi') {
-      const arr = splitVals(v);
-      if (f.src === 'col') b[f.key] = arr; else b.extra[f.key] = arr;
-      continue;
-    }
-    if (f.ftype === 'num') {
-      const n = v === '' ? undefined : Number(v);
-      if (f.src === 'col') b[f.key] = n; else if (n !== undefined) b.extra[f.key] = n;
-      continue;
-    }
-    if (f.src === 'col') b[f.key] = v; else if (v !== '') b.extra[f.key] = v;
+    let val;
+    if (f.ftype === 'multi') val = splitVals(v);
+    else if (f.ftype === 'num') val = v === '' ? undefined : Number(v);
+    else val = v;
+    if (f.src === 'col') patch[f.key] = val;
+    else if (val == null || val === '' || (Array.isArray(val) && !val.length)) delete patch.extra[f.key];
+    else patch.extra[f.key] = val;
   }
-  return b;
+  return itemBodyFromRow(key, { ...row, ...patch });
 }
 
 document.addEventListener('submit', async e => {
   if (e.target.id !== 'form-item') return;
   e.preventDefault();
-  const { key, id } = editingItem || {};
+  const { key, id, row } = editingItem || {};
   if (!key) return;
-  const body = itemBody(key);
+  const body = itemBody(key, row || {});
   if (!body.name) { toast('名称不能为空', true); return; }
   try {
     if (id) await api(`/api/items/${id}`, { method: 'PUT', body: JSON.stringify(body) });

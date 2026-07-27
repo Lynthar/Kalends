@@ -79,30 +79,21 @@
     <div id="view-pills" class="vpills" hidden></div>
     <div id="view-subs" class="tablewrap" data-tab="subs">
       <table class="grid">
-        <thead><tr>
-          <th data-k="name">名称</th><th data-k="status">状态</th><th data-k="category">分类</th><th class="num" data-k="price">价格</th><th data-k="currency">币种</th><th data-k="cycle">周期</th>
-          <th data-k="next_renewal">下次续费</th><th data-k="payment_method">支付方式</th><th data-k="notes">备注</th><th class="ops" data-k="ops"></th>
-        </tr></thead>
+        <thead><tr></tr></thead>
         <tbody id="subs-body"></tbody>
       </table>
       <p id="subs-empty" class="empty" hidden>此栏尚无记录</p>
     </div>
     <div id="view-sims" class="tablewrap" data-tab="sims" hidden>
       <table class="grid">
-        <thead><tr>
-          <th data-k="name">名称</th><th data-k="forms">形式</th><th data-k="status">状态</th><th data-k="last_renewed">上次续费</th>
-          <th class="wide" data-k="left">剩余天数</th><th data-k="keepalive_action">保号动作</th><th class="ops" data-k="ops"></th>
-        </tr></thead>
+        <thead><tr></tr></thead>
         <tbody id="sims-body"></tbody>
       </table>
       <p id="sims-empty" class="empty" hidden>此栏尚无记录</p>
     </div>
     <div id="view-vps" class="tablewrap" data-tab="vps" hidden>
       <table class="grid">
-        <thead><tr>
-          <th data-k="vendor">商家 / 产品</th><th data-k="status">状态</th><th data-k="locations">地点</th><th data-k="purpose">用途</th><th data-k="spec">规格</th><th data-k="routes">线路</th>
-          <th class="num" data-k="price">费用</th><th data-k="currency">币种</th><th data-k="last_renewed">上次续费</th><th class="wide" data-k="left">剩余天数</th><th class="ops" data-k="ops"></th>
-        </tr></thead>
+        <thead><tr></tr></thead>
         <tbody id="vps-body"></tbody>
       </table>
       <p id="vps-empty" class="empty" hidden>此栏尚无记录</p>
@@ -147,93 +138,7 @@
 
 <footer class="colophon">KALENDAE · 罗马历朔日，收账之日</footer>
 
-<dialog id="dlg-sub">
-  <form id="form-sub" method="dialog">
-    <h3 id="dlg-sub-title">新增订阅</h3>
-    <div class="fgrid">
-      <label class="span2">名称 *<input name="name" required></label>
-      <label>状态
-        <select name="status">
-          <option value="Active">Active · 在用</option>
-          <option value="Planned">Planned · 计划</option>
-          <option value="Deferred">Deferred · 比价备选</option>
-          <option value="Unused">Unused · 未启用</option>
-          <option value="Ending">Ending · 到期不续</option>
-          <option value="Ended">Ended · 已结束</option>
-        </select>
-      </label>
-      <label>分类<input name="category" list="dl-cat"></label>
-      <label>价格<input name="price" type="number" step="0.01" min="0"></label>
-      <label>币种<input name="currency" list="dl-cur" placeholder="CNY / USD / …"></label>
-      <label>周期
-        <select name="cycle">
-          <option value="">—</option>
-          <option value="monthly">Monthly</option>
-          <option value="annual">Annual</option>
-          <option value="biennial">Biennial</option>
-          <option value="triennial">Triennial</option>
-          <option value="quarterly">Quarterly</option>
-          <option value="semiannual">Semiannual</option>
-          <option value="weekly">Weekly</option>
-          <option value="days">Every N days</option>
-          <option value="lifetime">Lifetime</option>
-        </select>
-      </label>
-      <label id="row-cycle-days" hidden>周期天数<input name="cycle_days" type="number" min="1"></label>
-      <label>下次续费<input name="next_renewal" type="date"></label>
-      <label>上级（档位所属服务）<select name="parent_id"><option value="">—</option></select></label>
-      <label>支付方式<input name="payment_method"></label>
-      <label>注册账号<input name="account"></label>
-      <label class="span2">链接<input name="url" type="url" placeholder="https://"></label>
-      <label class="span2">Logo
-        <div class="logo-row">
-          <img id="sub-logo-view" class="slogo-view" alt="" hidden>
-          <input type="file" name="logo_file" accept="image/png,image/jpeg,image/webp,image/svg+xml,image/gif,image/x-icon">
-          <button type="button" class="btn link" id="sub-logo-clear" hidden>清除</button>
-        </div>
-      </label>
-      <label class="span2">备注<textarea name="notes" rows="3"></textarea></label>
-    </div>
-    <div class="dlg-foot">
-      <button type="button" class="btn ghost" data-close>取消</button>
-      <button type="submit" class="btn primary">保存</button>
-    </div>
-  </form>
-</dialog>
 
-<dialog id="dlg-sim">
-  <form id="form-sim" method="dialog">
-    <h3 id="dlg-sim-title">新增 SIM 卡</h3>
-    <div class="fgrid">
-      <label class="span2">名称（运营商与国家）*<input name="name" required placeholder="🇬🇧 运营商名"></label>
-      <label>号码<input name="phone_number"></label>
-      <label>状态
-        <select name="status">
-          <option value="Active">Active · 在用</option>
-          <option value="Planned">Planned · 计划</option>
-          <option value="Deferred">Deferred · 比价备选</option>
-          <option value="Unused">Unused · 未启用</option>
-          <option value="Ending">Ending · 到期不续</option>
-          <option value="Ended">Ended · 已结束</option>
-        </select>
-      </label>
-      <fieldset class="span2 formset">
-        <legend>形式</legend>
-        <label class="check"><input type="checkbox" name="forms" value="SIM">SIM</label>
-        <label class="check"><input type="checkbox" name="forms" value="eSIM">eSIM</label>
-        <label class="check"><input type="checkbox" name="forms" value="VOIP">VOIP</label>
-      </fieldset>
-      <label>保号周期（天）<input name="cycle_days" type="number" min="1" placeholder="181"></label>
-      <label>上次续费<input name="last_renewed" type="date"></label>
-      <label class="span2">保号动作<input name="keepalive_action" placeholder="如：每 90 天充值一次保号"></label>
-      <label class="span2">备注<textarea name="notes" rows="3"></textarea></label>
-    </div>
-    <div class="dlg-foot">
-      <button type="button" class="btn ghost" data-close>取消</button>
-      <button type="submit" class="btn primary">保存</button>
-    </div>
-  </form>
-</dialog>
 
 <dialog id="dlg-media">
   <form id="form-media" method="dialog">
@@ -318,63 +223,6 @@
   </form>
 </dialog>
 
-<dialog id="dlg-vps">
-  <form id="form-vps" method="dialog">
-    <h3 id="dlg-vps-title">新增 VPS</h3>
-    <div class="fgrid">
-      <label>商家 *<input name="vendor" required></label>
-      <label>产品 / 套餐<input name="product"></label>
-      <label>状态
-        <select name="status">
-          <option value="Active">Active · 在用</option>
-          <option value="Planned">Planned · 计划</option>
-          <option value="Deferred">Deferred · 比价备选</option>
-          <option value="Unused">Unused · 未启用</option>
-          <option value="Ending">Ending · 到期不续</option>
-          <option value="Ended">Ended · 已结束</option>
-        </select>
-      </label>
-      <label>用途<input name="purpose" list="dl-purpose"></label>
-      <label>地点（逗号分隔）<input name="locations" placeholder="东京（TYO）"></label>
-      <label>线路（逗号分隔）<input name="routes" placeholder="CN2 GIA, 9929"></label>
-      <label>CPU 核数<input name="cores" type="number" step="1" min="0"></label>
-      <label>内存（GB）<input name="ram_gb" type="number" step="0.5" min="0"></label>
-      <label>存储（GB）<input name="storage_gb" type="number" step="1" min="0"></label>
-      <label>存储类型
-        <select name="storage_type"><option value=""></option><option>SSD</option><option>HDD</option></select>
-      </label>
-      <label class="span2">附加存储<input name="extra_storage"></label>
-      <label>带宽（Gbps）<input name="port_gbps" type="number" step="0.1" min="0"></label>
-      <label>流量（TB/月）<input name="traffic_tb" type="number" step="0.1" min="0"></label>
-      <label class="check span2"><input type="checkbox" name="ipv6">IPv6</label>
-      <label>费用<input name="price" type="number" step="0.01" min="0"></label>
-      <label>币种<input name="currency" list="dl-cur" placeholder="USD / CNY / …"></label>
-      <label>付费周期
-        <select name="cycle">
-          <option value="">—</option>
-          <option value="monthly">Monthly</option>
-          <option value="annual">Annual</option>
-          <option value="biennial">Biennial</option>
-          <option value="triennial">Triennial</option>
-          <option value="quarterly">Quarterly</option>
-          <option value="semiannual">Semiannual</option>
-          <option value="weekly">Weekly</option>
-          <option value="days">Every N days</option>
-          <option value="lifetime">Lifetime</option>
-        </select>
-      </label>
-      <label id="vps-cycle-days" hidden>周期天数<input name="cycle_days" type="number" min="1"></label>
-      <label>上次续费<input name="last_renewed" type="date"></label>
-      <label class="span2">面板 / 商家链接<input name="url" type="url" placeholder="https://"></label>
-      <label>注册账号<input name="account"></label>
-      <label class="span2">备注<textarea name="notes" rows="2"></textarea></label>
-    </div>
-    <div class="dlg-foot">
-      <button type="button" class="btn ghost" data-close>取消</button>
-      <button type="submit" class="btn primary">保存</button>
-    </div>
-  </form>
-</dialog>
 
 <dialog id="dlg-settings">
   <form id="form-settings" method="dialog">

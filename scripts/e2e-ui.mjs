@@ -34,21 +34,22 @@ const put = (path, body) => fetch(APP.replace(/\/$/, '') + path, {
   method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
 });
 
-const subs0 = await fetch(APP + 'api/subscriptions').then(r => r.json()).catch(() => null);
+const subs0 = await fetch(APP + 'api/collections/subs/items').then(r => r.json()).catch(() => null);
 if (!subs0) { console.error('服务未启动？先起 Kalends 实例再跑本脚本'); process.exit(2); }
+const mk = (key, body) => post(`/api/collections/${key}/items`, body);
 if (subs0.length === 0) {
   console.log('空库，播种假数据…');
-  await post('/api/subscriptions', { name: 'Netflix', status: 'Active', category: 'Streaming', price: 15.49, currency: 'USD', cycle: 'monthly', next_renewal: day(3), payment_method: 'Visa' });
-  await post('/api/subscriptions', { name: 'ChatGPT Plus', status: 'Active', category: 'AI', price: 20, currency: 'USD', cycle: 'monthly', next_renewal: day(45), payment_method: 'Master' });
-  await post('/api/subscriptions', { name: 'iCloud+', status: 'Active', category: 'CloudSvc', price: 6, currency: 'CNY', cycle: 'monthly', next_renewal: day(10), payment_method: '支付宝' });
-  const mj = await post('/api/subscriptions', { name: 'Midjourney', status: 'Deferred', category: 'AI' });
-  await post('/api/subscriptions', { name: 'Basic Plan', status: 'Active', category: 'AI', price: 96, currency: 'USD', cycle: 'annual', next_renewal: day(200), parent_id: mj.id, payment_method: 'Visa' });
-  await post('/api/subscriptions', { name: '旧订阅', status: 'Ended', category: 'News' });
-  await post('/api/sims', { name: '🇬🇧 Giffgaff', status: 'Active', forms: ['SIM'], cycle_days: 181, last_renewed: day(-175), keepalive_action: '发一条短信' });
-  await post('/api/sims', { name: '🇺🇸 Ultra', status: 'Active', forms: ['eSIM', 'VOIP'], cycle_days: 90, last_renewed: day(-10), keepalive_action: '充值 $5' });
-  await post('/api/vps', { vendor: 'HostA', product: 'VPS-1', status: 'Active', purpose: '代理出口', locations: ['东京'], routes: ['CN2 GIA'], cores: 1, ram_gb: 1, storage_gb: 20, storage_type: 'SSD', price: 25, currency: 'USD', cycle: 'annual', last_renewed: day(-334) });
-  await post('/api/vps', { vendor: 'HostB', status: 'Ending', purpose: '建站', locations: ['洛杉矶'], routes: ['9929'], cores: 2, ram_gb: 4, storage_gb: 60, price: 48, currency: 'USD', cycle: 'annual', last_renewed: day(-304) });
-  await post('/api/vps', { vendor: 'HostC', status: 'Active', purpose: '任务', locations: ['香港', '东京'], routes: ['CMI'], cores: 4, ram_gb: 8, storage_gb: 100, price: 320, currency: 'CNY', cycle: 'triennial', last_renewed: day(-60) });
+  await mk('subs', { name: 'Netflix', status: 'Active', price: 15.49, currency: 'USD', cycle: 'monthly', next_renewal: day(3), extra: { category: 'Streaming', payment_method: 'Visa' } });
+  await mk('subs', { name: 'ChatGPT Plus', status: 'Active', price: 20, currency: 'USD', cycle: 'monthly', next_renewal: day(45), extra: { category: 'AI', payment_method: 'Master' } });
+  await mk('subs', { name: 'iCloud+', status: 'Active', price: 6, currency: 'CNY', cycle: 'monthly', next_renewal: day(10), extra: { category: 'CloudSvc', payment_method: '支付宝' } });
+  const mj = await mk('subs', { name: 'Midjourney', status: 'Deferred', extra: { category: 'AI' } });
+  await mk('subs', { name: 'Basic Plan', status: 'Active', price: 96, currency: 'USD', cycle: 'annual', next_renewal: day(200), parent_id: mj.id, extra: { category: 'AI', payment_method: 'Visa' } });
+  await mk('subs', { name: '旧订阅', status: 'Ended', extra: { category: 'News' } });
+  await mk('sims', { name: '🇬🇧 Giffgaff', status: 'Active', cycle: 'days', cycle_days: 181, last_renewed: day(-175), extra: { forms: ['SIM'], keepalive_action: '发一条短信' } });
+  await mk('sims', { name: '🇺🇸 Ultra', status: 'Active', cycle: 'days', cycle_days: 90, last_renewed: day(-10), extra: { forms: ['eSIM', 'VOIP'], keepalive_action: '充值 $5' } });
+  await mk('vps', { name: 'HostA', status: 'Active', price: 25, currency: 'USD', cycle: 'annual', last_renewed: day(-334), extra: { product: 'VPS-1', purpose: '代理出口', locations: ['东京'], routes: ['CN2 GIA'], cores: 1, ram_gb: 1, storage_gb: 20, storage_type: 'SSD' } });
+  await mk('vps', { name: 'HostB', status: 'Ending', price: 48, currency: 'USD', cycle: 'annual', last_renewed: day(-304), extra: { purpose: '建站', locations: ['洛杉矶'], routes: ['9929'], cores: 2, ram_gb: 4, storage_gb: 60 } });
+  await mk('vps', { name: 'HostC', status: 'Active', price: 320, currency: 'CNY', cycle: 'triennial', last_renewed: day(-60), extra: { purpose: '任务', locations: ['香港', '东京'], routes: ['CMI'], cores: 4, ram_gb: 8, storage_gb: 100 } });
   await post('/api/media', { kind: '电影', title: '测试电影甲', year: 2019, rating: 4, douban_rating: 8.4, status: '看过', marked_at: '2026-06-01' });
   await post('/api/media', { kind: '剧集', title: '测试剧集乙', year: 2023, rating: 5, douban_rating: 9.1, status: '在看', marked_at: '2026-07-10' });
   await post('/api/media', { kind: '游戏', title: '测试游戏丙', year: 2021, rating: 3, status: '想看', marked_at: '2026-05-20', platform: 'Steam' });
@@ -178,8 +179,8 @@ check('编辑按钮已移除', await evl(`!document.querySelector('#subs-body [d
 check('行悬停打开按钮存在', await evl(`document.querySelectorAll('#subs-body .rowopen').length`) === 6);
 await evl(`document.querySelector('#subs-body tr .rowopen').click()`);
 await sleep(300);
-check('⤢ 打开全表单', await evl(`document.querySelector('#dlg-sub').open`) === true);
-await evl(`document.querySelector('#dlg-sub').close()`);
+check('⤢ 打开全表单', await evl(`document.querySelector('#dlg-item').open`) === true);
+await evl(`document.querySelector('#dlg-item').close()`);
 check('父行有折叠钮', await evl(`(() => {
   const tr = [...document.querySelectorAll('#subs-body tr')].find(r => r.textContent.includes('Midjourney') && !r.classList.contains('subrow'));
   return !!tr?.querySelector('.tgl');
@@ -298,8 +299,8 @@ check('标签数恢复', await evl(`document.querySelectorAll('#subs-body .tag')
 /* 9. ＋新建行 */
 await evl(`document.querySelector('#view-subs .newrow').click()`);
 await sleep(300);
-check('新建行开订阅表单', await evl(`document.querySelector('#dlg-sub').open`) === true);
-await evl(`document.querySelector('#dlg-sub').close()`);
+check('新建行开订阅表单', await evl(`document.querySelector('#dlg-item').open`) === true);
+await evl(`document.querySelector('#dlg-item').close()`);
 
 /* 9b. 窄窗自动装容器：无手动列宽时表格等比压缩，右边框不越界，窗口变宽自动还原 */
 await send('Emulation.setDeviceMetricsOverride', { width: 960, height: 1000, deviceScaleFactor: 2, mobile: false });
@@ -406,7 +407,7 @@ await shot('06-vps');
 await evl(`document.querySelector('#view-pills .p-clear').click()`);
 await sleep(200);
 check('清除全部生效', await evl(`document.querySelectorAll('#view-pills .vpill').length`) === 0);
-check('商家文本筛选', await menuClick('#view-vps th[data-k="vendor"]', '筛选'));
+check('商家（名称列）文本筛选', await menuClick('#view-vps th[data-k="name"]', '筛选'));
 await evl(`(() => { const i = document.querySelector('.fp-form .fp-q'); i.value = 'hosta'; i.dispatchEvent(new Event('input')); })()`);
 await sleep(250);
 check('包含 hosta 1 行', await evl(`document.querySelectorAll('#vps-body tr').length`) === 1);
@@ -478,8 +479,8 @@ await sleep(250);
 await evl(`(() => { const i = document.querySelector('.cellpop input[data-f="notes"]'); i.value = '测试备注'; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); })()`);
 await sleep(700);
 check('备注就地保存', await evl(`[...document.querySelectorAll('#subs-body tr')].find(r => r.textContent.includes('ChatGPT'))?.querySelector('td[data-k="notes"]').textContent.trim()`) === '测试备注');
-const cg = (await (await fetch(APP + 'api/subscriptions')).json()).find(x => x.name === 'ChatGPT Plus');
-check('整行 PUT 未丢字段', !!cg && cg.price === 20 && cg.next_renewal === day(45) && cg.category === 'AI',
+const cg = (await (await fetch(APP + 'api/collections/subs/items')).json()).find(x => x.name === 'ChatGPT Plus');
+check('整行 PUT 未丢字段', !!cg && cg.price === 20 && cg.next_renewal === day(45) && cg.extra?.category === 'AI',
   JSON.stringify({ price: cg?.price, next: cg?.next_renewal, cat: cg?.category }));
 await evl(`[...document.querySelectorAll('#subs-body tr')].find(r => r.textContent.includes('旧订阅')).querySelector('td[data-k="status"]').click()`);
 await sleep(250);
@@ -525,11 +526,11 @@ check('字段注册表已清空', (await (await fetch(APP + 'api/fields')).json(
 
 /* 12d. 订阅 logo：上传 → 名称格渲染（子行回退父 logo）→ 整行 PUT 保留 → 清除 */
 const PNG1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
-const subsNow = await (await fetch(APP + 'api/subscriptions')).json();
+const subsNow = await (await fetch(APP + 'api/collections/subs/items')).json();
 const mj2 = subsNow.find(x => x.name === 'Midjourney');
-const upResp = await fetch(`${APP}api/subscriptions/${mj2.id}/logo?ext=png`, { method: 'POST', body: PNG1 });
+const upResp = await fetch(`${APP}api/items/${mj2.id}/logo?ext=png`, { method: 'POST', body: PNG1 });
 check('logo 上传成功', upResp.ok && (await upResp.json()).logo?.endsWith('.png'));
-const logoName = (await (await fetch(APP + 'api/subscriptions')).json()).find(x => x.id === mj2.id).logo;
+const logoName = (await (await fetch(APP + 'api/collections/subs/items')).json()).find(x => x.id === mj2.id).logo;
 const logoGet = await fetch(`${APP}logos/${logoName}`);
 check('logo 静态服务与类型', logoGet.ok && logoGet.headers.get('content-type') === 'image/png');
 await evl(`loadAll()`);
@@ -546,23 +547,28 @@ await evl(`[...document.querySelectorAll('#subs-body tr')].find(r => r.textConte
 await sleep(250);
 await evl(`(() => { const i = document.querySelector('.cellpop input[data-f="notes"]'); i.value = '比价'; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); })()`);
 await sleep(700);
-check('内联编辑后 logo 保留', (await (await fetch(APP + 'api/subscriptions')).json()).find(x => x.id === mj2.id).logo === logoName);
-const fakeSvg = await fetch(`${APP}api/subscriptions/${mj2.id}/logo?ext=svg`, { method: 'POST', body: PNG1 });
+check('内联编辑后 logo 保留', (await (await fetch(APP + 'api/collections/subs/items')).json()).find(x => x.id === mj2.id).logo === logoName);
+const fakeSvg = await fetch(`${APP}api/items/${mj2.id}/logo?ext=svg`, { method: 'POST', body: PNG1 });
 check('魔数不符的上传被拒', !fakeSvg.ok && ((await fakeSvg.json()).error || '').includes('不符'));
-const delResp = await fetch(`${APP}api/subscriptions/${mj2.id}/logo`, { method: 'DELETE' });
-check('logo 清除', delResp.ok && (await (await fetch(APP + 'api/subscriptions')).json()).find(x => x.id === mj2.id).logo == null);
+const delResp = await fetch(`${APP}api/items/${mj2.id}/logo`, { method: 'DELETE' });
+check('logo 清除', delResp.ok && (await (await fetch(APP + 'api/collections/subs/items')).json()).find(x => x.id === mj2.id).logo == null);
 await evl(`loadAll()`);
 await sleep(500);
 
-/* 12e. 整行 PUT：点格即编与 ⤢ 详情表单都走这条路，三表都得能存回去 */
-for (const [p, mark] of [['subscriptions', 'notes'], ['sims', 'keepalive_action'], ['vps', 'notes']]) {
-  const before = (await (await fetch(`${APP}api/${p}`)).json())[0];
-  const res = await put(`/api/${p}/${before.id}`, { ...before, [mark]: 'e2e 往返' });
-  check(`${p} 整行 PUT`, res.ok, res.ok ? '' : JSON.stringify(await res.json().catch(() => ({}))));
-  const after = (await (await fetch(`${APP}api/${p}`)).json()).find(x => x.id === before.id);
-  check(`${p} PUT 后字段落库`, after?.[mark] === 'e2e 往返');
-  check(`${p} PUT 未丢状态`, after?.status === before.status);
-  check(`${p} 还原`, (await put(`/api/${p}/${before.id}`, before)).ok); // 不给后续断言留脏数据
+/* 12e. 整行 PUT：点格即编与 ⤢ 详情表单都走这条路，每个库都得能存回去。
+   后端是全量替换语义，所以这里同时盯住"没在改的字段有没有被置空"。 */
+for (const [key, mark] of [['subs', 'notes'], ['sims', 'notes'], ['vps', 'notes']]) {
+  const items = () => fetch(`${APP}api/collections/${key}/items`).then(r => r.json());
+  const before = (await items())[0];
+  const res = await put(`/api/items/${before.id}`, { ...before, [mark]: 'e2e 往返' });
+  check(`${key} 整行 PUT`, res.ok, res.ok ? '' : JSON.stringify(await res.json().catch(() => ({}))));
+  const after = (await items()).find(x => x.id === before.id);
+  check(`${key} PUT 后字段落库`, after?.[mark] === 'e2e 往返');
+  check(`${key} PUT 未丢状态与周期`, after?.status === before.status && after?.cycle === before.cycle);
+  check(`${key} PUT 未丢 extra 域字段`,
+    JSON.stringify(after?.extra || {}) === JSON.stringify(before.extra || {}),
+    `前 ${JSON.stringify(before.extra)} 后 ${JSON.stringify(after?.extra)}`);
+  check(`${key} 还原`, (await put(`/api/items/${before.id}`, before)).ok); // 不给后续断言留脏数据
 }
 
 /* 12f. SIM 点格即编（整行 PUT 曾在此静默失败） */
@@ -573,7 +579,7 @@ await sleep(250);
 check('SIM 单元格编辑器打开', await evl(`!!document.querySelector('.cellpop input[data-f="keepalive_action"]')`) === true);
 await evl(`(() => { const i = document.querySelector('.cellpop input[data-f="keepalive_action"]'); i.value = 'e2e 改过'; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); })()`);
 await sleep(700);
-check('SIM 点格即编落库', (await (await fetch(`${APP}api/sims`)).json()).some(x => x.keepalive_action === 'e2e 改过'));
+check('SIM 点格即编落库', (await (await fetch(`${APP}api/collections/sims/items`)).json()).some(x => x.extra?.keepalive_action === 'e2e 改过'));
 check('SIM 编辑后无错误提示', await evl(`(() => { const t = document.querySelector('#toast'); return t.hidden || !t.classList.contains('err'); })()`) === true);
 await evl(`document.querySelector('.tab[data-tab="subs"]').click()`);
 await sleep(200);
@@ -692,13 +698,17 @@ check('刷新后排序胶囊在', await evl(`!!document.querySelector('#view-pil
 check('刷新后媒体表格视图', await evl(`JSON.parse(localStorage.getItem('kalends.views.v1')).media.view`) === 'table');
 await shot('08-reloaded-folded');
 
-/* 16. hidden 属性回归 */
-await evl(`document.querySelector('#btn-add').click()`);
-await sleep(250);
-check('周期天数行默认隐藏', await evl(`getComputedStyle(document.querySelector('#row-cycle-days')).display`) === 'none');
-await evl(`(() => { const f = document.querySelector('#form-sub'); f.elements.cycle.value = 'days'; f.elements.cycle.dispatchEvent(new Event('change')); })()`);
-check('按天数行出现', await evl(`getComputedStyle(document.querySelector('#row-cycle-days')).display`) !== 'none');
-await evl(`document.querySelector('#dlg-sub').close()`);
+/* 16. hidden 属性回归（全局 [hidden]{display:none!important} 不能被 display 规则盖掉，
+   历史上媒体海报墙就是这么翻车的；这里用到期栏的「更远期还有 N 项」当探针） */
+await evl(`(() => { const s = document.querySelector('#up-window'); s.value = 'all'; s.dispatchEvent(new Event('change')); })()`);
+await sleep(500);
+check('窗口=全部时「更远期」按 hidden 属性隐藏',
+  await evl(`document.querySelector('#up-more').hasAttribute('hidden')`) === true
+  && await evl(`getComputedStyle(document.querySelector('#up-more')).display`) === 'none');
+await evl(`(() => { const s = document.querySelector('#up-window'); s.value = '7'; s.dispatchEvent(new Event('change')); })()`);
+await sleep(500);
+check('窗口收窄后「更远期」出现',
+  await evl(`getComputedStyle(document.querySelector('#up-more')).display`) !== 'none');
 
 /* 17. 深色 */
 await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] });
