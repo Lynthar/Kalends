@@ -637,6 +637,86 @@ check('删库后字段注册表也清了',
 await evl(`switchTab('subs')`);
 await sleep(300);
 
+/* 12h. 建库模板：预置一套字段集与库属性，免得新建的库是个空壳 */
+const tpls = await (await fetch(APP + 'api/collections/templates')).json();
+check('模板清单可取且首项是空白', Array.isArray(tpls) && tpls[0]?.id === 'blank', JSON.stringify(tpls));
+check('模板含域名 / 保险 / 证件', ['domain', 'insurance', 'docs'].every(id => tpls.some(t => t.id === id)));
+check('未知模板报错而不是静默当空白', !(await fetch(APP + 'api/collections', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name: 'x', template: '没这个模板' }),
+})).ok);
+
+const dc = await post('/api/collections', { name: '我的证件', template: 'docs' });
+const DK = dc.key;
+check('模板带来库属性（到期模型 / 图标 / 动作说法）',
+  dc.due_anchor === 'next' && dc.icon === '🪪' && dc.verb === '换证', JSON.stringify(dc));
+const ic = await post('/api/collections', { name: '我的保单', template: 'insurance' });
+check('模板带来名称格小字字段', ic.subline === 'policy_no' && ic.verb === '续保', JSON.stringify(ic));
+
+const allF = await (await fetch(APP + 'api/fields')).json();
+const dcf = allF.filter(f => f.tbl === DK);
+const fby = k => dcf.find(f => f.key === k);
+check('证件模板播了域字段', ['doc_type', 'holder', 'doc_no', 'issuer'].every(k => fby(k)), dcf.map(f => f.key));
+check('域字段挂 extra、与手加的自定义列同权（可改名可改选项可删）',
+  fby('doc_type').src === 'extra' && fby('doc_type').builtin === false);
+check('封闭词表预置了选项', fby('doc_type').options.map(o => o.v).includes('护照'));
+check('开放词表不预置选项，让它从数据里长出来',
+  allF.filter(f => f.tbl === ic.key).find(f => f.key === 'insurer').options.length === 0);
+check('模板可改通用字段的显示名与是否上表',
+  fby('next_renewal').name === '有效期至' && fby('next_renewal').shown === true
+  && fby('price').name === '工本费' && fby('price').shown === false && fby('cycle').shown === false);
+check('模板域字段可管理选项（后端 resolve 认它）',
+  (await put('/api/fields/options', { tbl: DK, key: 'doc_type', options: [{ v: '护照', c: 3 }, { v: '签证' }] })).ok);
+check('模板域字段可删（src=extra）', (await fetch(`${APP}api/fields/${fby('issuer').id}`, { method: 'DELETE' })).ok);
+
+await post(`/api/collections/${DK}/items`, {
+  name: '护照', status: 'Active', next_renewal: day(200), extra: { doc_type: '护照', holder: '本人' },
+});
+await evl(`loadAll()`);
+await sleep(900);
+await evl(`switchTab('${DK}')`);
+await sleep(400);
+const dheads = await evl(`[...document.querySelectorAll('.tablewrap[data-tab="${DK}"] thead th')].map(t => t.dataset.k)`);
+check('模板域字段排在状态与费用之间，隐藏的通用列不上表',
+  dheads.join() === 'name,status,doc_type,holder,next_renewal,notes,ops', dheads);
+check('模板列的值渲染出来',
+  await evl(`document.querySelector('#${DK}-body tr td[data-k="doc_type"]').textContent.includes('护照')`) === true);
+check('模板域字段在表头菜单里可编辑选项', await evl(`optionsEditable('${DK}','doc_type')`) === true);
+// 没有周期就推不动到期日：只记一笔账，提示不能谎报"周期已推进"
+await evl(`window.confirm = () => true`);
+await evl(`document.querySelector('#${DK}-body tr [data-renew]').click()`);
+await sleep(900);
+const rmsg = await evl(`document.querySelector('#toast').textContent`);
+check('无周期条目续费只记账、提示不谎报推进', rmsg.includes('手动改'), rmsg);
+
+await evl(`document.querySelector('#coll-add').click()`);
+await sleep(600);
+check('新建库浮层出现模板选择器', await evl(
+  `!document.querySelector('#coll-tpl-row').hidden && document.querySelectorAll('#coll-tpl .chip').length === ${tpls.length}`) === true);
+check('默认选中空白模板', await evl(`document.querySelector('#coll-tpl .chip.on').textContent.trim()`) === '空白');
+await evl(`[...document.querySelectorAll('#coll-tpl .chip')].find(b => b.textContent.includes('域名')).click()`);
+await sleep(250);
+check('挑模板预填库名 / 图标 / 到期模型 / 动作说法', await evl(`(() => {
+  const d = document.querySelector('#dlg-coll');
+  const g = k => d.querySelector('[data-c="' + k + '"]').value;
+  return g('name') === '域名' && g('icon') === '🌐' && g('due_anchor') === 'next' && g('verb') === '续费';
+})()`) === true);
+check('说明里列出模板预置的字段', await evl(`document.querySelector('#coll-tpl-desc').textContent.includes('注册商')`) === true);
+await evl(`document.querySelector('#dlg-coll').close()`);
+await sleep(150);
+await evl(`openCollDialog(collOf('${DK}'))`);
+await sleep(500);
+check('改已有库时不显示模板选择器', await evl(`document.querySelector('#coll-tpl-row').hidden`) === true);
+await evl(`document.querySelector('#dlg-coll').close()`);
+await sleep(150);
+check('删掉模板建的两个库',
+  (await fetch(`${APP}api/collections/${dc.id}`, { method: 'DELETE' })).ok
+  && (await fetch(`${APP}api/collections/${ic.id}`, { method: 'DELETE' })).ok);
+await evl(`loadAll()`);
+await sleep(800);
+await evl(`switchTab('subs')`);
+await sleep(300);
+
 /* 13. 媒体表格 */
 await evl(`document.querySelector('.nav-tab[data-page="media"]').click()`);
 await sleep(200);

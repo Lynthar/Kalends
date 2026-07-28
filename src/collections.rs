@@ -23,6 +23,7 @@ const ANCHORS: &[&str] = &["next", "last"];
 pub fn router() -> Router<App> {
     Router::new()
         .route("/api/collections", get(list).post(create))
+        .route("/api/collections/templates", get(templates))
         .route("/api/collections/{id}", put(update).delete(remove))
         .route("/api/collections/{key}/items", get(items_list).post(items_create))
         .route("/api/items/{id}", put(items_update).delete(items_delete))
@@ -80,11 +81,22 @@ fn anchor_of(conn: &Connection, id: i64) -> anyhow::Result<String> {
 }
 
 async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
+    let tpl = match s(&b, "template") {
+        Some(id) => Some(template(&id).ok_or_else(|| anyhow!("未知模板：{id}"))?),
+        None => None,
+    };
     let name = s(&b, "name").ok_or_else(|| anyhow!("库名不能为空"))?;
-    let anchor = s(&b, "due_anchor").unwrap_or_else(|| "last".into());
+    let anchor = s(&b, "due_anchor")
+        .or_else(|| tpl.map(|t| t.anchor.to_string()))
+        .unwrap_or_else(|| "last".into());
     if !ANCHORS.contains(&anchor.as_str()) {
         return Err(anyhow!("未知的到期模型：{anchor}").into());
     }
+    let opt = |x: &'static str| (!x.is_empty()).then(|| x.to_string());
+    // 模板只在调用方压根没提这个键时兜底：界面清空图标传的是 ""，不该被模板值顶回来
+    let take = |k: &str, dflt: Option<String>| -> Option<String> {
+        if b.get(k).is_some() { s(&b, k) } else { dflt }
+    };
     let conn = app.db.lock().unwrap();
     let pos: i64 = conn.query_row("SELECT coalesce(max(pos),0)+1 FROM collections", [], |r| {
         r.get(0)
@@ -92,13 +104,20 @@ async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
     // key 由 id 派生，避免用户起名撞上内置键或包含路径字符
     conn.execute(
         "INSERT INTO collections(key,name,icon,due_anchor,subtitle,subline,verb,note_field,pos,builtin)
-         VALUES('',?1,?2,?3,NULL,NULL,?4,NULL,?5,0)",
-        params![name, s(&b, "icon"), anchor, s(&b, "verb"), pos],
+         VALUES('',?1,?2,?3,NULL,?4,?5,NULL,?6,0)",
+        params![
+            name,
+            take("icon", tpl.and_then(|t| opt(t.icon))),
+            anchor,
+            tpl.and_then(|t| opt(t.subline)),
+            take("verb", tpl.and_then(|t| opt(t.verb))),
+            pos
+        ],
     )?;
     let id = conn.last_insert_rowid();
     conn.execute("UPDATE collections SET key='k'||id WHERE id=?1", [id])?;
     let key: String = conn.query_row("SELECT key FROM collections WHERE id=?1", [id], |r| r.get(0))?;
-    seed_fields(&conn, &key, &anchor)?;
+    seed_fields(&conn, &key, &anchor, tpl)?;
     let row = conn.query_row(
         &format!("SELECT {COLL_COLS} FROM collections WHERE id=?1"),
         [id],
@@ -107,31 +126,156 @@ async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
     Ok(Json(row))
 }
 
+/* ── 建库模板：一套预置字段集 + 库属性，免得新建的库是个空壳 ────────── */
+
+/// 模板只决定"库刚建好时长什么样"，落表后就是普通字段——域字段与用户手加的
+/// 自定义列同权（`builtin=0`），可改名、可改选项、可删。
+struct Template {
+    id: &'static str,
+    label: &'static str,
+    icon: &'static str,
+    desc: &'static str,
+    anchor: &'static str,
+    verb: &'static str,
+    /// 名称格下方小字取哪个字段（不进日历标题，那是 subtitle）
+    subline: &'static str,
+    /// 对通用字段的调整：(字段键, 显示名；空=沿用默认, 是否默认上表)
+    base: &'static [(&'static str, &'static str, i64)],
+    /// 域字段，值挂 items.extra：(字段键, 显示名, 类型, 是否默认上表, 预置选项；逗号分隔)
+    extra: &'static [(&'static str, &'static str, &'static str, i64, &'static str)],
+}
+
+/// 第一项必须是空白模板：前端的模板选择器默认选它。
+/// 预置选项只给真正封闭的词表；注册商、保险公司这类开放词表留空，让它从数据里长出来。
+const TEMPLATES: &[Template] = &[
+    Template {
+        id: "blank",
+        label: "空白",
+        icon: "",
+        desc: "只有通用字段，列自己加",
+        anchor: "last",
+        verb: "",
+        subline: "",
+        base: &[],
+        extra: &[],
+    },
+    Template {
+        id: "domain",
+        label: "域名",
+        icon: "🌐",
+        desc: "域名注册与到期",
+        anchor: "next",
+        verb: "续费",
+        subline: "",
+        base: &[("next_renewal", "到期日", 1)],
+        extra: &[
+            ("registrar", "注册商", "sel", 1, ""),
+            ("auto_renew", "自动续费", "sel", 1, "开,关"),
+            ("dns", "DNS 托管", "sel", 0, ""),
+            ("usage", "用途", "sel", 0, ""),
+        ],
+    },
+    Template {
+        id: "insurance",
+        label: "保险",
+        icon: "🛡️",
+        desc: "保单与续保日",
+        anchor: "next",
+        verb: "续保",
+        subline: "policy_no",
+        base: &[("next_renewal", "保单到期", 1)],
+        extra: &[
+            ("insurer", "保险公司", "sel", 1, ""),
+            ("policy_type", "险种", "sel", 1, "医疗,重疾,意外,寿险,车险,财产,旅行"),
+            ("insured", "被保险人", "text", 1, ""),
+            ("coverage", "保额", "num", 0, ""),
+            ("policy_no", "保单号", "text", 0, ""),
+        ],
+    },
+    Template {
+        id: "docs",
+        label: "证件",
+        icon: "🪪",
+        desc: "护照签证等有效期",
+        anchor: "next",
+        verb: "换证",
+        subline: "",
+        // 证件多半没有周期费用：费用/币种/周期退进详情表单，不占表格列位
+        base: &[
+            ("next_renewal", "有效期至", 1),
+            ("price", "工本费", 0),
+            ("currency", "", 0),
+            ("cycle", "", 0),
+        ],
+        extra: &[
+            ("doc_type", "证件类型", "sel", 1, "护照,身份证,驾照,签证,居留许可,通行证"),
+            ("holder", "持有人", "text", 1, ""),
+            ("doc_no", "证件号码", "text", 0, ""),
+            ("issuer", "签发机关", "text", 0, ""),
+        ],
+    },
+];
+
+fn template(id: &str) -> Option<&'static Template> {
+    TEMPLATES.iter().find(|t| t.id == id)
+}
+
+async fn templates() -> R {
+    let out: Vec<Value> = TEMPLATES
+        .iter()
+        .map(|t| {
+            json!({
+                "id": t.id,
+                "label": t.label,
+                "icon": t.icon,
+                "desc": t.desc,
+                "due_anchor": t.anchor,
+                "verb": t.verb,
+                // 域字段的显示名，供选择器预览；含只进详情表单（shown=0）的那些
+                "fields": t.extra.iter().map(|(_, n, ..)| *n).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Ok(Json(json!(out)))
+}
+
 /// 新建的库要能直接用：播一套默认字段集，否则表格没有列、详情表单是空的。
-/// 到期锚点决定给"下次到期日"还是"上次续费 + 剩余天数"。
+/// 到期锚点决定给"下次到期日"还是"上次续费 + 剩余天数"，模板再往上加域字段。
 const STATUS_VOCAB: &str = r#"[{"v":"Active","spend":1,"alert":1,"timeline":1},
   {"v":"Planned","spend":0,"alert":0,"timeline":0},
   {"v":"Ending","spend":0,"alert":0,"timeline":1},
   {"v":"Ended","spend":0,"alert":0,"timeline":0}]"#;
 
-fn seed_fields(conn: &Connection, key: &str, anchor: &str) -> anyhow::Result<()> {
-    // (键, 显示名, 类型, 数据源, 默认上表, 序)
+fn seed_fields(
+    conn: &Connection,
+    key: &str,
+    anchor: &str,
+    tpl: Option<&Template>,
+) -> anyhow::Result<()> {
+    // (键, 显示名, 类型, 数据源, 默认上表, 序)；序号留了空档，模板的域字段插在 10 段
     let mut defs: Vec<(&str, &str, &str, &str, i64, i64)> = vec![
         ("name", "名称", "text", "col", 1, 1),
         ("status", "状态", "status", "col", 1, 2),
-        ("price", "费用", "num", "col", 1, 3),
-        ("currency", "币种", "sel", "col", 1, 4),
-        ("cycle", "周期", "sel", "col", 1, 5),
+        ("price", "费用", "num", "col", 1, 30),
+        ("currency", "币种", "sel", "col", 1, 31),
+        ("cycle", "周期", "sel", "col", 1, 32),
     ];
     if anchor == "next" {
-        defs.push(("next_renewal", "下次到期", "date", "col", 1, 6));
+        defs.push(("next_renewal", "下次到期", "date", "col", 1, 40));
     } else {
-        defs.push(("last_renewed", "上次续费", "date", "col", 1, 6));
-        defs.push(("left", "剩余天数", "num", "calc", 1, 7));
+        defs.push(("last_renewed", "上次续费", "date", "col", 1, 40));
+        defs.push(("left", "剩余天数", "num", "calc", 1, 41));
     }
-    defs.push(("notes", "备注", "text", "col", 1, 8));
-    defs.push(("cycle_days", "周期天数", "num", "col", 0, 20));
-    defs.push(("url", "链接", "text", "col", 0, 21));
+    defs.push(("notes", "备注", "text", "col", 1, 50));
+    defs.push(("cycle_days", "周期天数", "num", "col", 0, 60));
+    defs.push(("url", "链接", "text", "col", 0, 61));
+    for (k, name, shown) in tpl.map_or(&[][..], |t| t.base) {
+        let Some(d) = defs.iter_mut().find(|d| d.0 == *k) else { continue };
+        if !name.is_empty() {
+            d.1 = name;
+        }
+        d.4 = *shown;
+    }
     for (k, name, ftype, src, shown, pos) in defs {
         let options = if k == "status" { STATUS_VOCAB } else { "[]" };
         conn.execute(
@@ -139,6 +283,22 @@ fn seed_fields(conn: &Connection, key: &str, anchor: &str) -> anyhow::Result<()>
              VALUES(?1,?2,?3,?4,?5,?6,?7,1,?8)
              ON CONFLICT(tbl,key) DO NOTHING",
             params![key, k, name, ftype, src, shown, pos, options],
+        )?;
+    }
+    for (n, (k, name, ftype, shown, opts)) in tpl.map_or(&[][..], |t| t.extra).iter().enumerate() {
+        let options = serde_json::to_string(
+            &opts
+                .split(',')
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(|v| json!({ "v": v }))
+                .collect::<Vec<_>>(),
+        )?;
+        conn.execute(
+            "INSERT INTO fields(tbl,key,name,ftype,src,shown,pos,builtin,options)
+             VALUES(?1,?2,?3,?4,'extra',?5,?6,0,?7)
+             ON CONFLICT(tbl,key) DO NOTHING",
+            params![key, k, name, ftype, shown, 10 + n as i64, options],
         )?;
     }
     Ok(())

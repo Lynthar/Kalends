@@ -175,11 +175,15 @@ $('#up-more').onclick = () => setUpWindow('all');
 
 async function doRenew(key) {
   const [kind, id] = key.split(':');
-  const it = (state.overview?.upcoming || []).find(u => u.kind === kind && u.id === +id);
-  if (!confirm(`记一笔「${it?.name || ''}」的${it?.verb || '续费'}？`)) return;
+  // 表格里的行未必落在到期窗口内，所以先从本库找，找不到再回退到到期时间线
+  const it = (state[kind] || []).find(x => x.id === +id)
+    || (state.overview?.upcoming || []).find(u => u.kind === kind && u.id === +id);
+  const verb = it?.verb || collOf(kind)?.verb || '续费';
+  if (!confirm(`记一笔「${it?.name || ''}」的${verb}？`)) return;
   try {
-    await api(`/api/items/${id}/renew`, { method: 'POST', body: '{}' });
-    toast('已记账，周期已推进');
+    const r = await api(`/api/items/${id}/renew`, { method: 'POST', body: '{}' });
+    // 没有周期就推不动日期，别谎报"周期已推进"
+    toast(r?.next_renewal || r?.last_renewed ? '已记账，周期已推进' : '已记一笔；该条目没有周期，到期日请手动改');
     await loadAll();
   } catch (e) { toast(e.message, true); }
 }
@@ -2300,6 +2304,10 @@ function collDialog() {
   d.innerHTML = `<form id="form-coll" method="dialog">
       <h3 id="dlg-coll-title">新建库</h3>
       <div class="fgrid">
+        <label class="span2" id="coll-tpl-row"><span>模板</span>
+          <div class="chips" id="coll-tpl"></div>
+          <div class="muted" id="coll-tpl-desc" style="font-size:.72rem;font-weight:500"></div>
+        </label>
         <label><span>库名</span><input data-c="name" required></label>
         <label><span>图标（emoji，可空）</span><input data-c="icon" maxlength="4"></label>
         <label><span>到期模型</span><select data-c="due_anchor">
@@ -2319,8 +2327,38 @@ function collDialog() {
   return d;
 }
 
+/* 建库模板：字段集由后端播（见 collections::TEMPLATES），前端只管挑和预填。
+   挑中的模板会覆盖库名/图标/到期模型/动作说法——库名除外：用户自己改过就不覆盖。 */
+let collTemplates = null;
+let collTpl = null;
+
+function fillTplChips(d) {
+  const box = $('#coll-tpl');
+  box.innerHTML = '';
+  for (const t of collTemplates || []) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'chip' + (t.id === collTpl?.id ? ' on' : '');
+    b.textContent = (t.icon ? t.icon + ' ' : '') + t.label;
+    b.onclick = () => pickTpl(d, t);
+    box.appendChild(b);
+  }
+}
+
+function pickTpl(d, t) {
+  const g = k => d.querySelector(`[data-c="${k}"]`);
+  const cur = g('name').value.trim();
+  if (!cur || cur === collTpl?.label) g('name').value = t.fields.length ? t.label : '';
+  collTpl = t;
+  g('icon').value = t.icon || '';
+  g('due_anchor').value = t.due_anchor;
+  g('verb').value = t.verb || '';
+  $('#coll-tpl-desc').textContent = t.fields.length ? `${t.desc} · 预置字段：${t.fields.join(' · ')}` : t.desc;
+  fillTplChips(d);
+}
+
 let editingColl = null;
-function openCollDialog(c) {
+async function openCollDialog(c) {
   editingColl = c || null;
   const d = collDialog();
   $('#dlg-coll-title').textContent = c ? `库设置 · ${c.name}` : '新建库';
@@ -2329,6 +2367,19 @@ function openCollDialog(c) {
   g('icon').value = c?.icon || '';
   g('due_anchor').value = c?.due_anchor || 'last';
   g('verb').value = c?.verb || '';
+  collTpl = null;
+  const tplRow = $('#coll-tpl-row');
+  tplRow.hidden = true;
+  if (!c) {
+    try {
+      collTemplates = collTemplates || await api('/api/collections/templates');
+    } catch (e) { toast(e.message, true); }
+    // 列表第一项约定是空白模板
+    if (collTemplates?.length) {
+      tplRow.hidden = false;
+      pickTpl(d, collTemplates[0]);
+    }
+  }
   const del = $('#coll-del');
   del.hidden = !c || c.builtin;
   del.onclick = async () => {
@@ -2354,11 +2405,12 @@ document.addEventListener('submit', async e => {
   try {
     if (editingColl) await api(`/api/collections/${editingColl.id}`, { method: 'PUT', body: JSON.stringify(body) });
     else {
-      const c = await api('/api/collections', { method: 'POST', body: JSON.stringify(body) });
+      const tpl = collTpl;
+      const c = await api('/api/collections', { method: 'POST', body: JSON.stringify({ ...body, template: tpl?.id }) });
       await loadAll();
       switchTab(c.key);
       d.close();
-      toast('库已建好，先在表头「＋」里加列');
+      toast(tpl?.fields.length ? `库已建好，${tpl.label}模板的字段已就位` : '库已建好，先在表头「＋」里加列');
       return;
     }
     d.close();
