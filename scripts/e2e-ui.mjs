@@ -581,6 +581,12 @@ await evl(`(() => { const i = document.querySelector('.cellpop input[data-f="kee
 await sleep(700);
 check('SIM 点格即编落库', (await (await fetch(`${APP}api/collections/sims/items`)).json()).some(x => x.extra?.keepalive_action === 'e2e 改过'));
 check('SIM 编辑后无错误提示', await evl(`(() => { const t = document.querySelector('#toast'); return t.hidden || !t.classList.contains('err'); })()`) === true);
+// 多选格：值挂在 extra 的内置多选列（形式 / 地点 / 线路）曾经读成空，勾选状态全丢
+await evl(`[...document.querySelectorAll('#sims-body tr')].find(r => r.textContent.includes('Ultra')).querySelector('td[data-k="forms"]').click()`);
+await sleep(300);
+const formsChecked = await evl(`[...document.querySelectorAll('.cellpop input[type=checkbox]:checked')].map(c => c.value).sort().join()`);
+check('SIM 形式多选编辑器带出当前值', formsChecked === 'VOIP,eSIM', formsChecked);
+await evl(`closePop()`);
 await evl(`document.querySelector('.tab[data-tab="subs"]').click()`);
 await sleep(200);
 
@@ -712,6 +718,125 @@ await sleep(150);
 check('删掉模板建的两个库',
   (await fetch(`${APP}api/collections/${dc.id}`, { method: 'DELETE' })).ok
   && (await fetch(`${APP}api/collections/${ic.id}`, { method: 'DELETE' })).ok);
+await evl(`loadAll()`);
+await sleep(800);
+await evl(`switchTab('subs')`);
+await sleep(300);
+
+/* 12i. 库设置的收尾：库顺序 / 字段顺序与上表 / 状态语义标记 */
+const bc = await post('/api/collections', { name: '收尾测试', template: 'domain' });
+const BK = bc.key;
+await post(`/api/collections/${BK}/items`, {
+  name: 'a.com', status: 'Active', cycle: 'annual', next_renewal: day(20), extra: {},
+});
+await evl(`loadAll()`);
+await sleep(900);
+const tabs0 = await evl(`[...document.querySelectorAll('.tab[data-tab]')].map(t => t.dataset.tab)`);
+check('新库排在标签行末尾', tabs0.join() === `subs,sims,vps,${BK}`, tabs0);
+check('标签可拖动', await evl(`document.querySelector('.tab[data-tab="${BK}"]').draggable`) === true);
+await evl(`(() => {
+  const src = document.querySelector('.tab[data-tab="${BK}"]');
+  const dst = document.querySelector('.tab[data-tab="subs"]');
+  const dt = new DataTransfer();
+  src.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+  const r = dst.getBoundingClientRect();
+  dst.dispatchEvent(new DragEvent('dragover', { bubbles: true, dataTransfer: dt, clientX: r.left + 2 }));
+  dst.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: dt }));
+  src.dispatchEvent(new DragEvent('dragend', { bubbles: true }));
+})()`);
+await sleep(1300);
+check('拖标签改库序并落库',
+  (await (await fetch(APP + 'api/collections')).json())[0].key === BK);
+const tabs1 = await evl(`[...document.querySelectorAll('.tab[data-tab]')].map(t => t.dataset.tab)`);
+check('标签行跟着重排', tabs1.join() === `${BK},subs,sims,vps`, tabs1);
+
+// 预置库的标签写在 index.html 里，事件绑定曾经漏掉它们——库设置一度打不开
+await evl(`switchTab('subs')`);
+await sleep(300);
+await evl(`document.querySelector('#coll-settings').click()`);
+await sleep(500);
+check('⚙ 能打开预置库的设置并带出字段面板', await evl(`
+  document.querySelector('#dlg-coll').open
+  && document.querySelector('#dlg-coll-title').textContent.includes('订阅')
+  && !document.querySelector('#coll-fields-box').hidden`) === true);
+await evl(`document.querySelector('#dlg-coll').close()`);
+await sleep(200);
+check('预置库的标签也可拖动', await evl(`document.querySelector('.tab[data-tab="subs"]').draggable`) === true);
+
+await evl(`switchTab('${BK}')`);
+await sleep(300);
+await evl(`openCollDialog(collOf('${BK}'))`);
+await sleep(600);
+check('库设置浮层出现字段面板',
+  await evl(`!document.querySelector('#coll-fields-box').hidden
+    && document.querySelectorAll('#coll-fields .opt-row').length === 13`) === true);
+const fb = await evl(`[...document.querySelectorAll('#coll-fields .opt-row .fp-v')].map(e => e.textContent)`);
+await evl(`(() => {
+  const rows = [...document.querySelectorAll('#coll-fields .opt-row')];
+  const src = rows[rows.length - 1], dst = rows[0];
+  const dt = new DataTransfer();
+  src.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+  const r = dst.getBoundingClientRect();
+  dst.dispatchEvent(new DragEvent('dragover', { bubbles: true, dataTransfer: dt, clientY: r.top + 1 }));
+  dst.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: dt }));
+  src.dispatchEvent(new DragEvent('dragend', { bubbles: true }));
+})()`);
+await sleep(1200);
+const fa = await evl(`[...document.querySelectorAll('#coll-fields .opt-row .fp-v')].map(e => e.textContent)`);
+check('拖字段调序（面板重排）', fa[0] === fb.at(-1), `${fb.at(-1)} → ${fa[0]}`);
+const posSorted = (await (await fetch(`${APP}api/fields`)).json())
+  .filter(f => f.tbl === BK).sort((a, b) => a.pos - b.pos);
+check('字段顺序落到 fields.pos', posSorted[0].name === fb.at(-1), posSorted.map(f => f.name));
+
+const bh0 = await evl(`[...document.querySelectorAll('.tablewrap[data-tab="${BK}"] thead th')].map(t => t.dataset.k)`);
+await evl(`(() => {
+  const row = [...document.querySelectorAll('#coll-fields .opt-row')].find(r => r.querySelector('.fp-v').textContent === '链接');
+  const box = row.querySelector('input');
+  box.checked = true;
+  box.dispatchEvent(new Event('change', { bubbles: true }));
+})()`);
+await sleep(1200);
+const bh1 = await evl(`[...document.querySelectorAll('.tablewrap[data-tab="${BK}"] thead th')].map(t => t.dataset.k)`);
+check('打开「上表」把只在表单里的字段搬上表头',
+  !bh0.includes('url') && bh1[0] === 'url', `${bh0} → ${bh1}`);
+check('上表状态落库',
+  (await (await fetch(`${APP}api/fields`)).json()).find(f => f.tbl === BK && f.key === 'url').shown === true);
+await evl(`document.querySelector('#dlg-coll').close()`);
+await sleep(200);
+
+await evl(`switchTab('${BK}')`);
+await sleep(400);
+check('条目在到期时间线上',
+  (await (await fetch(APP + 'api/overview')).json()).upcoming.some(u => u.kind === BK));
+await evl(`document.querySelector('.tablewrap[data-tab="${BK}"] th[data-k="status"]').click()`);
+await sleep(300);
+check('状态列菜单有「状态语义…」',
+  await evl(`[...document.querySelectorAll('.thmenu .mi')].some(b => b.textContent.includes('状态语义'))`) === true);
+check('状态列仍不开放改值', await evl(`optionsEditable('${BK}','status')`) !== true);
+await evl(`[...document.querySelectorAll('.thmenu .mi')].find(b => b.textContent.includes('状态语义')).click()`);
+await sleep(350);
+check('语义浮层列出状态值与三个标记', await evl(`
+  document.querySelectorAll('.optpop .opt-row').length === 4
+  && document.querySelectorAll('.optpop .opt-row input[data-f="timeline"]').length === 4`) === true);
+await evl(`(() => {
+  const row = [...document.querySelectorAll('.optpop .opt-row')].find(r => r.textContent.includes('Active'));
+  const box = row.querySelector('input[data-f="timeline"]');
+  box.checked = false;
+  box.dispatchEvent(new Event('change', { bubbles: true }));
+})()`);
+await sleep(1300);
+check('关掉 timeline 后条目退出到期时间线',
+  !(await (await fetch(APP + 'api/overview')).json()).upcoming.some(u => u.kind === BK));
+const semF = (await (await fetch(`${APP}api/fields`)).json()).find(f => f.tbl === BK && f.key === 'status');
+check('语义标记落库', semF.options.find(o => o.v === 'Active').timeline === 0, JSON.stringify(semF.options));
+check('只动了改的那个状态，别的原样',
+  semF.options.find(o => o.v === 'Ending').timeline === 1 && semF.options.length === 4);
+check('续费按钮跟着语义消失',
+  await evl(`!document.querySelector('#${BK}-body tr [data-renew]')`) === true);
+
+check('删掉收尾测试库', (await fetch(`${APP}api/collections/${bc.id}`, { method: 'DELETE' })).ok);
+const back = await (await fetch(APP + 'api/collections')).json();
+await put('/api/collections/order', { ids: ['subs', 'sims', 'vps'].map(k => back.find(c => c.key === k).id) });
 await evl(`loadAll()`);
 await sleep(800);
 await evl(`switchTab('subs')`);

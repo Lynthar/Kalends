@@ -466,6 +466,15 @@ th.drop-r { box-shadow: inset -3px 0 0 var(--aqua); }
 .opt-row .fp-q { width: 100%; }
 .opt-add { margin-top: .4rem; }
 .opt-add .fp-q { width: 100%; }
+/* 浮层里的一行说明；语义/上表这种成排的小勾选 */
+.fp-note { font-size: .72rem; color: var(--ink-2); line-height: 1.5; padding: .1rem 0 .35rem; }
+.check.sem { font-size: .72rem !important; color: var(--ink-2) !important; gap: .25rem !important; white-space: nowrap; }
+/* 状态语义：一行放下状态胶囊 + 三个标记，别把状态名挤成省略号 */
+.sempop { min-width: 19rem; }
+.sempop .opt-row { gap: .4rem; cursor: default; }
+/* 库设置里的字段面板：拖动调序 + 上不上表 */
+.fpanel { max-height: 15rem; overflow: auto; border: 1px solid var(--line); border-radius: .55rem; padding: .3rem .55rem; }
+.fpanel .opt-row { font-size: .8rem; }
 .addcol {
   border: 0; background: none; cursor: pointer; color: var(--ink-2); font: inherit;
   font-size: .95rem; padding: 0 .2rem; border-radius: 6px; line-height: 1.3;
@@ -694,6 +703,10 @@ dialog h3 {
 }
 
 /* 新建库入口：与表标签同排，但读起来是动作不是某张表 */
+/* 库顺序：拖标签换位，落点标记与列序拖动同一套语言 */
+.tab.dragging { opacity: .45; }
+.tab.drop-l { box-shadow: inset 3px 0 0 var(--aqua); }
+.tab.drop-r { box-shadow: inset -3px 0 0 var(--aqua); }
 .tab.tab-add { color: var(--ink-2); opacity: .75; }
 .tab.tab-add:hover { color: var(--aqua-deep); opacity: 1; }
 .tab.tab-add::after { display: none; }

@@ -46,6 +46,8 @@ pub fn router() -> Router<App> {
     Router::new()
         .route("/api/fields", get(list).post(create))
         .route("/api/fields/options", put(set_options))
+        .route("/api/fields/order", put(set_order))
+        .route("/api/fields/semantics", put(set_semantics))
         .route("/api/fields/rename_option", post(rename_option))
         .route("/api/fields/remove_option", post(remove_option))
         .route("/api/fields/{id}", put(update).delete(delete_field))
@@ -176,6 +178,60 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
     if n == 0 {
         return Err(anyhow!("列不存在").into());
     }
+    Ok(Json(json!({ "ok": true })))
+}
+
+// 字段顺序：整份键序落成 pos。这是库级设置（决定新设备看到的默认列序与详情表单的次序），
+// 与存在 localStorage 里的本机列序是两回事。
+async fn set_order(State(app): State<App>, Json(b): Json<Value>) -> R {
+    let tbl = s(&b, "tbl").ok_or_else(|| anyhow!("缺少 tbl"))?;
+    let keys: Vec<&str> = b
+        .get("keys")
+        .and_then(|x| x.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+        .unwrap_or_default();
+    if keys.is_empty() {
+        return Err(anyhow!("缺少 keys").into());
+    }
+    let conn = app.db.lock().unwrap();
+    owner(&conn, &tbl)?;
+    for (n, k) in keys.iter().enumerate() {
+        conn.execute(
+            "UPDATE fields SET pos=?1 WHERE tbl=?2 AND key=?3",
+            params![n as i64 + 1, tbl, k],
+        )?;
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+// 状态语义：只改状态词表选项上的 spend/alert/timeline 三个标记，不碰值本身。
+// 状态是 items 的真列，改名/删值得连行数据一起迁移，那不在这条路上做。
+async fn set_semantics(State(app): State<App>, Json(b): Json<Value>) -> R {
+    let tbl = s(&b, "tbl").ok_or_else(|| anyhow!("缺少 tbl"))?;
+    let key = s(&b, "key").ok_or_else(|| anyhow!("缺少 key"))?;
+    let conn = app.db.lock().unwrap();
+    let stored: String = conn
+        .query_row(
+            "SELECT options FROM fields WHERE tbl=?1 AND key=?2 AND ftype='status'",
+            params![tbl, key],
+            |r| r.get(0),
+        )
+        .map_err(|_| anyhow!("该列没有状态词表"))?;
+    let mut opts: Vec<Value> = serde_json::from_str(&stored).unwrap_or_default();
+    let want = opts_array(&b);
+    for o in opts.iter_mut() {
+        let Some(w) = want.iter().find(|w| w["v"] == o["v"]) else { continue };
+        // opts_array 只保留调用方真传了的标记，没传的保持原样
+        for flag in SEM_FLAGS {
+            if let Some(v) = w.get(*flag) {
+                o[*flag] = v.clone();
+            }
+        }
+    }
+    conn.execute(
+        "UPDATE fields SET options=?1 WHERE tbl=?2 AND key=?3",
+        params![serde_json::to_string(&opts)?, tbl, key],
+    )?;
     Ok(Json(json!({ "ok": true })))
 }
 

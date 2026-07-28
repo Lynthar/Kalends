@@ -911,6 +911,37 @@ async function fieldCall(path, method, body) {
 
 const putOpts = (tab, k, opts) => fieldCall('/api/fields/options', 'PUT', { tbl: tab, key: k, options: opts });
 
+/* 状态语义浮层：每个状态值自己声明计不计支出 / 发不发提醒 / 上不上到期时间线，
+   engine 与 notify 都读这三个标记。只改标记不动值——状态是 items 的真列，
+   改名删值要连行数据一起迁移，那不在这条路上做。 */
+const SEM_FLAGS = [['spend', '计支出'], ['alert', '提醒'], ['timeline', '时间线']];
+
+function openStatusSemPop(tab, k, anchor) {
+  closePop();
+  popKey = 'sem:' + tab + ':' + k;
+  popEl = document.createElement('div');
+  popEl.className = 'filterpop optpop sempop';
+  popEl.innerHTML = `<div class="fp-head"><b>状态语义 · ${esc(colLabel(tab, k))}</b></div>
+    <div class="fp-note">勾了「计支出」才进支出统计，「提醒」才发通知，「时间线」才上到期栏与日历</div>`;
+  const stored = storedOpts(tab, k);
+  for (const o of stored) {
+    const sem = semOf(tab, o.v);
+    const row = document.createElement('div');
+    row.className = 'opt-row';
+    row.innerHTML = `<span class="fp-v">${stPill(o.v)}</span>` + SEM_FLAGS.map(([f, lab]) =>
+      `<label class="check sem"><input type="checkbox" data-f="${f}"${sem[f] ? ' checked' : ''}><span>${lab}</span></label>`
+    ).join('');
+    row.querySelectorAll('input').forEach(inp => inp.onchange = async () => {
+      const flags = Object.fromEntries(
+        [...row.querySelectorAll('input')].map(i => [i.dataset.f, i.checked ? 1 : 0]));
+      const next = stored.map(x => x.v === o.v ? { ...x, ...flags } : { ...x });
+      if (await fieldCall('/api/fields/semantics', 'PUT', { tbl: tab, key: k, options: next })) await loadAll();
+    });
+    popEl.appendChild(row);
+  }
+  placePop(popEl, anchor);
+}
+
 // 选项管理浮层：颜色 / 加 / 原位改名 / 删除（改名删除会传播到所有行，颜色只动词表）
 function openOptionsPop(tab, k, anchor) {
   closePop();
@@ -1127,6 +1158,10 @@ function openHeadMenu(tab, th) {
   items.push({ svg: FUNNEL_SVG, t: '筛选…', act: () => openFilterPop(tab, k, th), keepPop: true });
   if (optionsEditable(tab, k)) {
     items.push({ ic: '≡', t: '编辑选项…', act: () => openOptionsPop(tab, k, th), keepPop: true });
+  }
+  // 状态词表不开放改值（状态是真列），但三个语义标记可以改
+  if (colType(tab, k) === 'status' && storedOpts(tab, k).length) {
+    items.push({ ic: '◐', t: '状态语义…', act: () => openStatusSemPop(tab, k, th), keepPop: true });
   }
   items.push({ ic: '⊘', t: '隐藏此列', act: () => {
     v.hiddenCols = [...(v.hiddenCols || []), k];
@@ -1383,10 +1418,13 @@ function pickEditor(tab, it, td, k, save) {
   placePop(box, td);
 }
 
+// 值挂在行的 extra 里还是顶层：库的列看注册表的 src，媒体的自定义列看 custom
+const inExtra = col => (col.src ? col.src === 'extra' : !!col.custom);
+
 // 多选：勾选并集实时存；同样可现场新建选项
 function multiEditor(tab, it, td, k, save) {
   const col = COLS[tab][k];
-  const raw = col.custom ? (it.extra || {})[k] : it[k];
+  const raw = inExtra(col) ? (it.extra || {})[k] : it[k];
   const cur = Array.isArray(raw) ? raw.map(String) : raw ? splitVals(raw) : [];
   const values = effectiveOptions(tab, k);
   for (const v of cur) if (!values.includes(v)) values.push(v);
@@ -1474,7 +1512,7 @@ function openCellPop(tab, it, k, td) {
   if (!col) return;
   const spec = CELL_SPEC[tab]?.[k] || {};
   const t = colType(tab, k);
-  const toExtra = col.src ? col.src === 'extra' : !!col.custom;
+  const toExtra = inExtra(col);
   // 算出来的列（剩余天数 / 模板列）不能就地编辑，点它开详情表单去改源字段
   if (col.src === 'calc') return openItemDialog(tab, it);
   // 周期是复合格：周期枚举 + 自定义天数
@@ -2037,6 +2075,47 @@ function colFromField(key, f) {
   };
 }
 
+/* ── 库顺序：拖标签换位，落到 collections.pos（跨设备），与本机列序不是一回事 ── */
+let dragColl = null;
+const clearTabMarks = () =>
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('drop-l', 'drop-r', 'dragging'));
+
+function initTabDrag(btn, key) {
+  btn.draggable = true;
+  btn.addEventListener('dragstart', e => {
+    dragColl = key;
+    e.dataTransfer.effectAllowed = 'move';
+    btn.classList.add('dragging');
+  });
+  btn.addEventListener('dragover', e => {
+    if (!dragColl || dragColl === key) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const r = btn.getBoundingClientRect();
+    const after = e.clientX > r.left + r.width / 2;
+    btn.classList.toggle('drop-r', after);
+    btn.classList.toggle('drop-l', !after);
+  });
+  btn.addEventListener('dragleave', () => btn.classList.remove('drop-l', 'drop-r'));
+  btn.addEventListener('drop', async e => {
+    e.preventDefault();
+    const after = btn.classList.contains('drop-r');
+    const moved = dragColl;
+    dragColl = null;
+    clearTabMarks();
+    if (!moved || moved === key) return;
+    const order = colls().map(c => c.key).filter(k => k !== moved);
+    order.splice(order.indexOf(key) + (after ? 1 : 0), 0, moved);
+    try {
+      await api('/api/collections/order', {
+        method: 'PUT', body: JSON.stringify({ ids: order.map(k => collOf(k).id) }),
+      });
+      await loadAll();
+    } catch (err) { toast(err.message, true); }
+  });
+  btn.addEventListener('dragend', () => { dragColl = null; clearTabMarks(); });
+}
+
 /* ── 库的 DOM：标签按钮 + 表格容器 + 由字段生成的表头 ── */
 function collThead(key) {
   return shownFields(key).map(f => {
@@ -2055,9 +2134,14 @@ function ensureCollDom(c) {
     btn.type = 'button';
     btn.dataset.tab = key;
     $('#coll-add').before(btn);
+  }
+  // 三个预置库的标签写在 index.html 里，不走上面的新建分支——事件一律在这儿绑，
+  // 否则它们既拖不动也右键不开设置（真踩过）
+  if (!btn.dataset.wired) {
+    btn.dataset.wired = '1';
     btn.onclick = () => switchTab(key);
-    // 当前库的标签上右键 / 长按开库设置
-    btn.oncontextmenu = e => { e.preventDefault(); openCollDialog(c); };
+    btn.oncontextmenu = e => { e.preventDefault(); openCollDialog(collOf(key)); };
+    initTabDrag(btn, key);
   }
   btn.textContent = label;
   let wrap = document.querySelector(`.tablewrap[data-tab="${key}"]`);
@@ -2089,6 +2173,8 @@ function ensureCollDom(c) {
 function syncColls() {
   const keys = new Set(colls().map(c => c.key));
   for (const c of colls()) ensureCollDom(c);
+  // 标签依次挪到「＋ 库」前面 = 按库序排好（已存在的标签不会自己归位）
+  for (const c of colls()) $('#coll-add').before(document.querySelector(`.tab[data-tab="${c.key}"]`));
   // 库被删掉了就连标签带容器一起撤；三个预置库的容器写在 index.html 里，删库时同样该撤
   document.querySelectorAll('.tablewrap[data-tab]').forEach(w => {
     const k = w.dataset.tab;
@@ -2316,6 +2402,10 @@ function collDialog() {
         </select></label>
         <label><span>到期动作说法</span><input data-c="verb" placeholder="续费"></label>
       </div>
+      <div id="coll-fields-box" hidden>
+        <div class="fp-note">字段：拖动调序（对所有设备生效），关掉「上表」的只留在详情表单里</div>
+        <div id="coll-fields" class="fpanel"></div>
+      </div>
       <footer>
         <button type="button" class="btn ghost" id="coll-del" hidden>删除本库</button>
         <button type="button" class="btn ghost" data-close>取消</button>
@@ -2357,6 +2447,69 @@ function pickTpl(d, t) {
   fillTplChips(d);
 }
 
+/* 字段面板：库级的字段顺序与「上不上表」。顺序落 fields.pos，对所有设备生效，
+   所以调完顺手清掉本机那份列序覆写，否则用户看不到自己刚排的结果。 */
+function fillCollFields(c) {
+  const box = $('#coll-fields-box');
+  box.hidden = !c;
+  if (!c) return;
+  const list = $('#coll-fields');
+  list.innerHTML = '';
+  const fs = fieldsOf(c.key);
+  const apply = async body => {
+    try {
+      await api('/api/fields/order', { method: 'PUT', body: JSON.stringify(body) });
+      views[c.key].order = null;
+      saveViews();
+      await rebuildHead(c.key);
+      fillCollFields(c);
+    } catch (err) { toast(err.message, true); }
+  };
+  let from = null;
+  fs.forEach((f, idx) => {
+    const row = document.createElement('div');
+    row.className = 'opt-row';
+    row.draggable = true;
+    row.innerHTML = `<span class="fp-v">${esc(f.name || f.key)}</span>
+      <label class="check sem"><input type="checkbox"${f.shown ? ' checked' : ''}><span>上表</span></label>`;
+    row.querySelector('input').onchange = async e => {
+      const on = e.target.checked;
+      try {
+        await api(`/api/fields/${f.id}`, {
+          method: 'PUT', body: JSON.stringify({ name: f.name, shown: on }),
+        });
+        await rebuildHead(c.key);
+        fillCollFields(c);
+      } catch (err) { toast(err.message, true); e.target.checked = !on; }
+    };
+    row.addEventListener('dragstart', e => { from = idx; e.dataTransfer.effectAllowed = 'move'; });
+    row.addEventListener('dragover', e => {
+      if (from == null || from === idx) return;
+      e.preventDefault();
+      const r = row.getBoundingClientRect();
+      const after = e.clientY > r.top + r.height / 2;
+      row.classList.toggle('drop-b', after);
+      row.classList.toggle('drop-t', !after);
+    });
+    row.addEventListener('dragleave', () => row.classList.remove('drop-t', 'drop-b'));
+    row.addEventListener('drop', e => {
+      e.preventDefault();
+      const after = row.classList.contains('drop-b');
+      row.classList.remove('drop-t', 'drop-b');
+      if (from == null || from === idx) return;
+      const keys = fs.map(x => x.key);
+      const [moved] = keys.splice(from, 1);
+      let at = idx + (after ? 1 : 0);
+      if (from < at) at--;
+      keys.splice(at, 0, moved);
+      from = null;
+      apply({ tbl: c.key, keys });
+    });
+    row.addEventListener('dragend', () => { from = null; });
+    list.appendChild(row);
+  });
+}
+
 let editingColl = null;
 async function openCollDialog(c) {
   editingColl = c || null;
@@ -2368,6 +2521,7 @@ async function openCollDialog(c) {
   g('due_anchor').value = c?.due_anchor || 'last';
   g('verb').value = c?.verb || '';
   collTpl = null;
+  fillCollFields(c);
   const tplRow = $('#coll-tpl-row');
   tplRow.hidden = true;
   if (!c) {
@@ -2420,3 +2574,7 @@ document.addEventListener('submit', async e => {
 });
 
 $('#coll-add').onclick = () => openCollDialog(null);
+$('#coll-settings').onclick = () => {
+  const c = collOf(state.tab);
+  if (c) openCollDialog(c);
+};

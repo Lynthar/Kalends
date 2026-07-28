@@ -24,6 +24,7 @@ pub fn router() -> Router<App> {
     Router::new()
         .route("/api/collections", get(list).post(create))
         .route("/api/collections/templates", get(templates))
+        .route("/api/collections/order", put(set_order))
         .route("/api/collections/{id}", put(update).delete(remove))
         .route("/api/collections/{key}/items", get(items_list).post(items_create))
         .route("/api/items/{id}", put(items_update).delete(items_delete))
@@ -346,6 +347,27 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
             id
         ],
     )?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+// 库顺序：整份 id 序落成 pos，决定标签行的排列。
+// 路由排在 `/api/collections/{id}` 之前——静态段优先于路径参数，"order" 不会被当成 id。
+async fn set_order(State(app): State<App>, Json(b): Json<Value>) -> R {
+    let ids: Vec<i64> = b
+        .get("ids")
+        .and_then(|x| x.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_i64()).collect())
+        .unwrap_or_default();
+    if ids.is_empty() {
+        return Err(anyhow!("缺少 ids").into());
+    }
+    let conn = app.db.lock().unwrap();
+    for (n, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE collections SET pos=?1 WHERE id=?2",
+            params![n as i64 + 1, id],
+        )?;
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
