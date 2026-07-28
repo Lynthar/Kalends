@@ -13,6 +13,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0007_collections.sql"),
     include_str!("../migrations/0008_field_registry.sql"),
     include_str!("../migrations/0009_coll_subline.sql"),
+    include_str!("../migrations/0010_drop_price_history.sql"),
 ];
 
 pub fn open(data_dir: &Path) -> Result<Connection> {

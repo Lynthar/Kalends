@@ -16,7 +16,6 @@ const TABLES: &[&str] = &[
     "vps_instances",
     "media_items",
     "fields",
-    "price_history",
     "renewal_ledger",
     "notification_log",
     "settings",
