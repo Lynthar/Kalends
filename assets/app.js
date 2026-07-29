@@ -1276,8 +1276,6 @@ function renderViewPills(tab) {
 
 /* ── 点格即编：点单元格就地编辑，保存 = 整行 PUT（后端是全量替换语义）──
    复合格（名称/商家产品/规格/周期）弹多输入迷你表单；表外字段仍走「编辑」全表单。 */
-const API_PATH = { subs: 'subscriptions', sims: 'sims', vps: 'vps', media: 'media' };
-
 // 行对象 → PUT 全量体（与各编辑表单发的字段集一致，缺一项就会被后端置空）
 const ROW_BODY = {
   media: it => {
