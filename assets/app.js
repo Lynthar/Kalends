@@ -254,10 +254,13 @@ const COLS = {
   },
 };
 
-// 有效类型感知的筛选值：呈现为多选的文本列按分隔符拆开
+// 有效类型感知的筛选值：呈现为多选的文本列按分隔符拆开。
+// 真多选列的值本身就是数组，绝不能再拆——否则含 , ， 、 / 的值（如线路「CN2 GIA/9929」）
+// 会碎成两个，勾选它自己筛不出自己那行。cellVal 与 multiEditor 早就是按值形态判断的，这里补齐。
 function colFvals(tab, k, r) {
-  const vals = (COLS[tab][k].fvals || (() => []))(r);
-  return colType(tab, k) === 'multi' ? vals.flatMap(splitVals) : vals;
+  const col = COLS[tab][k];
+  const vals = (col.fvals || (() => []))(r);
+  return colType(tab, k) === 'multi' && col.t !== 'multi' ? vals.flatMap(splitVals) : vals;
 }
 
 // 筛选值形态必须匹配列的有效类型（列表型=数组 / 操作符型={op,q}），换类型或旧版残留时清掉
@@ -1534,16 +1537,16 @@ function openCellPop(tab, it, k, td) {
   });
 }
 
-// 点击委托：按钮/链接照旧，其余格子进就地编辑
-for (const [tab, sel] of Object.entries({ subs: '#subs-body', sims: '#sims-body', vps: '#vps-body', media: '#m-body' })) {
-  $(sel).addEventListener('click', e => {
-    if (e.target.closest('button, a, input, select, textarea, label')) return;
-    const td = e.target.closest('td');
-    if (!td || !td.dataset.k || td.dataset.k === 'ops') return;
-    const it = state[tab].find(x => x.id === +td.closest('tr').dataset.id);
-    if (it) openCellPop(tab, it, td.dataset.k, td);
-  });
-}
+// 点击委托：按钮/链接照旧，其余格子进就地编辑。挂在 document 上、按 tbody 的 data-tab 认表，
+// 后建的库自然生效——曾经写死成四个 tbody 选择器，于是自建库的格子点了毫无反应
+document.addEventListener('click', e => {
+  if (e.target.closest('button, a, input, select, textarea, label')) return;
+  const td = e.target.closest('td');
+  const tab = td?.closest('tbody[data-tab]')?.dataset.tab;
+  if (!tab || !td.dataset.k || td.dataset.k === 'ops') return;
+  const it = state[tab]?.find(x => x.id === +td.closest('tr').dataset.id);
+  if (it) openCellPop(tab, it, td.dataset.k, td);
+});
 
 /* ── 订阅表（Notion 式子行：服务→套餐档位可折叠，比价一目了然）── */
 async function delItem(kind, it) {
@@ -1768,11 +1771,14 @@ function renderMedia() {
 
 let editingMedia = null;
 
+// 星串点亮到第 n 颗（「清除」钮的 data-v 为空，不参与点亮）
+const litStars = (el, n) => el.querySelectorAll('button[data-v]').forEach(b => {
+  if (b.dataset.v) b.classList.toggle('lit', +b.dataset.v <= n);
+});
+
 function setStars(v) {
   $('#form-media').elements.rating.value = v || '';
-  $('#m-stars').querySelectorAll('button[data-v]').forEach(b => {
-    if (b.dataset.v) b.classList.toggle('lit', +b.dataset.v <= (+v || 0));
-  });
+  litStars($('#m-stars'), +v || 0);
 }
 
 function openMediaDialog(it) {
@@ -2145,7 +2151,7 @@ function ensureCollDom(c) {
     wrap.className = 'tablewrap';
     wrap.dataset.tab = key;
     wrap.hidden = state.tab !== key;
-    wrap.innerHTML = `<table class="grid"><thead><tr></tr></thead><tbody id="${esc(key)}-body"></tbody></table>
+    wrap.innerHTML = `<table class="grid"><thead><tr></tr></thead><tbody id="${esc(key)}-body" data-tab="${esc(key)}"></tbody></table>
       <p class="empty" id="${esc(key)}-empty" hidden>◌ 空架待书</p>`;
     document.querySelector('.tablewrap[data-tab="vps"]').after(wrap);
   }
@@ -2306,6 +2312,36 @@ function itemDialog() {
 }
 
 let editingItem = null;
+// 表单里的候选值 = 词表 ∪ 各行已用过的值。不走 COLS——shown=0 的字段不在里面。
+function fieldOptions(key, f) {
+  const out = (f.options || []).map(o => o.v);
+  const seen = new Set(out);
+  for (const r of state[key] || []) {
+    const v = fieldVal(f, r);
+    const vals = Array.isArray(v) ? v.map(String) : v == null || v === '' ? [] : [String(v)];
+    for (const x of vals) if (!seen.has(x)) { seen.add(x); out.push(x); }
+  }
+  return out;
+}
+
+// 多选清单末尾的「新选项」输入：回车加一枚勾好的复选框（已有就勾上）。
+// 必须吃掉回车——表单里的回车默认直接提交。
+function initMoptAdd(inp) {
+  inp.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const val = inp.value.trim();
+    inp.value = '';
+    if (!val) return;
+    const same = [...inp.parentElement.querySelectorAll('input[type=checkbox]')].find(i => i.value === val);
+    if (same) { same.checked = true; return; }
+    const l = document.createElement('label');
+    l.className = 'check';
+    l.innerHTML = `<input type="checkbox" value="${esc(val)}" checked><span>${esc(val)}</span>`;
+    inp.before(l);
+  });
+}
+
 function openItemDialog(key, it) {
   const c = collOf(key);
   editingItem = { key, id: it?.id ?? null, row: it || {} };
@@ -2318,15 +2354,30 @@ function openItemDialog(key, it) {
     const v = it ? fieldVal(f, it) : '';
     const val = Array.isArray(v) ? v.join(', ') : (v ?? '');
     const lab = document.createElement('label');
-    if (f.ftype === 'sel' || f.ftype === 'multi') {
-      const opts = (f.options || []).map(o => o.v);
-      const cur = Array.isArray(v) ? v : (v ? [String(v)] : []);
+    if (f.ftype === 'multi') {
+      // 勾选清单，不是逗号分隔的文本框——值里含 , ， 、 / 时，文本框存回去会把它拆成两个
+      const cur = new Set(Array.isArray(v) ? v.map(String) : v ? [String(v)] : []);
+      const opts = fieldOptions(key, f);
       for (const x of cur) if (!opts.includes(x)) opts.push(x);
-      lab.innerHTML = `<span>${esc(f.name || f.key)}</span>`
-        + (f.ftype === 'multi'
-          ? `<input data-f="${esc(f.key)}" list="opts-${esc(f.key)}" value="${esc(val)}" placeholder="逗号分隔">`
-          : `<select data-f="${esc(f.key)}"><option value=""></option>${opts.map(o => `<option${o === val ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`)
-        + `<datalist id="opts-${esc(f.key)}">${opts.map(o => `<option>${esc(o)}</option>`).join('')}</datalist>`;
+      lab.className = 'span2';
+      lab.innerHTML = `<span>${esc(f.name || f.key)}</span>
+        <span class="mopts" data-mbox="${esc(f.key)}">${opts.map(o =>
+          `<label class="check"><input type="checkbox" value="${esc(o)}"${cur.has(o) ? ' checked' : ''}><span>${esc(o)}</span></label>`
+        ).join('')}<input class="mopt-add" placeholder="新选项，回车加入"></span>`;
+      initMoptAdd(lab.querySelector('.mopt-add'));
+    } else if (f.ftype === 'star') {
+      const n = +val || 0;
+      lab.innerHTML = `<span>${esc(f.name || f.key)}</span>
+        <span class="stars">${[1, 2, 3, 4, 5].map(i =>
+          `<button type="button" data-v="${i}"${i <= n ? ' class="lit"' : ''}>★</button>`).join('')
+        }<button type="button" class="star-clear" data-v="">清除</button></span>
+        <input type="hidden" data-f="${esc(f.key)}" value="${n || ''}">`;
+    } else if (f.ftype === 'sel') {
+      const cur = val === '' ? '' : String(val);
+      const opts = fieldOptions(key, f);
+      if (cur && !opts.includes(cur)) opts.push(cur);
+      lab.innerHTML = `<span>${esc(f.name || f.key)}</span><select data-f="${esc(f.key)}">`
+        + `<option value=""></option>${opts.map(o => `<option${o === cur ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
     } else if (f.ftype === 'status') {
       const opts = statusOrder(key);
       lab.innerHTML = `<span>${esc(f.name || f.key)}</span><select data-f="${esc(f.key)}">${opts.map(o => `<option${o === (val || 'Planned') ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
@@ -2345,19 +2396,33 @@ function itemBody(key, row) {
   const patch = { extra: { ...(row.extra || {}) } };
   for (const f of fieldsOf(key)) {
     if (f.src === 'calc') continue;
-    const el = document.querySelector(`#item-fields [data-f="${f.key}"]`);
-    if (!el) continue;
-    let v = el.value.trim();
     let val;
-    if (f.ftype === 'multi') val = splitVals(v);
-    else if (f.ftype === 'num') val = v === '' ? undefined : Number(v);
-    else val = v;
+    if (f.ftype === 'multi') {
+      // 勾选清单直接给数组，不经字符串往返——那正是含分隔符的值被拆坏的地方
+      const mbox = document.querySelector(`#item-fields [data-mbox="${f.key}"]`);
+      if (!mbox) continue;
+      val = [...mbox.querySelectorAll('input[type=checkbox]:checked')].map(i => i.value);
+    } else {
+      const el = document.querySelector(`#item-fields [data-f="${f.key}"]`);
+      if (!el) continue;
+      const v = el.value.trim();
+      val = f.ftype === 'num' || f.ftype === 'star' ? (v === '' ? undefined : Number(v)) : v;
+    }
     if (f.src === 'col') patch[f.key] = val;
     else if (val == null || val === '' || (Array.isArray(val) && !val.length)) delete patch.extra[f.key];
     else patch.extra[f.key] = val;
   }
   return itemBodyFromRow(key, { ...row, ...patch });
 }
+
+// 详情表单里的星级：点星写进隐藏输入（与就地编辑的 starEditor 同一套呈现）
+document.addEventListener('click', e => {
+  const b = e.target.closest('#item-fields .stars button[data-v]');
+  if (!b) return;
+  const n = +b.dataset.v || 0;
+  b.closest('label').querySelector('input[data-f]').value = n || '';
+  litStars(b.closest('.stars'), n);
+});
 
 document.addEventListener('submit', async e => {
   if (e.target.id !== 'form-item') return;

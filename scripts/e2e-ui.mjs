@@ -647,6 +647,74 @@ check('详情表单按字段集生成且排除算出来的列', await evl(`(() =
 })()`) === true);
 await evl(`document.querySelector('#dlg-item').close()`);
 await sleep(150);
+
+/* 12g-2. 自建库也能点格即编（曾经点击委托写死成四个 tbody 选择器，自建库的格子点了没反应） */
+await evl(`document.querySelector('#${NK}-body td[data-k="name"]').click()`);
+await sleep(350);
+check('自建库点格开就地编辑浮层', await evl(`!!document.querySelector('.cellpop')`) === true);
+// 取不到就跳过（浮层没开时不抛异常，好让负向对照跑完整套）
+await evl(`(() => { const i = document.querySelector('.cellpop input[data-f="name"]'); if (!i) return; i.value = 'renamed.com'; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); })()`);
+await sleep(800);
+check('自建库点格即编落库',
+  (await (await fetch(`${APP}api/collections/${NK}/items`)).json()).some(x => x.name === 'renamed.com'));
+
+/* 12g-3. 多选值里含分隔符（, ， 、 /）：勾选它自己要能筛出自己那行，存回去也不能被拆开 */
+const mf = await post('/api/fields', { tbl: NK, name: '线路', ftype: 'multi' });
+const sf = await post('/api/fields', { tbl: NK, name: '星级', ftype: 'star' });
+await put('/api/fields/options', { tbl: NK, key: mf.key, options: [{ v: 'CN2 GIA/9929' }, { v: '普通' }] });
+const nrows = await (await fetch(`${APP}api/collections/${NK}/items`)).json();
+const slashRow = nrows.find(r => r.name === 'renamed.com') || nrows.find(r => r.name === 'lynthar.com');
+const SLASH_NAME = slashRow.name;
+await put(`/api/items/${slashRow.id}`, {
+  ...slashRow, extra: { ...(slashRow.extra || {}), [mf.key]: ['CN2 GIA/9929'], [sf.key]: 4 },
+});
+await evl(`loadAll()`);
+await sleep(900);
+await evl(`switchTab('${NK}')`);
+await sleep(400);
+check('含 / 的多选值渲染成一枚完整标签', await evl(
+  `[...document.querySelectorAll('#${NK}-body td[data-k="${mf.key}"] .tag')].map(t => t.textContent).join('|')`) === 'CN2 GIA/9929');
+check('筛选浮层不列出被拆碎的片段', await evl(`(() => {
+  openFilterPop('${NK}', '${mf.key}', document.querySelector('.tablewrap[data-tab="${NK}"] th[data-k="${mf.key}"]'));
+  const vs = [...document.querySelectorAll('.filterpop .fp-v')].map(x => x.textContent);
+  closePop();
+  return vs.join('|');
+})()`) === 'CN2 GIA/9929|普通|（空）');
+check('勾选含 / 的值能筛出自己那行', await evl(`(async () => {
+  setFilter('${NK}', '${mf.key}', ['CN2 GIA/9929']);
+  await new Promise(r => setTimeout(r, 400));
+  const names = [...document.querySelectorAll('#${NK}-body td[data-k="name"]')].map(t => t.textContent);
+  setFilter('${NK}', '${mf.key}', null);
+  return names.some(n => n.includes('${SLASH_NAME}'));
+})()`) === true);
+
+/* 12g-4. 详情表单用真控件：多选是勾选清单、星级是点星；开表单直接保存不得改坏任何值 */
+await evl(`openItemDialog('${NK}', state['${NK}'].find(r => r.name === '${SLASH_NAME}'))`);
+await sleep(500);
+check('多选字段是勾选清单而非文本框', await evl(
+  `!!document.querySelector('#item-fields [data-mbox="${mf.key}"] input[type=checkbox]')
+   && !document.querySelector('#item-fields input[data-f="${mf.key}"]')`) === true);
+check('勾选清单带出当前值', await evl(
+  `[...document.querySelectorAll('#item-fields [data-mbox="${mf.key}"] input:checked')].map(i => i.value).join('|')`) === 'CN2 GIA/9929');
+check('星级字段是点星控件、已点亮 4 颗', await evl(
+  `document.querySelectorAll('#item-fields .stars button.lit').length`) === 4);
+await shot('15-item-form');
+await evl(`document.querySelector('#form-item').requestSubmit()`);
+await sleep(1000);
+const saved = (await (await fetch(`${APP}api/collections/${NK}/items`)).json()).find(r => r.name === SLASH_NAME);
+check('原样保存不拆坏含 / 的多选值', JSON.stringify(saved.extra?.[mf.key]) === '["CN2 GIA/9929"]', JSON.stringify(saved.extra?.[mf.key]));
+check('原样保存后星级仍是数字', saved.extra?.[sf.key] === 4, JSON.stringify(saved.extra?.[sf.key]));
+// 点星改分同样要落成数字
+await evl(`openItemDialog('${NK}', state['${NK}'].find(r => r.name === '${SLASH_NAME}'))`);
+await sleep(450);
+await evl(`document.querySelector('#item-fields .stars button[data-v="2"]')?.click()`);
+await sleep(150);
+check('点第 2 颗星后只亮 2 颗', await evl(`document.querySelectorAll('#item-fields .stars button.lit').length`) === 2);
+await evl(`document.querySelector('#form-item').requestSubmit()`);
+await sleep(1000);
+const restarred = (await (await fetch(`${APP}api/collections/${NK}/items`)).json()).find(r => r.name === SLASH_NAME);
+check('点星改分落库为数字 2', restarred.extra?.[sf.key] === 2, JSON.stringify(restarred.extra?.[sf.key]));
+
 check('删库', (await fetch(`${APP}api/collections/${nc.id}`, { method: 'DELETE' })).ok);
 await evl(`loadAll()`);
 await sleep(800);
