@@ -923,6 +923,32 @@ const putOpts = (tab, k, opts) => fieldCall('/api/fields/options', 'PUT', { tbl:
    改名删值要连行数据一起迁移，那不在这条路上做。 */
 const SEM_FLAGS = [['spend', '计支出'], ['alert', '提醒'], ['timeline', '时间线']];
 
+/* 新增状态值：词表只增不改不删。新值三个语义标记默认全关，
+   要它计支出/提醒/上时间线得再去「状态语义…」里勾。 */
+function openAddStatusPop(tab, k, anchor) {
+  closePop();
+  popKey = 'addst:' + tab + ':' + k;
+  popEl = document.createElement('div');
+  popEl.className = 'filterpop optpop';
+  popEl.innerHTML = `<div class="fp-head"><b>新增状态值</b></div>
+    <div class="fp-note">词表只能加，不能改名或删除——状态是条目的真列，改它要连行数据一起迁移</div>
+    <div class="opt-add"><input class="fp-q" placeholder="新状态，回车加入"></div>`;
+  const inp = popEl.querySelector('input');
+  inp.addEventListener('keydown', async e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const value = inp.value.trim();
+    if (!value) return;
+    closePop();
+    if (await fieldCall('/api/fields/add_status', 'POST', { tbl: tab, key: k, value })) {
+      rebuildHead(tab).then(() => RENDER[tab]());
+      toast(`已加入「${value}」，默认不计支出 / 不提醒 / 不上时间线`);
+    }
+  });
+  placePop(popEl, anchor);
+  inp.focus();
+}
+
 function openStatusSemPop(tab, k, anchor) {
   closePop();
   popKey = 'sem:' + tab + ':' + k;
@@ -1166,8 +1192,9 @@ function openHeadMenu(tab, th) {
   if (optionsEditable(tab, k)) {
     items.push({ ic: '≡', t: '编辑选项…', act: () => openOptionsPop(tab, k, th), keepPop: true });
   }
-  // 状态词表不开放改值（状态是真列），但三个语义标记可以改
+  // 状态词表只能加不能改删（状态是真列，改名删值要连行数据一起迁移），语义标记可以随便改
   if (colType(tab, k) === 'status' && storedOpts(tab, k).length) {
+    items.push({ ic: '＋', t: '新增状态值…', act: () => openAddStatusPop(tab, k, th), keepPop: true });
     items.push({ ic: '◐', t: '状态语义…', act: () => openStatusSemPop(tab, k, th), keepPop: true });
   }
   items.push({ ic: '⊘', t: '隐藏此列', act: () => {

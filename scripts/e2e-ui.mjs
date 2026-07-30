@@ -33,6 +33,10 @@ const post = (path, body) => fetch(APP.replace(/\/$/, '') + path, {
 const put = (path, body) => fetch(APP.replace(/\/$/, '') + path, {
   method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
 });
+// 拿原始 Response（要断言「被拒绝」时用，post/put 会把错误体也当成正常结果）
+const raw = (path, method, body) => fetch(APP.replace(/\/$/, '') + path, {
+  method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+});
 
 const subs0 = await fetch(APP + 'api/collections/subs/items').then(r => r.json()).catch(() => null);
 if (!subs0) { console.error('服务未启动？先起 Kalends 实例再跑本脚本'); process.exit(2); }
@@ -967,12 +971,42 @@ check('只动了改的那个状态，别的原样',
 check('续费按钮跟着语义消失',
   await evl(`!document.querySelector('#${BK}-body tr [data-renew]')`) === true);
 
+// 状态词表只增不改删：加得进去，且新值默认没有任何语义
+await evl(`closePop()`);
+await evl(`document.querySelector('.tablewrap[data-tab="${BK}"] th[data-k="status"]').click()`);
+await sleep(300);
+check('状态列菜单有「新增状态值…」',
+  await evl(`[...document.querySelectorAll('.thmenu .mi')].some(b => b.textContent.includes('新增状态值'))`) === true);
+await evl(`[...document.querySelectorAll('.thmenu .mi')].find(b => b.textContent.includes('新增状态值')).click()`);
+await sleep(300);
+await evl(`(() => {
+  const i = document.querySelector('.optpop input');
+  i.value = '待寄回';
+  i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+})()`);
+await sleep(1200);
+const stF = (await (await fetch(`${APP}api/fields`)).json()).find(f => f.tbl === BK && f.key === 'status');
+const added = stF.options.find(o => o.v === '待寄回');
+check('新状态值落到词表末尾', stF.options.at(-1).v === '待寄回', JSON.stringify(stF.options.map(o => o.v)));
+check('新状态值默认三个语义全关',
+  added && added.spend === 0 && added.alert === 0 && added.timeline === 0, JSON.stringify(added));
+check('重复加同一个值被拒绝',
+  !(await raw('/api/fields/add_status', 'POST', { tbl: BK, key: 'status', value: '待寄回' })).ok);
+check('非状态列不能走这条路',
+  !(await raw('/api/fields/add_status', 'POST', { tbl: BK, key: 'notes', value: 'x' })).ok);
+await evl(`switchTab('${BK}')`);
+await sleep(400);
+await evl(`document.querySelector('#${BK}-body td[data-k="status"]').click()`);
+await sleep(350);
+check('状态格的选值列表里出现新值', await evl(
+  `[...document.querySelectorAll('.cellpop .mi')].some(b => b.textContent.includes('待寄回'))`) === true);
+check('状态格仍不给现场新建（只挑不建）', await evl(
+  `!document.querySelector('.cellpop .opt-add')`) === true);
+await evl(`closePop()`);
+
 check('删掉收尾测试库', (await fetch(`${APP}api/collections/${bc.id}`, { method: 'DELETE' })).ok);
 
 /* 12j. 子行只有两层：三层的孙行在表格里既不属顶层也不会被渲染，会静默消失，所以写入口就拦住 */
-const raw = (path, method, body) => fetch(APP.replace(/\/$/, '') + path, {
-  method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-});
 const gp = await post('/api/collections/subs/items', { name: '祖行', status: 'Active', extra: {} });
 const pr = await post('/api/collections/subs/items', { name: '父行', status: 'Active', parent_id: gp.id, extra: {} });
 check('两层可以建', typeof pr.id === 'number', JSON.stringify(pr));

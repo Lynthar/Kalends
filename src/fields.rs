@@ -48,6 +48,7 @@ pub fn router() -> Router<App> {
         .route("/api/fields/options", put(set_options))
         .route("/api/fields/order", put(set_order))
         .route("/api/fields/semantics", put(set_semantics))
+        .route("/api/fields/add_status", post(add_status))
         .route("/api/fields/rename_option", post(rename_option))
         .route("/api/fields/remove_option", post(remove_option))
         .route("/api/fields/{id}", put(update).delete(delete_field))
@@ -241,6 +242,38 @@ async fn set_semantics(State(app): State<App>, Json(b): Json<Value>) -> R {
     conn.execute(
         "UPDATE fields SET options=?1 WHERE tbl=?2 AND key=?3",
         params![serde_json::to_string(&opts)?, tbl, key],
+    )?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// 状态词表唯一开放的写口：**只能追加**。改名与删除要连行数据一起迁移（状态是 items 的真列，
+/// 还驱动支出/提醒/时间线三层语义），那两件事不在这条路上做。新值不带语义标记，
+/// engine 读不到标记就按内置默认理解——`status_sem` 对未知值返回三项全关，用户再去语义浮层里勾。
+async fn add_status(State(app): State<App>, Json(b): Json<Value>) -> R {
+    let tbl = s(&b, "tbl").ok_or_else(|| anyhow!("缺少 tbl"))?;
+    let key = s(&b, "key").ok_or_else(|| anyhow!("缺少 key"))?;
+    let value = s(&b, "value").ok_or_else(|| anyhow!("状态值不能为空"))?;
+    let conn = app.db.lock().unwrap();
+    let (id, stored): (i64, String) = conn
+        .query_row(
+            "SELECT id,options FROM fields WHERE tbl=?1 AND key=?2 AND ftype='status'",
+            params![tbl, key],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| anyhow!("该列没有状态词表"))?;
+    let mut opts: Vec<Value> = serde_json::from_str(&stored).unwrap_or_default();
+    for o in opts.iter_mut() {
+        if let Value::String(s) = o {
+            *o = json!({ "v": s.clone() }); // 老形态常规化
+        }
+    }
+    if opts.iter().any(|o| o["v"] == value.as_str()) {
+        return Err(anyhow!("状态「{value}」已经在词表里").into());
+    }
+    opts.push(json!({ "v": value, "spend": 0, "alert": 0, "timeline": 0 }));
+    conn.execute(
+        "UPDATE fields SET options=?1 WHERE id=?2",
+        params![serde_json::to_string(&opts)?, id],
     )?;
     Ok(Json(json!({ "ok": true })))
 }
