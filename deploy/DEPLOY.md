@@ -48,4 +48,5 @@ KALENDS_DATA=/path/to/data ./target/release/kalends
 
 - **SQLite 数据文件必须在本地磁盘**，不要放 SMB/NFS 网络挂载路径（网络文件系统的锁不可靠）。
 - 数据目录（db + covers + logos + backups + export）纳入主机的整机备份即可；应用自身每日 03:30 做快照轮转与 JSONL 明文导出。
-- 出门在外访问建议走 Tailscale/WireGuard 之类的私网方案，不要直接暴露公网端口；对外暴露前先在设置页启用 PIN。
+- 出门在外访问建议走 Tailscale/WireGuard 之类的私网方案，不要直接暴露公网端口。
+- **PIN 是私网内的一道薄门，不是公网防线**：它是明文全等比较，没有失败次数限制，也没有退避——短 PIN 在能连到本机的网络里可以被穷举。它挡的是"同一私网里的其他人/设备顺手打开"，不足以替代不暴露公网端口这条。

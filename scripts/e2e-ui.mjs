@@ -1005,6 +1005,31 @@ check('状态格仍不给现场新建（只挑不建）', await evl(
 await evl(`closePop()`);
 
 check('删掉收尾测试库', (await fetch(`${APP}api/collections/${bc.id}`, { method: 'DELETE' })).ok);
+await evl(`loadAll()`);
+await sleep(900);
+check('删库后本机视图偏好也清掉（否则 localStorage 里越堆越多）',
+  await evl(`JSON.parse(localStorage.getItem('kalends.views.v1'))['${BK}'] === undefined`) === true);
+
+// 自定义周期不填天数：既算不出到期日，周期还会显示成 "Every 0 days"
+await evl(`switchTab('subs')`);
+await sleep(400);
+const cycRowId = +(await evl(`document.querySelector('#subs-body tr').dataset.id`));
+const cycBefore = (await (await fetch(`${APP}api/collections/subs/items`)).json()).find(r => r.id === cycRowId);
+await evl(`(async () => {
+  document.querySelector('#subs-body tr[data-id="${cycRowId}"] td[data-k="cycle"]').click();
+  await new Promise(r => setTimeout(r, 350));
+  const sel = document.querySelector('.cellpop [data-cycle]');
+  sel.value = 'days';
+  sel.dispatchEvent(new Event('change', { bubbles: true }));
+  document.querySelector('.cellpop .cp-foot button').click();
+})()`);
+await sleep(800);
+check('自定义周期不填天数会被拦下', await evl(
+  `document.querySelector('#toast').textContent.includes('天数')`) === true);
+const cycAfter = (await (await fetch(`${APP}api/collections/subs/items`)).json()).find(r => r.id === cycRowId);
+check('拦下时不落库', cycAfter.cycle === cycBefore.cycle && cycAfter.cycle_days === cycBefore.cycle_days,
+  `${cycBefore.cycle}/${cycBefore.cycle_days} → ${cycAfter.cycle}/${cycAfter.cycle_days}`);
+await evl(`closePop()`);
 
 /* 12j. 子行只有两层：三层的孙行在表格里既不属顶层也不会被渲染，会静默消失，所以写入口就拦住 */
 const gp = await post('/api/collections/subs/items', { name: '祖行', status: 'Active', extra: {} });

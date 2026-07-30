@@ -27,9 +27,6 @@ const CYCLE_LABEL = {
   weekly: 'Weekly', monthly: 'Monthly', quarterly: 'Quarterly', semiannual: 'Semiannual',
   annual: 'Annual', biennial: 'Biennial', triennial: 'Triennial', lifetime: 'Lifetime', days: 'Custom',
 };
-// 三张续费表共用状态词表（2026-07-27 统一为英文；媒体词表独立）：
-// Ending=到期不续（上时间线不提醒不计支出），Unused=未启用，Deferred=比价目录
-const R_STATUSES = ['Active', 'Planned', 'Deferred', 'Unused', 'Ending', 'Ended'];
 const M_KINDS = ['电影', '剧集', '动画', '游戏'];
 const M_STATUSES = ['想看', '在看', '看过', '弃'];
 
@@ -1528,6 +1525,8 @@ function cycleEditor(tab, it, td) {
   sel.addEventListener('change', syncDays);
   syncDays();
   box.querySelector('.cp-foot button').onclick = () => {
+    // 选了自定义天数却不填数：既算不出到期日，周期还会显示成 "Every 0 days"
+    if (sel.value === 'days' && !(+days.value > 0)) { toast('自定义周期要填天数', true); return; }
     const patch = { cycle: sel.value, cycle_days: days.value === '' ? undefined : +days.value };
     closePop();
     patchRow(tab, it, patch);
@@ -2046,7 +2045,6 @@ boot().catch(e => toast('加载失败：' + e.message, true));
 
 const collOf = key => (state.overview?.collections || []).find(c => c.key === key);
 const colls = () => state.overview?.collections || [];
-const userColls = () => colls().filter(c => !c.builtin);
 const fieldsOf = key => state.fields
   .filter(f => f.tbl === key)
   .sort((a, b) => a.pos - b.pos || a.id - b.id);
@@ -2220,8 +2218,10 @@ function syncColls() {
     if (keys.has(k)) return;
     document.querySelector(`.tab[data-tab="${k}"]`)?.remove();
     w.remove();
+    delete views[k]; // 本机视图偏好跟着走，否则 localStorage 里堆一堆已删库的列宽/筛选
     if (state.tab === k) switchTab(colls()[0]?.key || 'subs');
   });
+  saveViews();
 }
 
 /* ── 通用行渲染 ── */
