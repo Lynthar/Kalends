@@ -112,10 +112,11 @@ function renderUpcoming() {
     ? upcoming : upcoming.filter(it => it.days_left <= +state.upWindow);
   const ol = $('#up-list');
   ol.innerHTML = '';
-  $('#up-empty').hidden = items.length > 0;
   const hiddenN = upcoming.length - items.length;
   const more = $('#up-more');
   more.hidden = hiddenN <= 0;
+  // 窗口内空、窗口外还有：只说「更远期还有 N 项」——同屏既说"无账"又说"还有 N 项"读着矛盾
+  $('#up-empty').hidden = items.length > 0 || hiddenN > 0;
   if (hiddenN > 0) more.textContent = `▾ 更远期还有 ${hiddenN} 项`;
   items.forEach((it, idx) => {
     const d = it.days_left;
@@ -779,7 +780,10 @@ function popEsc(e) { if (e.key === 'Escape') closePop(); }
 function placePop(el, anchor) {
   document.body.appendChild(el);
   const r = anchor.getBoundingClientRect();
-  el.style.top = (r.bottom + 6) + 'px';
+  // 浮层是 fixed 的，落到视口外就永远够不着（表格越长越容易撞上）：放不下就翻到锚点上方
+  const h = el.offsetHeight;
+  const below = r.bottom + 6;
+  el.style.top = Math.max(8, below + h <= innerHeight - 8 ? below : Math.min(r.top - 6 - h, innerHeight - 8 - h)) + 'px';
   el.style.left = Math.max(8, Math.min(r.left, innerWidth - el.offsetWidth - 8)) + 'px';
   document.addEventListener('pointerdown', popOutside, true);
   window.addEventListener('keydown', popEsc, true);

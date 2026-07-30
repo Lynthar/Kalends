@@ -278,7 +278,8 @@ main { max-width: 1400px; margin: 0 auto; padding: .6rem 1.4rem 3rem; }
 .grid tbody tr:hover { background: var(--surface-2); }
 .grid .num, .grid td.amt { text-align: right; font-variant-numeric: tabular-nums; }
 .grid td.amt { font-weight: 700; white-space: nowrap; }
-.grid td.cdate { font-variant-numeric: tabular-nums; }
+/* 日期不折行：ISO 日期被折成 "2026-07-" / "31" 两行既难读又抬高整行 */
+.grid td.cdate { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .grid .ops { width: 1%; white-space: nowrap; text-align: right; }
 .grid .sub-parent { color: var(--ink-2); font-size: .75rem; }
 .grid .muted { color: var(--ink-2); }
@@ -324,7 +325,7 @@ main { max-width: 1400px; margin: 0 auto; padding: .6rem 1.4rem 3rem; }
 .vpill .x:hover { opacity: 1; color: var(--coral); }
 /* 表头属性菜单 */
 .thmenu {
-  position: fixed; z-index: 40; min-width: 11.5rem;
+  position: fixed; z-index: 40; min-width: 11.5rem; max-height: 19rem; overflow-y: auto;
   background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
   padding: .3rem; box-shadow: var(--shadow-lift);
   animation: dlg-in .28s var(--spring);
@@ -594,6 +595,8 @@ dialog h3 {
 .chanset .btn { margin-top: .7rem; }
 .ics-row { display: flex; gap: .5rem; }
 .dlg-foot { display: flex; justify-content: flex-end; gap: .6rem; margin-top: 1.25rem; }
+/* 条目/库浮层的按钮行：不加就紧贴最后一个字段（星级那种矮控件下尤其挤） */
+dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
 .dlg-foot .foot-left { margin-right: auto; }
 
 /* ── 媒体库 ───────────────────────────── */

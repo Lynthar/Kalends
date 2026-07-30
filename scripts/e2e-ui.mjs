@@ -330,6 +330,28 @@ await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, de
 await sleep(600);
 check('宽窗恢复自然布局', await evl(`document.querySelector('#view-subs table').classList.contains('fixed')`) === false);
 
+/* 9c. 浮层是 fixed 的：贴着视口底部打开时必须翻到锚点上方，否则永远够不着 */
+await send('Emulation.setDeviceMetricsOverride', { width: 1400, height: 520, deviceScaleFactor: 2, mobile: false });
+await sleep(500);
+const popFit = await evl(`(async () => {
+  const trs = [...document.querySelectorAll('#subs-body tr')];
+  const td = trs[trs.length - 1].querySelector('td[data-k="name"]');
+  td.scrollIntoView({ block: 'end' });
+  await new Promise(r => setTimeout(r, 400));
+  td.click();
+  await new Promise(r => setTimeout(r, 350));
+  const pop = document.querySelector('.cellpop');
+  if (!pop) return { no: 1 };
+  const r = pop.getBoundingClientRect();
+  const anchor = td.getBoundingClientRect();
+  closePop();
+  return { top: Math.round(r.top), bottom: Math.round(r.bottom), h: innerHeight, above: r.bottom <= anchor.top + 1 };
+})()`);
+check('底部单元格的浮层不越出视口', !popFit.no && popFit.bottom <= popFit.h && popFit.top >= 0, JSON.stringify(popFit));
+check('放不下时翻到锚点上方', popFit.above === true, JSON.stringify(popFit));
+await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 2, mobile: false });
+await sleep(500);
+
 /* 10. 列宽拖动：右边框硬边界——拖宽先吃空白再压右侧列，拖窄收窄，下限 52px，永不越界 */
 const dragW = (dx) => evl(`(() => {
   const h = document.querySelector('#view-subs th[data-k="name"] .rhandle');
@@ -1063,6 +1085,19 @@ await evl(`(() => { const s = document.querySelector('#up-window'); s.value = '7
 await sleep(500);
 check('窗口收窄后「更远期」出现',
   await evl(`getComputedStyle(document.querySelector('#up-more')).display`) !== 'none');
+// 同屏既说「朔日无账」又说「还有 N 项」读着矛盾：窗口外还有项时只留后者
+const bothMsg = await evl(`(() => {
+  const save = state.overview.upcoming;
+  state.overview.upcoming = [{ kind: 'subs', id: 1, name: '远期', due: '2030-01-01', days_left: 900, verb: '续费', cycle: 'Annual' }];
+  renderUpcoming();
+  const out = { empty: !document.querySelector('#up-empty').hidden, more: !document.querySelector('#up-more').hidden };
+  state.overview.upcoming = save;
+  renderUpcoming();
+  return out;
+})()`);
+check('窗口内无项但更远期有项时不显示空态', bothMsg.empty === false && bothMsg.more === true, JSON.stringify(bothMsg));
+check('日期列不折行', await evl(
+  `getComputedStyle(document.querySelector('#subs-body td[data-k="next_renewal"]')).whiteSpace`) === 'nowrap');
 
 /* 17. 深色 */
 await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] });
