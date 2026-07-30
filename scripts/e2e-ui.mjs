@@ -991,6 +991,47 @@ const topRow = subsRows.find(r => !r.parent_id && r.id !== gp.id && r.id !== pr.
 check('自己不能当自己的父行', !(await raw(`/api/items/${gp.id}`, 'PUT', { ...gpRow, parent_id: gp.id })).ok);
 check('已有子行的条目不能再挂到别人下面',
   !(await raw(`/api/items/${gp.id}`, 'PUT', { ...gpRow, parent_id: topRow.id })).ok);
+/* 12k. 条目图标：上传/清除的界面在 B2 泛化删手写表单时丢过一次（端点还在、前端零调用）。
+   关键陷阱：上传后若不同步表单持有的行数据，紧接着按「保存」会把刚传的图标清掉。 */
+const PNG1X1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+const logoTarget = subsRows.find(r => r.name === 'Netflix') || subsRows[0];
+await evl(`openItemDialog('subs', state.subs.find(r => r.id === ${logoTarget.id}))`);
+await sleep(500);
+check('详情表单里有图标控件', await evl(
+  `!!document.querySelector('#item-fields input[data-logo]')`) === true);
+check('未设置时不显示清除按钮', await evl(
+  `document.querySelector('#item-fields [data-logo-clear]').hidden`) === true);
+await evl(`(() => {
+  const bytes = Uint8Array.from(atob('${PNG1X1}'), c => c.charCodeAt(0));
+  const dt = new DataTransfer();
+  dt.items.add(new File([bytes], 'probe.png', { type: 'image/png' }));
+  const inp = document.querySelector('#item-fields input[data-logo]');
+  inp.files = dt.files;
+  inp.dispatchEvent(new Event('change', { bubbles: true }));
+})()`);
+await sleep(900);
+const afterUp = (await (await fetch(`${APP}api/collections/subs/items`)).json()).find(r => r.id === logoTarget.id);
+check('上传后落库', /^item-\d+-\d+\.png$/.test(afterUp.logo || ''), JSON.stringify(afterUp.logo));
+check('表单里出现预览与清除按钮', await evl(
+  `!!document.querySelector('#item-fields .logo-prev img')
+   && !document.querySelector('#item-fields [data-logo-clear]').hidden`) === true);
+check('上传的图标能取回', (await fetch(`${APP}logos/${afterUp.logo}`)).ok);
+// 上传后立刻保存整行：图标不能被这次 PUT 清掉
+await evl(`document.querySelector('#form-item').requestSubmit()`);
+await sleep(1100);
+const afterSave = (await (await fetch(`${APP}api/collections/subs/items`)).json()).find(r => r.id === logoTarget.id);
+check('保存表单不会清掉刚传的图标', afterSave.logo === afterUp.logo, JSON.stringify(afterSave.logo));
+check('名称格渲染出小图标', await evl(
+  `!!document.querySelector('#subs-body tr[data-id="${logoTarget.id}"] img.slogo')`) === true);
+await evl(`openItemDialog('subs', state.subs.find(r => r.id === ${logoTarget.id}))`);
+await sleep(500);
+await evl(`document.querySelector('#item-fields [data-logo-clear]').click()`);
+await sleep(800);
+const afterClear = (await (await fetch(`${APP}api/collections/subs/items`)).json()).find(r => r.id === logoTarget.id);
+check('清除后落库为空', !afterClear.logo, JSON.stringify(afterClear.logo));
+await evl(`document.querySelector('#dlg-item').close()`);
+await sleep(200);
+
 // 名称列必须留在表格上：撤了表头就少一列而行还多一格，整表错位
 const nameF = (await (await fetch(`${APP}api/fields`)).json()).find(f => f.tbl === 'subs' && f.key === 'name');
 check('名称列不能撤下表格（API 也拦）',

@@ -497,7 +497,8 @@ tr.subrow td[data-k="name"] { padding-left: 2rem; }
 }
 .logo-row { display: flex; align-items: center; gap: .6rem; }
 .logo-row .slogo-view { width: 34px; height: 34px; border-radius: 8px; object-fit: cover; border: 1px solid var(--line); }
-.logo-row input[type="file"] { font-size: .78rem; }
+.logo-row input[type="file"] { font-size: .78rem; width: auto; }
+.logo-row .logo-prev { display: inline-flex; align-items: center; min-width: 34px; }
 /* 行悬停的「打开详情」（顶替原编辑按钮，全表单入口） */
 .rowopen {
   border: 0; background: none; cursor: pointer; color: var(--ink-2);

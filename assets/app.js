@@ -2396,7 +2396,56 @@ function openItemDialog(key, it) {
     }
     box.appendChild(lab);
   }
+  if (it) box.appendChild(logoRow(it));
   d.showModal();
+}
+
+/* 条目图标：上传/清除各走自己的端点，与表单的整行 PUT 不是一回事。
+   **上传后必须同步 editingItem.row.logo**——整行 PUT 的体由那份行数据拼，
+   不同步的话紧接着按「保存」会把刚传的图标清掉（itemBodyFromRow 没有 logo 就置空）。 */
+function logoRow(it) {
+  const lab = document.createElement('label');
+  lab.className = 'span2';
+  lab.innerHTML = `<span>图标</span>
+    <span class="logo-row">
+      <span class="logo-prev"></span>
+      <button type="button" class="btn ghost mini" data-logo-pick>选择图片</button>
+      <button type="button" class="btn ghost mini" data-logo-clear hidden>清除</button>
+      <input type="file" accept=".png,.jpg,.jpeg,.webp,.svg,.gif,.ico" data-logo hidden>
+    </span>`;
+  const prev = lab.querySelector('.logo-prev');
+  const clear = lab.querySelector('[data-logo-clear]');
+  const paint = name => {
+    editingItem.row = { ...editingItem.row, logo: name || null };
+    prev.innerHTML = name
+      ? `<img class="slogo-view" src="/logos/${esc(name)}" alt="">`
+      : '<span class="muted">未设置</span>';
+    clear.hidden = !name;
+  };
+  paint(it.logo);
+  // 原生文件选择框在这套外壳里太扎眼：藏起来，用统一样式的按钮触发
+  const pick = lab.querySelector('[data-logo]');
+  lab.querySelector('[data-logo-pick]').onclick = () => pick.click();
+  pick.onchange = async e => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const ext = (f.name.split('.').pop() || '').toLowerCase();
+    try {
+      const r = await api(`/api/items/${it.id}/logo?ext=${encodeURIComponent(ext)}`,
+        { method: 'POST', body: f, headers: {} });
+      paint(r.logo);
+      toast('图标已更新');
+    } catch (err) { toast(err.message, true); }
+    e.target.value = '';
+  };
+  clear.onclick = async () => {
+    try {
+      await api(`/api/items/${it.id}/logo`, { method: 'DELETE' });
+      paint(null);
+      toast('图标已清除');
+    } catch (err) { toast(err.message, true); }
+  };
+  return lab;
 }
 
 // 表单 → 整行 PUT/POST 的 body：真列放顶层，extra 字段收进 extra
