@@ -296,11 +296,24 @@ await sleep(250);
 check('切回单选清除覆写', await evl(`JSON.parse(localStorage.getItem('kalends.views.v1')).subs.types?.category`) === undefined);
 check('标签数恢复', await evl(`document.querySelectorAll('#subs-body .tag').length`) === tagsBefore);
 
-/* 9. ＋新建行 */
+/* 9. ＋新建行是加条目的唯一入口，右上角那颗绿按钮改成了建库 */
 await evl(`document.querySelector('#view-subs .newrow').click()`);
 await sleep(300);
 check('新建行开订阅表单', await evl(`document.querySelector('#dlg-item').open`) === true);
 await evl(`document.querySelector('#dlg-item').close()`);
+await sleep(150);
+// 按视觉角色取那颗绿按钮（不按 id——旧版的 ＋ 库 标签也叫 #coll-add，认 id 的断言两版都过）
+const PRIMARY = `document.querySelector('#page-renewals .tab-actions .btn.primary')`;
+check('标签行不再有「＋ 库」', await evl(
+  `![...document.querySelectorAll('.tabs .tab')].some(b => b.textContent.includes('库'))`) === true);
+check('动作区绿按钮文案是新增库', await evl(`${PRIMARY}.textContent.trim()`) === '＋ 新增库');
+await evl(`${PRIMARY}.click()`);
+await sleep(500);
+// 两个浮层都是首次用时才注入 DOM，取不到时要判否而不是抛异常（否则后面的断言整批跑不到）
+check('绿按钮开建库浮层而非条目表单', await evl(
+  `!!document.querySelector('#dlg-coll')?.open && !document.querySelector('#dlg-item')?.open`) === true);
+await evl(`document.querySelector('#dlg-coll')?.close(); document.querySelector('#dlg-item')?.close()`);
+await sleep(150);
 
 /* 9b. 窄窗自动装容器：无手动列宽时表格等比压缩，右边框不越界，窗口变宽自动还原 */
 await send('Emulation.setDeviceMetricsOverride', { width: 960, height: 1000, deviceScaleFactor: 2, mobile: false });

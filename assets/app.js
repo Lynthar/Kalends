@@ -1946,9 +1946,6 @@ document.querySelectorAll('.nav-tab[data-page]').forEach(b => b.onclick = () => 
 })();
 
 $('#btn-settings').onclick = openSettings;
-$('#btn-add').onclick = () => {
-  openItemDialog(state.tab, null);
-};
 // 切表：视图容器由库决定，不再逐个写死
 function switchTab(key) {
   state.tab = key;
@@ -2131,7 +2128,7 @@ function ensureCollDom(c) {
     btn.className = 'tab';
     btn.type = 'button';
     btn.dataset.tab = key;
-    $('#coll-add').before(btn);
+    $('#coll-settings').before(btn);
   }
   // 三个预置库的标签写在 index.html 里，不走上面的新建分支——事件一律在这儿绑，
   // 否则它们既拖不动也右键不开设置（真踩过）
@@ -2171,8 +2168,8 @@ function ensureCollDom(c) {
 function syncColls() {
   const keys = new Set(colls().map(c => c.key));
   for (const c of colls()) ensureCollDom(c);
-  // 标签依次挪到「＋ 库」前面 = 按库序排好（已存在的标签不会自己归位）
-  for (const c of colls()) $('#coll-add').before(document.querySelector(`.tab[data-tab="${c.key}"]`));
+  // 标签依次挪到 ⚙ 前面 = 按库序排好（已存在的标签不会自己归位）
+  for (const c of colls()) $('#coll-settings').before(document.querySelector(`.tab[data-tab="${c.key}"]`));
   // 库被删掉了就连标签带容器一起撤；三个预置库的容器写在 index.html 里，删库时同样该撤
   document.querySelectorAll('.tablewrap[data-tab]').forEach(w => {
     const k = w.dataset.tab;
