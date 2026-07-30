@@ -2018,7 +2018,13 @@ const userColls = () => colls().filter(c => !c.builtin);
 const fieldsOf = key => state.fields
   .filter(f => f.tbl === key)
   .sort((a, b) => a.pos - b.pos || a.id - b.id);
-const shownFields = key => fieldsOf(key).filter(f => f.shown);
+// 名称列恒上表：它承载折叠钮 / logo / ⤢ 详情入口，关掉等于整行没有入口。
+// **表头与行必须读同一份字段集**——兜底只写在其中一处就会表头少一列、行多一格，整表错位（真踩过）。
+const NAME_FIELD = { key: 'name', name: '名称', ftype: 'text', src: 'col', shown: true };
+function shownFields(key) {
+  const fs = fieldsOf(key).filter(f => f.shown || f.key === 'name');
+  return fs.some(f => f.key === 'name') ? fs : [NAME_FIELD, ...fs];
+}
 
 // 状态语义：以库的状态词表标记为准，读不到就回落到内置六值的既有含义（与后端 status_sem 同源）
 const SEM_DEFAULT = {
@@ -2222,12 +2228,7 @@ function renderColl(key) {
   }
   const collapsed = new Set(views[key].collapsed || []);
   setEmpty(`#${key}-empty`, rows.length, all.length);
-  // 字段集里必须有名称格：它承载折叠钮、logo、⤢ 详情入口。
-  // 万一注册表还没到（或用户把名称列隐藏了），补一个，免得整行没有入口。
-  const fields = shownFields(key);
-  if (!fields.some(f => f.key === 'name')) {
-    fields.unshift({ key: 'name', name: '名称', ftype: 'text', src: 'col', shown: true });
-  }
+  const fields = shownFields(key); // 名称格的兜底在 shownFields 里，表头读的是同一份
   const cycleShown = fields.some(f => f.key === 'cycle');
   const logoOf = r => r.logo || (r.parent_id && byId[r.parent_id]?.logo) || '';
 
@@ -2534,9 +2535,11 @@ function fillCollFields(c) {
     const row = document.createElement('div');
     row.className = 'opt-row';
     row.draggable = true;
+    // 名称列不给关：它是行的唯一入口，且关掉会让表头与行的字段集对不上
+    const locked = f.key === 'name';
     row.innerHTML = `<span class="fp-v">${esc(f.name || f.key)}</span>
-      <label class="check sem"><input type="checkbox"${f.shown ? ' checked' : ''}><span>上表</span></label>`;
-    row.querySelector('input').onchange = async e => {
+      <label class="check sem"${locked ? ' title="名称列承载详情入口，不能撤下表格"' : ''}><input type="checkbox"${f.shown || locked ? ' checked' : ''}${locked ? ' disabled' : ''}><span>上表</span></label>`;
+    if (!locked) row.querySelector('input').onchange = async e => {
       const on = e.target.checked;
       try {
         await api(`/api/fields/${f.id}`, {

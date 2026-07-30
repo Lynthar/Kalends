@@ -169,10 +169,20 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
     let name = s(&b, "name").ok_or_else(|| anyhow!("列名不能为空"))?;
     let conn = app.db.lock().unwrap();
     let n = match b.get("shown") {
-        Some(v) => conn.execute(
-            "UPDATE fields SET name=?1,shown=?2 WHERE id=?3",
-            params![name, i64::from(truthy(Some(v))), id],
-        )?,
+        Some(v) => {
+            let shown = i64::from(truthy(Some(v)));
+            // 名称列承载行的详情入口，且表头与行读同一份字段集——撤下它就会整表错位
+            let key: String = conn
+                .query_row("SELECT key FROM fields WHERE id=?1", [id], |r| r.get(0))
+                .map_err(|_| anyhow!("列不存在"))?;
+            if shown == 0 && key == "name" {
+                return Err(anyhow!("名称列必须留在表格上").into());
+            }
+            conn.execute(
+                "UPDATE fields SET name=?1,shown=?2 WHERE id=?3",
+                params![name, shown, id],
+            )?
+        }
         None => conn.execute("UPDATE fields SET name=?1 WHERE id=?2", params![name, id])?,
     };
     if n == 0 {

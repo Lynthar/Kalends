@@ -478,7 +478,38 @@ fn item_values(b: &Value) -> anyhow::Result<Vec<rusqlite::types::Value>> {
 const WRITE_COLS: &str = "name,parent_id,status,price,currency,cycle,cycle_days,\
                           next_renewal,last_renewed,url,notes,logo,extra";
 
+/// 子行只有两层（服务 → 档位）：父行自己不能再有父行，本条目已有子行时也不能再挂到别人下面。
+/// 表格的渲染只下探一层，三层的孙行会既不在顶层也不被渲染——静默从界面消失，所以在写入口拦住。
+fn check_parent(conn: &Connection, coll: i64, id: Option<i64>, parent: Option<i64>) -> anyhow::Result<()> {
+    let Some(p) = parent else { return Ok(()) };
+    if Some(p) == id {
+        return Err(anyhow!("条目不能是自己的父行"));
+    }
+    let (pcoll, pparent): (i64, Option<i64>) = conn
+        .query_row(
+            "SELECT collection_id,parent_id FROM items WHERE id=?1",
+            [p],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| anyhow!("父行不存在"))?;
+    if pcoll != coll {
+        return Err(anyhow!("父行必须与本条目在同一个库"));
+    }
+    if pparent.is_some() {
+        return Err(anyhow!("子行只支持两层：所选父行本身已经是子行"));
+    }
+    if let Some(id) = id {
+        let kids: i64 =
+            conn.query_row("SELECT count(*) FROM items WHERE parent_id=?1", [id], |r| r.get(0))?;
+        if kids > 0 {
+            return Err(anyhow!("子行只支持两层：本条目已有子行，不能再挂到别的行下"));
+        }
+    }
+    Ok(())
+}
+
 pub fn insert_item(conn: &Connection, coll: i64, b: &Value) -> anyhow::Result<i64> {
+    check_parent(conn, coll, None, i(b, "parent_id"))?;
     let mut vals = item_values(b)?;
     vals.insert(0, rusqlite::types::Value::from(coll));
     conn.execute(
@@ -492,6 +523,10 @@ pub fn insert_item(conn: &Connection, coll: i64, b: &Value) -> anyhow::Result<i6
 }
 
 pub fn update_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<()> {
+    let coll: i64 = conn
+        .query_row("SELECT collection_id FROM items WHERE id=?1", [id], |r| r.get(0))
+        .map_err(|_| anyhow!("条目不存在"))?;
+    check_parent(conn, coll, Some(id), i(b, "parent_id"))?;
     let mut vals = item_values(b)?;
     let sets = WRITE_COLS
         .split(',')

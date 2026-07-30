@@ -863,6 +863,13 @@ check('⚙ 能打开预置库的设置并带出字段面板', await evl(`
   document.querySelector('#dlg-coll').open
   && document.querySelector('#dlg-coll-title').textContent.includes('订阅')
   && !document.querySelector('#coll-fields-box').hidden`) === true);
+// 名称列不给撤下表格：撤了表头就少一列而行还多一格，整表错位
+check('字段面板里名称的「上表」开关是禁用的', await evl(`(() => {
+  const rows = [...document.querySelectorAll('#coll-fields .opt-row')];
+  const nameRow = rows.find(r => r.textContent.includes('名称'));
+  const others = rows.filter(r => r !== nameRow);
+  return !!nameRow?.querySelector('input')?.disabled && others.every(r => !r.querySelector('input').disabled);
+})()`) === true);
 await evl(`document.querySelector('#dlg-coll').close()`);
 await sleep(200);
 check('预置库的标签也可拖动', await evl(`document.querySelector('.tab[data-tab="subs"]').draggable`) === true);
@@ -939,6 +946,44 @@ check('续费按钮跟着语义消失',
   await evl(`!document.querySelector('#${BK}-body tr [data-renew]')`) === true);
 
 check('删掉收尾测试库', (await fetch(`${APP}api/collections/${bc.id}`, { method: 'DELETE' })).ok);
+
+/* 12j. 子行只有两层：三层的孙行在表格里既不属顶层也不会被渲染，会静默消失，所以写入口就拦住 */
+const raw = (path, method, body) => fetch(APP.replace(/\/$/, '') + path, {
+  method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+});
+const gp = await post('/api/collections/subs/items', { name: '祖行', status: 'Active', extra: {} });
+const pr = await post('/api/collections/subs/items', { name: '父行', status: 'Active', parent_id: gp.id, extra: {} });
+check('两层可以建', typeof pr.id === 'number', JSON.stringify(pr));
+const third = await raw('/api/collections/subs/items', 'POST', { name: '孙行', status: 'Active', parent_id: pr.id, extra: {} });
+check('第三层被拒绝', !third.ok);
+check('拒绝时给的是可读原因', String((await third.json()).error).includes('两层'));
+const subsRows = await (await fetch(`${APP}api/collections/subs/items`)).json();
+check('被拒的孙行没有落库', !subsRows.some(r => r.name === '孙行'));
+const simRow = (await (await fetch(`${APP}api/collections/sims/items`)).json())[0];
+check('跨库的父行被拒绝',
+  !(await raw('/api/collections/subs/items', 'POST', { name: '跨库', status: 'Active', parent_id: simRow.id, extra: {} })).ok);
+check('不存在的父行被拒绝',
+  !(await raw('/api/collections/subs/items', 'POST', { name: '野父', status: 'Active', parent_id: 999999, extra: {} })).ok);
+const gpRow = subsRows.find(r => r.id === gp.id);
+const topRow = subsRows.find(r => !r.parent_id && r.id !== gp.id && r.id !== pr.id);
+check('自己不能当自己的父行', !(await raw(`/api/items/${gp.id}`, 'PUT', { ...gpRow, parent_id: gp.id })).ok);
+check('已有子行的条目不能再挂到别人下面',
+  !(await raw(`/api/items/${gp.id}`, 'PUT', { ...gpRow, parent_id: topRow.id })).ok);
+// 名称列必须留在表格上：撤了表头就少一列而行还多一格，整表错位
+const nameF = (await (await fetch(`${APP}api/fields`)).json()).find(f => f.tbl === 'subs' && f.key === 'name');
+check('名称列不能撤下表格（API 也拦）',
+  !(await raw(`/api/fields/${nameF.id}`, 'PUT', { name: nameF.name, shown: false })).ok);
+await evl(`loadAll()`);
+await sleep(900);
+check('名称列仍在表头', await evl(`!!document.querySelector('#view-subs th[data-k="name"]')`) === true);
+check('表头列数与行内格数一致', await evl(`(() => {
+  const ths = document.querySelectorAll('#view-subs thead th').length;
+  const tds = document.querySelector('#subs-body tr')?.children.length ?? -1;
+  return ths === tds;
+})()`) === true);
+for (const x of [pr.id, gp.id]) await fetch(`${APP}api/items/${x}`, { method: 'DELETE' });
+await evl(`loadAll()`);
+await sleep(700);
 const back = await (await fetch(APP + 'api/collections')).json();
 await put('/api/collections/order', { ids: ['subs', 'sims', 'vps'].map(k => back.find(c => c.key === k).id) });
 await evl(`loadAll()`);
