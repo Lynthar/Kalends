@@ -584,10 +584,12 @@ dialog h3 {
 .formset legend, .chanset legend { font-size: .76rem; font-weight: 700; color: var(--ink-2); padding: 0 .3rem; letter-spacing: .06em; }
 .check { flex-direction: row !important; align-items: center; gap: .4rem !important; font-size: .88rem !important; color: var(--ink) !important; }
 .check input { width: auto !important; accent-color: var(--aqua); }
-/* 详情表单里的多选：勾选清单 + 末尾现场新增（不用逗号分隔的文本框，值含分隔符会被拆坏） */
-.mopts { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .8rem; }
+/* 详情表单里的多选：勾选清单 + 现场新增（不用逗号分隔的文本框，值含分隔符会被拆坏）。
+   勾选框超过三行在自己的框里滚，长词表（VPS 地点 19 个值）才不会把费用/到期挤出首屏 */
+.mopts { display: flex; flex-direction: column; gap: .4rem; }
+.mchecks { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .8rem; max-height: 5.2rem; overflow-y: auto; }
 .mopts .check { font-weight: 500; }
-.mopts .mopt-add { flex: 1 1 9rem; min-width: 7rem; width: auto !important; font-size: .82rem !important; }
+.mopts .mopt-add { font-size: .82rem !important; }
 .chanset { border: 1px solid var(--line); border-radius: 12px; padding: .7rem .8rem .8rem; margin-top: 1rem; }
 .chanset .btn { margin-top: .7rem; }
 .ics-row { display: flex; gap: .5rem; }

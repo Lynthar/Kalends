@@ -2333,12 +2333,14 @@ function initMoptAdd(inp) {
     const val = inp.value.trim();
     inp.value = '';
     if (!val) return;
-    const same = [...inp.parentElement.querySelectorAll('input[type=checkbox]')].find(i => i.value === val);
-    if (same) { same.checked = true; return; }
+    const checks = inp.parentElement.querySelector('[data-mbox]');
+    const same = [...checks.querySelectorAll('input[type=checkbox]')].find(i => i.value === val);
+    if (same) { same.checked = true; same.scrollIntoView({ block: 'nearest' }); return; }
     const l = document.createElement('label');
     l.className = 'check';
     l.innerHTML = `<input type="checkbox" value="${esc(val)}" checked><span>${esc(val)}</span>`;
-    inp.before(l);
+    checks.appendChild(l);
+    l.scrollIntoView({ block: 'nearest' });
   });
 }
 
@@ -2360,10 +2362,12 @@ function openItemDialog(key, it) {
       const opts = fieldOptions(key, f);
       for (const x of cur) if (!opts.includes(x)) opts.push(x);
       lab.className = 'span2';
+      // 勾选框超过三行就在自己的框里滚（长词表如 VPS 地点有 19 个值，否则把费用/到期挤出首屏）；
+      // 「新选项」输入框留在滚动框外，不然想加值得先滚到底
       lab.innerHTML = `<span>${esc(f.name || f.key)}</span>
-        <span class="mopts" data-mbox="${esc(f.key)}">${opts.map(o =>
+        <span class="mopts"><span class="mchecks" data-mbox="${esc(f.key)}">${opts.map(o =>
           `<label class="check"><input type="checkbox" value="${esc(o)}"${cur.has(o) ? ' checked' : ''}><span>${esc(o)}</span></label>`
-        ).join('')}<input class="mopt-add" placeholder="新选项，回车加入"></span>`;
+        ).join('')}</span><input class="mopt-add" placeholder="新选项，回车加入"></span>`;
       initMoptAdd(lab.querySelector('.mopt-add'));
     } else if (f.ftype === 'star') {
       const n = +val || 0;

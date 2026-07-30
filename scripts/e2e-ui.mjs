@@ -710,10 +710,33 @@ await sleep(450);
 await evl(`document.querySelector('#item-fields .stars button[data-v="2"]')?.click()`);
 await sleep(150);
 check('点第 2 颗星后只亮 2 颗', await evl(`document.querySelectorAll('#item-fields .stars button.lit').length`) === 2);
+// 勾选框封顶三行内部滚动（长词表不能把费用/到期挤出首屏），「新选项」输入框在滚动框外
+check('勾选框可内部滚动、新选项框在框外', await evl(`(() => {
+  const checks = document.querySelector('#item-fields [data-mbox="${mf.key}"]');
+  const add = document.querySelector('#item-fields .mopt-add');
+  return getComputedStyle(checks).overflowY === 'auto' && !checks.contains(add);
+})()`) === true);
+// 回车加新选项：用真实按键，合成 KeyboardEvent 不触发浏览器默认的提交行为，测不出 preventDefault
+await evl(`document.querySelector('#item-fields .mopt-add').focus()`);
+await send('Input.insertText', { text: '临时线路' });
+// keyDown 必须带 text，否则浏览器不产生「字符键」的默认行为（表单隐式提交），
+// 这条断言就永远为真——摘掉 preventDefault 实测验证过
+await send('Input.dispatchKeyEvent', {
+  type: 'keyDown', key: 'Enter', code: 'Enter', text: '\r', unmodifiedText: '\r',
+  windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+});
+await send('Input.dispatchKeyEvent', {
+  type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+});
+await sleep(350);
+check('回车把新值加成已勾选的选项', await evl(
+  `[...document.querySelectorAll('#item-fields [data-mbox="${mf.key}"] input:checked')].map(i => i.value).join('|')`) === 'CN2 GIA/9929|临时线路');
+check('回车没有顺手提交表单', await evl(`!!document.querySelector('#dlg-item')?.open`) === true);
 await evl(`document.querySelector('#form-item').requestSubmit()`);
 await sleep(1000);
 const restarred = (await (await fetch(`${APP}api/collections/${NK}/items`)).json()).find(r => r.name === SLASH_NAME);
 check('点星改分落库为数字 2', restarred.extra?.[sf.key] === 2, JSON.stringify(restarred.extra?.[sf.key]));
+check('回车加的新选项一并落库', JSON.stringify(restarred.extra?.[mf.key]) === '["CN2 GIA/9929","临时线路"]', JSON.stringify(restarred.extra?.[mf.key]));
 
 check('删库', (await fetch(`${APP}api/collections/${nc.id}`, { method: 'DELETE' })).ok);
 await evl(`loadAll()`);
