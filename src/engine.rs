@@ -252,6 +252,85 @@ pub fn upcoming(conn: &Connection) -> Result<Vec<Value>> {
     Ok(items.into_iter().map(|(_, v)| v).collect())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn d(s: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn advance_clamps_month_end() {
+        // 1/31 加一个月落在 2 月最后一天，而且从此固定在 28/29 号——月末订阅会这样漂移一次
+        assert_eq!(advance(d("2026-01-31"), "monthly", None), Some(d("2026-02-28")));
+        assert_eq!(advance(d("2024-01-31"), "monthly", None), Some(d("2024-02-29")));
+        assert_eq!(advance(d("2026-02-28"), "monthly", None), Some(d("2026-03-28")));
+        assert_eq!(advance(d("2026-03-31"), "quarterly", None), Some(d("2026-06-30")));
+    }
+
+    #[test]
+    fn advance_spans_years() {
+        assert_eq!(advance(d("2026-12-15"), "monthly", None), Some(d("2027-01-15")));
+        assert_eq!(advance(d("2024-02-29"), "annual", None), Some(d("2025-02-28")));
+        assert_eq!(advance(d("2026-01-01"), "triennial", None), Some(d("2029-01-01")));
+    }
+
+    #[test]
+    fn advance_custom_days_needs_a_positive_count() {
+        assert_eq!(advance(d("2026-01-01"), "days", Some(181)), Some(d("2026-07-01")));
+        // 天数缺失或非正：推不出日期，宁可没有到期日也不要一个错的
+        assert_eq!(advance(d("2026-01-01"), "days", None), None);
+        assert_eq!(advance(d("2026-01-01"), "days", Some(0)), None);
+        assert_eq!(advance(d("2026-01-01"), "days", Some(-30)), None);
+    }
+
+    #[test]
+    fn advance_has_no_next_for_lifetime_or_unknown() {
+        assert_eq!(advance(d("2026-01-01"), "lifetime", None), None);
+        assert_eq!(advance(d("2026-01-01"), "", None), None);
+        assert_eq!(advance(d("2026-01-01"), "fortnightly", None), None);
+    }
+
+    #[test]
+    fn monthly_factor_matches_cycle_length() {
+        assert_eq!(monthly_factor("monthly", None), Some(1.0));
+        assert_eq!(monthly_factor("annual", None), Some(1.0 / 12.0));
+        assert_eq!(monthly_factor("triennial", None), Some(1.0 / 36.0));
+        // 自定义天数按 30.44 天一个月折算
+        let f = monthly_factor("days", Some(181)).unwrap();
+        assert!((f - 30.44 / 181.0).abs() < 1e-12, "{f}");
+        // 买断与残缺周期不参与支出统计，而不是当成 0 或 1
+        assert_eq!(monthly_factor("lifetime", None), None);
+        assert_eq!(monthly_factor("days", None), None);
+        assert_eq!(monthly_factor("days", Some(0)), None);
+    }
+
+    #[test]
+    fn status_semantics_for_builtin_values() {
+        let a = status_sem("Active");
+        assert!(a.spend && a.alert && a.timeline);
+        // 到期不续：还在时间线与日历上，但不提醒也不计支出
+        let e = status_sem("Ending");
+        assert!(!e.spend && !e.alert && e.timeline);
+        for s in ["Planned", "Deferred", "Unused", "Ended"] {
+            let x = status_sem(s);
+            assert!(!x.spend && !x.alert && !x.timeline, "{s}");
+        }
+        // 用户自加的状态默认三项全关，engine 不会凭空给它语义
+        let n = status_sem("待寄回");
+        assert!(!n.spend && !n.alert && !n.timeline);
+    }
+
+    #[test]
+    fn cycle_label_is_english_with_day_count() {
+        assert_eq!(cycle_label("semiannual", None), "Semiannual");
+        assert_eq!(cycle_label("days", Some(181)), "Every 181 days");
+        // 存储键不认识时原样回显，别把它吞成空字符串
+        assert_eq!(cycle_label("weird", None), "weird");
+    }
+}
+
 /// 分币种月/年支出：状态语义为"计支出"且周期可折算的条目。
 pub fn totals(conn: &Connection) -> Result<Vec<Value>> {
     let mut map: BTreeMap<String, f64> = BTreeMap::new();

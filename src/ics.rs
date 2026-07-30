@@ -45,3 +45,40 @@ pub fn calendar(items: &[Value]) -> String {
     out.push_str("END:VCALENDAR\r\n");
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn escapes_the_characters_that_would_break_a_line() {
+        // 逗号与分号在 ICS 里是字段分隔符，名字里带它们不转义会把事件切断
+        assert_eq!(esc("A, B; C"), "A\\, B\\; C");
+        assert_eq!(esc("第一行\n第二行"), "第一行\\n第二行");
+        assert_eq!(esc(r"C:\path"), r"C:\\path");
+    }
+
+    #[test]
+    fn renders_one_event_per_item_with_a_day_ahead_alarm() {
+        let ics = calendar(&[json!({
+            "kind": "subs", "id": 7, "due": "2026-08-01",
+            "name": "Netflix, 家庭版", "verb": "续费",
+            "price": 15.5, "currency": "USD",
+        })]);
+        assert!(ics.starts_with("BEGIN:VCALENDAR\r\n") && ics.ends_with("END:VCALENDAR\r\n"));
+        assert_eq!(ics.matches("BEGIN:VEVENT").count(), 1);
+        assert!(ics.contains("UID:kalends-subs-7-20260801"));
+        assert!(ics.contains("DTSTART;VALUE=DATE:20260801"));
+        assert!(ics.contains("SUMMARY:续费：Netflix\\, 家庭版"));
+        assert!(ics.contains("DESCRIPTION:USD 15.50"));
+        assert!(ics.contains("TRIGGER:-P1D"));
+    }
+
+    #[test]
+    fn empty_timeline_still_produces_a_valid_calendar() {
+        let ics = calendar(&[]);
+        assert!(ics.contains("BEGIN:VCALENDAR") && ics.contains("END:VCALENDAR"));
+        assert!(!ics.contains("BEGIN:VEVENT"));
+    }
+}

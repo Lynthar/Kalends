@@ -298,6 +298,41 @@ pub async fn tick(db: &Db) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn line_reads_naturally_for_each_tense() {
+        let base = |days: i64| json!({ "days_left": days, "name": "Netflix", "due": "2026-08-01" });
+        assert!(line(&base(3)).starts_with("3 天后到期"));
+        assert!(line(&base(0)).starts_with("今天到期"));
+        assert!(line(&base(-5)).starts_with("已过期 5 天"));
+    }
+
+    #[test]
+    fn line_uses_the_collection_verb_not_a_hardcoded_one() {
+        // 泛化之前这里写死成「保号」，证件库的提醒会说"保号：换证材料"
+        let it = json!({
+            "days_left": 7, "name": "护照", "due": "2026-08-07",
+            "verb": "换证", "action": "带旧证与照片",
+        });
+        assert!(line(&it).contains("换证：带旧证与照片"), "{}", line(&it));
+        // 没给说法时回落到"续费"
+        let noverb = json!({ "days_left": 7, "name": "x", "due": "2026-08-07", "action": "做点什么" });
+        assert!(line(&noverb).contains("续费：做点什么"));
+    }
+
+    #[test]
+    fn line_includes_price_only_when_both_parts_are_there() {
+        let full = json!({ "days_left": 1, "name": "x", "due": "2026-08-01", "price": 15.5, "currency": "USD" });
+        assert!(line(&full).contains("USD 15.50"));
+        let half = json!({ "days_left": 1, "name": "x", "due": "2026-08-01", "price": 15.5 });
+        assert!(!line(&half).contains("15.50"));
+    }
+}
+
 pub async fn scheduler(db: Db) {
     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
     loop {
