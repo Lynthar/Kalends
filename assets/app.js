@@ -1766,7 +1766,8 @@ function renderMedia() {
       card.style.setProperty('--i', Math.min(idx, 20));
       const badge = it.status !== '看过' ? `<span class="badge">${esc(it.status)}</span>` : '';
       const cov = it.cover
-        ? `<img loading="lazy" src="/covers/${esc(it.cover)}" alt="">`
+        // 封面文件名恒为 {id}.jpg 且响应带一周强缓存：重抓海报后不带版本号就会一周看不到新图
+        ? `<img loading="lazy" src="/covers/${esc(it.cover)}?v=${encodeURIComponent(it.updated_at || '')}" alt="">`
         : `<div class="ph">${esc((it.title || '?').slice(0, 1))}</div>`;
       card.innerHTML = `
         <div class="cov">${cov}${badge}</div>

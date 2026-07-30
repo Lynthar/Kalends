@@ -1078,6 +1078,18 @@ check('表头列数与行内格数一致', await evl(`(() => {
   const tds = document.querySelector('#subs-body tr')?.children.length ?? -1;
   return ths === tds;
 })()`) === true);
+/* 12l. 错误码分级：请求本身的问题不该报 500，否则日志与反代的错误率指标全是假的 */
+const codeOf = async (path, method, body) => (await raw(path, method, body)).status;
+check('改不存在的条目 → 404', await codeOf('/api/items/999999', 'PUT', { name: 'x' }) === 404);
+check('往不存在的库里加条目 → 404', await codeOf('/api/collections/nope/items', 'POST', { name: 'x' }) === 404);
+check('条目缺名称 → 400', await codeOf('/api/collections/subs/items', 'POST', { status: 'Active' }) === 400);
+check('未知字段类型 → 400', await codeOf('/api/fields', 'POST', { tbl: 'subs', name: 'x', ftype: 'bogus' }) === 400);
+check('未知建库模板 → 400', await codeOf('/api/collections', 'POST', { name: 'x', template: 'bogus' }) === 400);
+check('改不存在的列 → 404', await codeOf('/api/fields/999999', 'PUT', { name: 'x', shown: true }) === 404);
+check('删不可删的列 → 404', await codeOf(`/api/fields/${nameF.id}`, 'DELETE') === 404);
+check('错误体仍带可读 error 字段',
+  typeof (await (await raw('/api/items/999999', 'PUT', { name: 'x' })).json()).error === 'string');
+
 for (const x of [pr.id, gp.id]) await fetch(`${APP}api/items/${x}`, { method: 'DELETE' });
 await evl(`loadAll()`);
 await sleep(700);
@@ -1122,6 +1134,8 @@ if (st2['meta.tmdb_key']) {
   console.log('SKIP 无 Key 报错断言（本实例已配置 TMDB Key）');
 } else {
   check('无 Key 报错清晰', !fcResp.ok && String(fcBody.error || '').includes('TMDB API Key'));
+  // 服务端侧的问题仍要是 500——别因为给客户端错误分了级就把真故障也一起降级了
+  check('未判定为客户端错误的仍返回 500', fcResp.status === 500, String(fcResp.status));
 }
 const game = mediaList.find(m => m.kind === '游戏');
 if (game) {

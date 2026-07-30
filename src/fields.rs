@@ -1,7 +1,6 @@
 //! 字段注册：自定义列（值存实体表 extra JSON，键 c<id>）与内置自由词表列的选项管理。
 //! 状态/周期/币种/类别等参与后端语义的词表不在此列，前端只读展示。
 
-use anyhow::anyhow;
 use axum::{
     extract::{Path, State},
     routing::{get, post, put},
@@ -10,7 +9,7 @@ use axum::{
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
-use crate::api::{s, R};
+use crate::api::{bad, missing, s, R};
 use crate::App;
 
 const FTYPES: &[&str] = &["text", "num", "sel", "multi", "date", "star"];
@@ -28,7 +27,7 @@ fn owner(conn: &Connection, tbl: &str) -> anyhow::Result<Owner> {
     }
     conn.query_row("SELECT id FROM collections WHERE key=?1", [tbl], |r| r.get(0))
         .map(Owner::Collection)
-        .map_err(|_| anyhow!("未知表：{tbl}"))
+        .map_err(|_| bad(format!("未知表：{tbl}")))
 }
 
 // 预置库里允许编辑选项的自由词表字段。泛化后它们的值都在 extra 里，
@@ -138,11 +137,11 @@ async fn list(State(app): State<App>) -> R {
 
 // 新建自定义列：key 用 c<id>，值挂在实体行 extra JSON 里
 async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
-    let tbl = s(&b, "tbl").ok_or_else(|| anyhow!("缺少 tbl"))?;
-    let name = s(&b, "name").ok_or_else(|| anyhow!("列名不能为空"))?;
+    let tbl = s(&b, "tbl").ok_or_else(|| bad("缺少 tbl"))?;
+    let name = s(&b, "name").ok_or_else(|| bad("列名不能为空"))?;
     let ftype = s(&b, "ftype").unwrap_or_else(|| "text".into());
     if !FTYPES.contains(&ftype.as_str()) {
-        return Err(anyhow!("未知类型：{ftype}").into());
+        return Err(bad(format!("未知类型：{ftype}")).into());
     }
     let conn = app.db.lock().unwrap();
     owner(&conn, &tbl)?;
@@ -167,7 +166,7 @@ async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
 
 // 改列的显示名与是否默认上表；显示名纯属呈现，引擎字段也可以改
 async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value>) -> R {
-    let name = s(&b, "name").ok_or_else(|| anyhow!("列名不能为空"))?;
+    let name = s(&b, "name").ok_or_else(|| bad("列名不能为空"))?;
     let conn = app.db.lock().unwrap();
     let n = match b.get("shown") {
         Some(v) => {
@@ -175,9 +174,9 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
             // 名称列承载行的详情入口，且表头与行读同一份字段集——撤下它就会整表错位
             let key: String = conn
                 .query_row("SELECT key FROM fields WHERE id=?1", [id], |r| r.get(0))
-                .map_err(|_| anyhow!("列不存在"))?;
+                .map_err(|_| missing("列不存在"))?;
             if shown == 0 && key == "name" {
-                return Err(anyhow!("名称列必须留在表格上").into());
+                return Err(bad("名称列必须留在表格上").into());
             }
             conn.execute(
                 "UPDATE fields SET name=?1,shown=?2 WHERE id=?3",
@@ -187,7 +186,7 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
         None => conn.execute("UPDATE fields SET name=?1 WHERE id=?2", params![name, id])?,
     };
     if n == 0 {
-        return Err(anyhow!("列不存在").into());
+        return Err(missing("列不存在").into());
     }
     Ok(Json(json!({ "ok": true })))
 }
@@ -195,14 +194,14 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
 // 字段顺序：整份键序落成 pos。这是库级设置（决定新设备看到的默认列序与详情表单的次序），
 // 与存在 localStorage 里的本机列序是两回事。
 async fn set_order(State(app): State<App>, Json(b): Json<Value>) -> R {
-    let tbl = s(&b, "tbl").ok_or_else(|| anyhow!("缺少 tbl"))?;
+    let tbl = s(&b, "tbl").ok_or_else(|| bad("缺少 tbl"))?;
     let keys: Vec<&str> = b
         .get("keys")
         .and_then(|x| x.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
         .unwrap_or_default();
     if keys.is_empty() {
-        return Err(anyhow!("缺少 keys").into());
+        return Err(bad("缺少 keys").into());
     }
     let conn = app.db.lock().unwrap();
     owner(&conn, &tbl)?;
@@ -218,8 +217,8 @@ async fn set_order(State(app): State<App>, Json(b): Json<Value>) -> R {
 // 状态语义：只改状态词表选项上的 spend/alert/timeline 三个标记，不碰值本身。
 // 状态是 items 的真列，改名/删值得连行数据一起迁移，那不在这条路上做。
 async fn set_semantics(State(app): State<App>, Json(b): Json<Value>) -> R {
-    let tbl = s(&b, "tbl").ok_or_else(|| anyhow!("缺少 tbl"))?;
-    let key = s(&b, "key").ok_or_else(|| anyhow!("缺少 key"))?;
+    let tbl = s(&b, "tbl").ok_or_else(|| bad("缺少 tbl"))?;
+    let key = s(&b, "key").ok_or_else(|| bad("缺少 key"))?;
     let conn = app.db.lock().unwrap();
     let stored: String = conn
         .query_row(
@@ -227,7 +226,7 @@ async fn set_semantics(State(app): State<App>, Json(b): Json<Value>) -> R {
             params![tbl, key],
             |r| r.get(0),
         )
-        .map_err(|_| anyhow!("该列没有状态词表"))?;
+        .map_err(|_| bad("该列没有状态词表"))?;
     let mut opts: Vec<Value> = serde_json::from_str(&stored).unwrap_or_default();
     let want = opts_array(&b);
     for o in opts.iter_mut() {
@@ -250,9 +249,9 @@ async fn set_semantics(State(app): State<App>, Json(b): Json<Value>) -> R {
 /// 还驱动支出/提醒/时间线三层语义），那两件事不在这条路上做。新值不带语义标记，
 /// engine 读不到标记就按内置默认理解——`status_sem` 对未知值返回三项全关，用户再去语义浮层里勾。
 async fn add_status(State(app): State<App>, Json(b): Json<Value>) -> R {
-    let tbl = s(&b, "tbl").ok_or_else(|| anyhow!("缺少 tbl"))?;
-    let key = s(&b, "key").ok_or_else(|| anyhow!("缺少 key"))?;
-    let value = s(&b, "value").ok_or_else(|| anyhow!("状态值不能为空"))?;
+    let tbl = s(&b, "tbl").ok_or_else(|| bad("缺少 tbl"))?;
+    let key = s(&b, "key").ok_or_else(|| bad("缺少 key"))?;
+    let value = s(&b, "value").ok_or_else(|| bad("状态值不能为空"))?;
     let conn = app.db.lock().unwrap();
     let (id, stored): (i64, String) = conn
         .query_row(
@@ -260,7 +259,7 @@ async fn add_status(State(app): State<App>, Json(b): Json<Value>) -> R {
             params![tbl, key],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .map_err(|_| anyhow!("该列没有状态词表"))?;
+        .map_err(|_| bad("该列没有状态词表"))?;
     let mut opts: Vec<Value> = serde_json::from_str(&stored).unwrap_or_default();
     for o in opts.iter_mut() {
         if let Value::String(s) = o {
@@ -268,7 +267,7 @@ async fn add_status(State(app): State<App>, Json(b): Json<Value>) -> R {
         }
     }
     if opts.iter().any(|o| o["v"] == value.as_str()) {
-        return Err(anyhow!("状态「{value}」已经在词表里").into());
+        return Err(bad(format!("状态「{value}」已经在词表里")).into());
     }
     opts.push(json!({ "v": value, "spend": 0, "alert": 0, "timeline": 0 }));
     conn.execute(
@@ -290,7 +289,7 @@ async fn delete_field(State(app): State<App>, Path(id): Path<i64>) -> R {
         )
         .ok();
     let Some((tbl, key)) = row else {
-        return Err(anyhow!("列不存在或不可删除").into());
+        return Err(missing("列不存在或不可删除").into());
     };
     let (table, cond) = scope(&conn, &tbl)?;
     let t = Target { table, cond, key: key.clone(), seed_ftype: None };
@@ -329,15 +328,15 @@ fn resolve(conn: &Connection, tbl: &str, key: &str) -> anyhow::Result<Target> {
         .ok();
     match custom.as_deref() {
         Some("sel") | Some("multi") => Ok(mk(None)),
-        Some(_) => Err(anyhow!("该列类型没有选项")),
-        None => Err(anyhow!("该列不支持编辑选项")),
+        Some(_) => Err(bad("该列类型没有选项")),
+        None => Err(bad("该列不支持编辑选项")),
     }
 }
 
 // 设置字段的选项清单（内置列首次编辑时落一行 builtin=1 记录）
 async fn set_options(State(app): State<App>, Json(b): Json<Value>) -> R {
-    let tbl = s(&b, "tbl").ok_or_else(|| anyhow!("缺少 tbl"))?;
-    let key = s(&b, "key").ok_or_else(|| anyhow!("缺少 key"))?;
+    let tbl = s(&b, "tbl").ok_or_else(|| bad("缺少 tbl"))?;
+    let key = s(&b, "key").ok_or_else(|| bad("缺少 key"))?;
     let conn = app.db.lock().unwrap();
     let target = resolve(&conn, &tbl, &key)?;
     let opts = serde_json::to_string(&opts_array(&b))?;
@@ -357,10 +356,10 @@ async fn set_options(State(app): State<App>, Json(b): Json<Value>) -> R {
 
 // 选项改名：更新词表并传播到所有行
 async fn rename_option(State(app): State<App>, Json(b): Json<Value>) -> R {
-    let tbl = s(&b, "tbl").ok_or_else(|| anyhow!("缺少 tbl"))?;
-    let key = s(&b, "key").ok_or_else(|| anyhow!("缺少 key"))?;
-    let from = s(&b, "from").ok_or_else(|| anyhow!("缺少 from"))?;
-    let to = s(&b, "to").ok_or_else(|| anyhow!("缺少 to"))?;
+    let tbl = s(&b, "tbl").ok_or_else(|| bad("缺少 tbl"))?;
+    let key = s(&b, "key").ok_or_else(|| bad("缺少 key"))?;
+    let from = s(&b, "from").ok_or_else(|| bad("缺少 from"))?;
+    let to = s(&b, "to").ok_or_else(|| bad("缺少 to"))?;
     if from == to {
         return Ok(Json(json!({ "ok": true })));
     }
@@ -375,9 +374,9 @@ async fn rename_option(State(app): State<App>, Json(b): Json<Value>) -> R {
 
 // 删除选项：移出词表并从所有行清掉该值
 async fn remove_option(State(app): State<App>, Json(b): Json<Value>) -> R {
-    let tbl = s(&b, "tbl").ok_or_else(|| anyhow!("缺少 tbl"))?;
-    let key = s(&b, "key").ok_or_else(|| anyhow!("缺少 key"))?;
-    let value = s(&b, "value").ok_or_else(|| anyhow!("缺少 value"))?;
+    let tbl = s(&b, "tbl").ok_or_else(|| bad("缺少 tbl"))?;
+    let key = s(&b, "key").ok_or_else(|| bad("缺少 key"))?;
+    let value = s(&b, "value").ok_or_else(|| bad("缺少 value"))?;
     let conn = app.db.lock().unwrap();
     let t = resolve(&conn, &tbl, &key)?;
     swap_option_in_list(&conn, &tbl, &key, &value, None)?;

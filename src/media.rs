@@ -1,4 +1,3 @@
-use anyhow::anyhow;
 use axum::{
     extract::{Path, Query, State},
     http::{header, StatusCode},
@@ -10,7 +9,7 @@ use rusqlite::{params, types::Value as SqlValue, Connection};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
-use crate::api::{f, i, s, ApiError, R};
+use crate::api::{bad, f, i, missing, s, ApiError, R};
 use crate::{db, tmdb, App};
 
 const STR_FIELDS: &[&str] = &[
@@ -34,7 +33,7 @@ pub fn router() -> Router<App> {
 
 fn normalized(mut b: Value) -> Result<Value, ApiError> {
     if s(&b, "title").is_none() {
-        return Err(anyhow!("标题不能为空").into());
+        return Err(bad("标题不能为空").into());
     }
     if s(&b, "kind").is_none() {
         b["kind"] = json!("电影");
@@ -162,20 +161,27 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
         rusqlite::params_from_iter(vals),
     )?;
     if n == 0 {
-        return Err(anyhow!("条目不存在").into());
+        return Err(missing("条目不存在").into());
     }
     Ok(Json(json!({ "ok": true })))
 }
 
 async fn delete(State(app): State<App>, Path(id): Path<i64>) -> R {
     let conn = app.db.lock().unwrap();
+    // 海报文件跟着条目走，否则 covers/ 里会永久留下孤儿（条目 logo 早就是这么处理的）
+    let cover: Option<String> = conn
+        .query_row("SELECT cover FROM media_items WHERE id=?1", [id], |r| r.get(0))
+        .unwrap_or(None);
     conn.execute("DELETE FROM media_items WHERE id=?1", [id])?;
+    if let Some(n) = cover.filter(|n| crate::api::safe_name(n)) {
+        let _ = std::fs::remove_file(app.data_dir.join("covers").join(n));
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
 /// 批量导入（Notion 迁移 / 豆伴 CSV 适配器共用）：douban_id 或 (title,year,kind) 已存在则跳过。
 async fn import(State(app): State<App>, Json(b): Json<Value>) -> R {
-    let items = b.as_array().ok_or_else(|| anyhow!("需要数组"))?;
+    let items = b.as_array().ok_or_else(|| bad("需要数组"))?;
     let conn = app.db.lock().unwrap();
     let (mut added, mut skipped, mut failed) = (0, 0, 0);
     for raw in items {
@@ -218,7 +224,7 @@ fn meta_cfg(conn: &Connection) -> (String, String) {
 
 async fn tmdb_search(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> R {
     let text = q.get("q").map(|v| v.trim()).filter(|v| !v.is_empty())
-        .ok_or_else(|| anyhow!("缺少搜索词"))?
+        .ok_or_else(|| bad("缺少搜索词"))?
         .to_string();
     let tv = matches!(q.get("kind").map(String::as_str), Some("剧集" | "动画"));
     let (key, proxy) = {
@@ -231,7 +237,7 @@ async fn tmdb_search(State(app): State<App>, Query(q): Query<HashMap<String, Str
 
 /// 选中 TMDB 条目 → 建档 + 海报本地化，返回新条目 id。
 async fn from_tmdb(State(app): State<App>, Json(b): Json<Value>) -> R {
-    let tmdb_id = i(&b, "tmdb_id").ok_or_else(|| anyhow!("缺少 tmdb_id"))?;
+    let tmdb_id = i(&b, "tmdb_id").ok_or_else(|| bad("缺少 tmdb_id"))?;
     let kind = s(&b, "kind").unwrap_or_else(|| "电影".into());
     let tv = matches!(kind.as_str(), "剧集" | "动画");
     let (key, proxy) = {
@@ -294,12 +300,12 @@ async fn fetch_cover(State(app): State<App>, Path(id): Path<i64>) -> R {
                     ))
                 },
             )
-            .map_err(|_| anyhow!("条目不存在"))?;
+            .map_err(|_| missing("条目不存在"))?;
         let (key, proxy) = meta_cfg(&conn);
         (row.0, row.1, row.2, row.3, row.4, key, proxy)
     };
     if kind == "游戏" {
-        return Err(anyhow!("游戏封面暂不支持（后续接 IGDB）").into());
+        return Err(bad("游戏封面暂不支持（后续接 IGDB）").into());
     }
     let tv = matches!(kind.as_str(), "剧集" | "动画");
     let client = tmdb::Tmdb::new(&key, &proxy)?;
@@ -314,12 +320,12 @@ async fn fetch_cover(State(app): State<App>, Path(id): Path<i64>) -> R {
                 .iter()
                 .find(|h| matches!((year, h["year"].as_i64()), (Some(y), Some(hy)) if (y - hy).abs() <= 1))
                 .or_else(|| hits.first())
-                .ok_or_else(|| anyhow!("TMDB 无匹配：{title}"))?;
-            pick["tmdb_id"].as_i64().ok_or_else(|| anyhow!("TMDB 结果异常"))?
+                .ok_or_else(|| bad(format!("TMDB 无匹配：{title}")))?;
+            pick["tmdb_id"].as_i64().ok_or_else(|| bad("TMDB 结果异常"))?
         }
     };
     let (_, poster) = client.details(tv, found).await?;
-    let p = poster.ok_or_else(|| anyhow!("TMDB 该条目没有海报：{title}"))?;
+    let p = poster.ok_or_else(|| bad(format!("TMDB 该条目没有海报：{title}")))?;
     let bytes = client.poster(&p).await?;
     let dir = app.data_dir.join("covers");
     std::fs::create_dir_all(&dir)?;
@@ -339,11 +345,7 @@ async fn cover_file(
     State(app): State<App>,
     Path(name): Path<String>,
 ) -> Result<Response, ApiError> {
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-    {
+    if !crate::api::safe_name(&name) {
         return Ok(StatusCode::NOT_FOUND.into_response());
     }
     let path = app.data_dir.join("covers").join(&name);
@@ -359,6 +361,7 @@ async fn cover_file(
         [
             (header::CONTENT_TYPE, mime),
             (header::CACHE_CONTROL, "public, max-age=604800"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
         ],
         bytes,
     )

@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use anyhow::anyhow;
 use axum::{
     extract::{Query, State},
     http::{header, StatusCode},
@@ -21,13 +20,42 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
     }
 }
 
+/// 请求本身有问题（参数不合法 / 目标不存在），与服务端故障区分开。
+/// 默认仍是 500：只有明确判定为客户端错误的才降级，别把真故障也说成客户端的锅。
+#[derive(Debug)]
+pub struct ClientError {
+    status: StatusCode,
+    msg: String,
+}
+
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.msg)
+    }
+}
+
+impl std::error::Error for ClientError {}
+
+/// 参数不合法 → 400
+pub fn bad(msg: impl Into<String>) -> anyhow::Error {
+    ClientError { status: StatusCode::BAD_REQUEST, msg: msg.into() }.into()
+}
+
+/// 目标不存在 → 404
+pub fn missing(msg: impl Into<String>) -> anyhow::Error {
+    ClientError { status: StatusCode::NOT_FOUND, msg: msg.into() }.into()
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": self.0.to_string() })),
-        )
-            .into_response()
+        let status = self
+            .0
+            .downcast_ref::<ClientError>()
+            .map_or(StatusCode::INTERNAL_SERVER_ERROR, |e| e.status);
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            tracing::warn!("api error: {:#}", self.0); // 真故障要留痕，客户端传错不必刷屏
+        }
+        (status, Json(json!({ "error": self.0.to_string() }))).into_response()
     }
 }
 
@@ -62,6 +90,12 @@ pub fn f(v: &Value, k: &str) -> Option<f64> {
 
 pub fn i(v: &Value, k: &str) -> Option<i64> {
     v.get(k).and_then(|x| x.as_i64())
+}
+
+/// 数据目录里可直接读写的文件名：只放行字母数字与 . _ -，因此拼不出路径分隔符或 `..` 之外的花样。
+/// logo 与 cover 两条静态路径、以及删文件时都走它。
+pub fn safe_name(n: &str) -> bool {
+    !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 // 自定义列挂载点：body.extra 仅接受对象，存 JSON 文本
@@ -144,9 +178,9 @@ async fn settings_get(State(app): State<App>) -> R {
 
 async fn settings_put(State(app): State<App>, Json(b): Json<Value>) -> R {
     let conn = app.db.lock().unwrap();
-    let obj = b.as_object().ok_or_else(|| anyhow!("需要对象"))?;
+    let obj = b.as_object().ok_or_else(|| bad("需要对象"))?;
     for (k, v) in obj {
-        let val = v.as_str().ok_or_else(|| anyhow!("值必须是字符串"))?;
+        let val = v.as_str().ok_or_else(|| bad("值必须是字符串"))?;
         conn.execute(
             "INSERT INTO settings(key,value) VALUES(?1,?2)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -167,7 +201,7 @@ async fn backup_run(State(app): State<App>) -> R {
 }
 
 async fn notify_test(State(app): State<App>, Json(b): Json<Value>) -> R {
-    let channel = s(&b, "channel").ok_or_else(|| anyhow!("缺少 channel"))?;
+    let channel = s(&b, "channel").ok_or_else(|| bad("缺少 channel"))?;
     let (tg, mail) = {
         let conn = app.db.lock().unwrap();
         (notify::telegram_cfg(&conn), notify::email_cfg(&conn))
@@ -175,14 +209,14 @@ async fn notify_test(State(app): State<App>, Json(b): Json<Value>) -> R {
     let text = "Kalends 通知测试 ✓";
     match channel.as_str() {
         "telegram" => {
-            let cfg = tg.ok_or_else(|| anyhow!("Telegram 未启用或未配置完整"))?;
+            let cfg = tg.ok_or_else(|| bad("Telegram 未启用或未配置完整"))?;
             notify::send_telegram(&cfg, text).await?;
         }
         "email" => {
-            let cfg = mail.ok_or_else(|| anyhow!("邮件未启用或未配置完整"))?;
+            let cfg = mail.ok_or_else(|| bad("邮件未启用或未配置完整"))?;
             notify::send_email(&cfg, "Kalends 通知测试", text).await?;
         }
-        other => return Err(anyhow!("未知渠道：{other}").into()),
+        other => return Err(bad(format!("未知渠道：{other}")).into()),
     }
     Ok(Json(json!({ "ok": true })))
 }

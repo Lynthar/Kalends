@@ -97,10 +97,15 @@ pub async fn send_email(cfg: &EmailCfg, subject: &str, body: &str) -> Result<()>
     } else {
         AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.host)?
     };
-    let transport = builder
-        .port(cfg.port)
-        .credentials(Credentials::new(cfg.username.clone(), cfg.password.clone()))
-        .build();
+    // 用户名为空就别带凭据：无认证的内网中继会拒绝空 AUTH
+    let builder = builder.port(cfg.port);
+    let transport = if cfg.username.is_empty() {
+        builder.build()
+    } else {
+        builder
+            .credentials(Credentials::new(cfg.username.clone(), cfg.password.clone()))
+            .build()
+    };
     transport.send(msg).await?;
     Ok(())
 }
@@ -123,7 +128,8 @@ pub fn line(it: &Value) -> String {
     }
     if let Some(a) = it["action"].as_str() {
         if !a.is_empty() {
-            extra.push_str(&format!("，保号：{a}"));
+            // 说法由库给（SIM 是"保号"、证件是"换证"），别再按类型写死
+            extra.push_str(&format!("，{}：{a}", it["verb"].as_str().unwrap_or("续费")));
         }
     }
     format!("{when}（{due}）：{name}{extra}")

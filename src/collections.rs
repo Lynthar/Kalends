@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 
-use anyhow::anyhow;
 use axum::{
     extract::{Path, Query, State},
     http::{header, StatusCode},
@@ -15,7 +14,7 @@ use chrono::NaiveDate;
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
-use crate::api::{extra_json, extra_str, f, i, s, ApiError, R};
+use crate::api::{bad, extra_json, extra_str, f, i, missing, s, safe_name, ApiError, R};
 use crate::{engine, App};
 
 const ANCHORS: &[&str] = &["next", "last"];
@@ -70,7 +69,7 @@ async fn list(State(app): State<App>) -> R {
 /// 库 id：按 key 找。找不到就是 404 级错误，交给调用方兜。
 fn coll_id(conn: &Connection, key: &str) -> anyhow::Result<i64> {
     conn.query_row("SELECT id FROM collections WHERE key=?1", [key], |r| r.get(0))
-        .map_err(|_| anyhow!("库不存在：{key}"))
+        .map_err(|_| missing(format!("库不存在：{key}")))
 }
 
 fn anchor_of(conn: &Connection, id: i64) -> anyhow::Result<String> {
@@ -83,15 +82,15 @@ fn anchor_of(conn: &Connection, id: i64) -> anyhow::Result<String> {
 
 async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
     let tpl = match s(&b, "template") {
-        Some(id) => Some(template(&id).ok_or_else(|| anyhow!("未知模板：{id}"))?),
+        Some(id) => Some(template(&id).ok_or_else(|| bad(format!("未知模板：{id}")))?),
         None => None,
     };
-    let name = s(&b, "name").ok_or_else(|| anyhow!("库名不能为空"))?;
+    let name = s(&b, "name").ok_or_else(|| bad("库名不能为空"))?;
     let anchor = s(&b, "due_anchor")
         .or_else(|| tpl.map(|t| t.anchor.to_string()))
         .unwrap_or_else(|| "last".into());
     if !ANCHORS.contains(&anchor.as_str()) {
-        return Err(anyhow!("未知的到期模型：{anchor}").into());
+        return Err(bad(format!("未知的到期模型：{anchor}")).into());
     }
     let opt = |x: &'static str| (!x.is_empty()).then(|| x.to_string());
     // 模板只在调用方压根没提这个键时兜底：界面清空图标传的是 ""，不该被模板值顶回来
@@ -313,16 +312,16 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
             [id],
             coll_row,
         )
-        .map_err(|_| anyhow!("库不存在"))?;
+        .map_err(|_| missing("库不存在"))?;
     // 逐字段合并：只改传来的键，其余保留
     let pick = |k: &str| -> Option<String> { s(&b, k) };
     let anchor = pick("due_anchor").unwrap_or_else(|| cur["due_anchor"].as_str().unwrap().into());
     if !ANCHORS.contains(&anchor.as_str()) {
-        return Err(anyhow!("未知的到期模型：{anchor}").into());
+        return Err(bad(format!("未知的到期模型：{anchor}")).into());
     }
     let name = pick("name").unwrap_or_else(|| cur["name"].as_str().unwrap().into());
     if name.is_empty() {
-        return Err(anyhow!("库名不能为空").into());
+        return Err(bad("库名不能为空").into());
     }
     let take = |k: &str| -> Option<String> {
         if b.get(k).is_some() {
@@ -359,7 +358,7 @@ async fn set_order(State(app): State<App>, Json(b): Json<Value>) -> R {
         .map(|a| a.iter().filter_map(|x| x.as_i64()).collect())
         .unwrap_or_default();
     if ids.is_empty() {
-        return Err(anyhow!("缺少 ids").into());
+        return Err(bad("缺少 ids").into());
     }
     let conn = app.db.lock().unwrap();
     for (n, id) in ids.iter().enumerate() {
@@ -376,7 +375,7 @@ async fn remove(State(app): State<App>, Path(id): Path<i64>) -> R {
     let conn = app.db.lock().unwrap();
     let key: String = conn
         .query_row("SELECT key FROM collections WHERE id=?1", [id], |r| r.get(0))
-        .map_err(|_| anyhow!("库不存在"))?;
+        .map_err(|_| missing("库不存在"))?;
     // 条目随库走（外键 ON DELETE CASCADE），先把 logo 文件清掉免得留孤儿
     let mut stmt = conn.prepare("SELECT logo FROM items WHERE collection_id=?1 AND logo IS NOT NULL")?;
     let logos: Vec<String> = stmt
@@ -457,7 +456,7 @@ async fn items_list(State(app): State<App>, Path(key): Path<String>) -> R {
 /// 写入用的字段集：整行 PUT 语义是全量替换，没传的键一律置空。
 fn item_values(b: &Value) -> anyhow::Result<Vec<rusqlite::types::Value>> {
     use rusqlite::types::Value as V;
-    let name = s(b, "name").ok_or_else(|| anyhow!("名称不能为空"))?;
+    let name = s(b, "name").ok_or_else(|| bad("名称不能为空"))?;
     Ok(vec![
         V::from(name),
         i(b, "parent_id").map(V::from).unwrap_or(V::Null),
@@ -483,7 +482,7 @@ const WRITE_COLS: &str = "name,parent_id,status,price,currency,cycle,cycle_days,
 fn check_parent(conn: &Connection, coll: i64, id: Option<i64>, parent: Option<i64>) -> anyhow::Result<()> {
     let Some(p) = parent else { return Ok(()) };
     if Some(p) == id {
-        return Err(anyhow!("条目不能是自己的父行"));
+        return Err(bad("条目不能是自己的父行"));
     }
     let (pcoll, pparent): (i64, Option<i64>) = conn
         .query_row(
@@ -491,18 +490,18 @@ fn check_parent(conn: &Connection, coll: i64, id: Option<i64>, parent: Option<i6
             [p],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .map_err(|_| anyhow!("父行不存在"))?;
+        .map_err(|_| missing("父行不存在"))?;
     if pcoll != coll {
-        return Err(anyhow!("父行必须与本条目在同一个库"));
+        return Err(bad("父行必须与本条目在同一个库"));
     }
     if pparent.is_some() {
-        return Err(anyhow!("子行只支持两层：所选父行本身已经是子行"));
+        return Err(bad("子行只支持两层：所选父行本身已经是子行"));
     }
     if let Some(id) = id {
         let kids: i64 =
             conn.query_row("SELECT count(*) FROM items WHERE parent_id=?1", [id], |r| r.get(0))?;
         if kids > 0 {
-            return Err(anyhow!("子行只支持两层：本条目已有子行，不能再挂到别的行下"));
+            return Err(bad("子行只支持两层：本条目已有子行，不能再挂到别的行下"));
         }
     }
     Ok(())
@@ -525,7 +524,7 @@ pub fn insert_item(conn: &Connection, coll: i64, b: &Value) -> anyhow::Result<i6
 pub fn update_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<()> {
     let coll: i64 = conn
         .query_row("SELECT collection_id FROM items WHERE id=?1", [id], |r| r.get(0))
-        .map_err(|_| anyhow!("条目不存在"))?;
+        .map_err(|_| missing("条目不存在"))?;
     check_parent(conn, coll, Some(id), i(b, "parent_id"))?;
     let mut vals = item_values(b)?;
     let sets = WRITE_COLS
@@ -543,7 +542,7 @@ pub fn update_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<()> 
         rusqlite::params_from_iter(vals),
     )?;
     if n == 0 {
-        return Err(anyhow!("条目不存在"));
+        return Err(missing("条目不存在"));
     }
     Ok(())
 }
@@ -599,7 +598,7 @@ pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value
         )
         .ok();
     let Some((key, anchor, price, currency, cycle, cycle_days, next)) = row else {
-        return Err(anyhow!("条目不存在"));
+        return Err(missing("条目不存在"));
     };
     let today = engine::today();
     conn.execute(
@@ -651,10 +650,6 @@ async fn items_renew(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<
 
 /* ── 条目图标：原始字节上传（?ext= 定格式），文件存数据目录 logos/，列存文件名 ── */
 
-fn logo_name_ok(n: &str) -> bool {
-    !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-}
-
 // 上传字节的魔数须与声明格式一致，防止把可执行内容伪装成图片存进来
 fn logo_bytes_ok(ext: &str, b: &[u8]) -> bool {
     match ext {
@@ -673,7 +668,7 @@ fn logo_bytes_ok(ext: &str, b: &[u8]) -> bool {
 }
 
 pub fn remove_logo_file(app: &App, name: Option<String>) {
-    if let Some(n) = name.filter(|n| logo_name_ok(n)) {
+    if let Some(n) = name.filter(|n| safe_name(n)) {
         let _ = std::fs::remove_file(app.data_dir.join("logos").join(n));
     }
 }
@@ -686,19 +681,19 @@ pub fn set_logo(
     body: &[u8],
 ) -> anyhow::Result<String> {
     if !matches!(ext, "png" | "jpg" | "jpeg" | "webp" | "svg" | "gif" | "ico") {
-        return Err(anyhow!("不支持的图片格式"));
+        return Err(bad("不支持的图片格式"));
     }
     if body.is_empty() || body.len() > 1_000_000 {
-        return Err(anyhow!("图片为空或超过 1MB"));
+        return Err(bad("图片为空或超过 1MB"));
     }
     if !logo_bytes_ok(ext, body) {
-        return Err(anyhow!("图片内容与声明格式不符"));
+        return Err(bad("图片内容与声明格式不符"));
     }
     let old: Option<Option<String>> = conn
         .query_row("SELECT logo FROM items WHERE id=?1", [id], |r| r.get(0))
         .ok();
     let Some(old) = old else {
-        return Err(anyhow!("条目不存在"));
+        return Err(missing("条目不存在"));
     };
     let dir = app.data_dir.join("logos");
     std::fs::create_dir_all(&dir)?;
@@ -733,7 +728,7 @@ pub fn clear_logo(app: &App, conn: &Connection, id: i64) -> anyhow::Result<()> {
         .query_row("SELECT logo FROM items WHERE id=?1", [id], |r| r.get(0))
         .ok();
     let Some(old) = old else {
-        return Err(anyhow!("条目不存在"));
+        return Err(missing("条目不存在"));
     };
     conn.execute(
         "UPDATE items SET logo=NULL,updated_at=datetime('now') WHERE id=?1",
@@ -752,7 +747,7 @@ async fn logo_clear(State(app): State<App>, Path(id): Path<i64>) -> R {
 
 // 与媒体封面同款：文件名白名单 + 静态读 + 长缓存
 async fn logo_file(State(app): State<App>, Path(name): Path<String>) -> Result<Response, ApiError> {
-    if !logo_name_ok(&name) {
+    if !safe_name(&name) {
         return Ok(StatusCode::NOT_FOUND.into_response());
     }
     let path = app.data_dir.join("logos").join(&name);
