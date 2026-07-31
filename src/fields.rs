@@ -293,8 +293,11 @@ async fn delete_field(State(app): State<App>, Path(id): Path<i64>) -> R {
     };
     let (table, cond) = scope(&conn, &tbl)?;
     let t = Target { table, cond, key: key.clone(), seed_ftype: None };
-    rewrite_extra(&conn, &t, |obj| obj.remove(&key).is_some())?;
-    conn.execute("DELETE FROM fields WHERE id=?1", [id])?;
+    // 清值与注销列绑在一起：只清了一半的话，列没了但值还挂在各行的 extra 里
+    let tx = conn.unchecked_transaction()?;
+    rewrite_extra(&tx, &t, |obj| obj.remove(&key).is_some())?;
+    tx.execute("DELETE FROM fields WHERE id=?1", [id])?;
+    tx.commit()?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -365,10 +368,14 @@ async fn rename_option(State(app): State<App>, Json(b): Json<Value>) -> R {
     }
     let conn = app.db.lock().unwrap();
     let t = resolve(&conn, &tbl, &key)?;
-    swap_option_in_list(&conn, &tbl, &key, &from, Some(&to))?;
-    rewrite_extra(&conn, &t, |obj| {
+    // 词表与各行的值要么一起改完，要么一条都不改：半途失败留下的是「词表已改名、
+    // 行里还是旧值」的错位，界面上看不出来，只在筛选时表现为对不上
+    let tx = conn.unchecked_transaction()?;
+    swap_option_in_list(&tx, &tbl, &key, &from, Some(&to))?;
+    rewrite_extra(&tx, &t, |obj| {
         swap_extra_value(obj, &t.key, &from, Some(&to))
     })?;
+    tx.commit()?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -379,8 +386,10 @@ async fn remove_option(State(app): State<App>, Json(b): Json<Value>) -> R {
     let value = s(&b, "value").ok_or_else(|| bad("缺少 value"))?;
     let conn = app.db.lock().unwrap();
     let t = resolve(&conn, &tbl, &key)?;
-    swap_option_in_list(&conn, &tbl, &key, &value, None)?;
-    rewrite_extra(&conn, &t, |obj| swap_extra_value(obj, &t.key, &value, None))?;
+    let tx = conn.unchecked_transaction()?;
+    swap_option_in_list(&tx, &tbl, &key, &value, None)?;
+    rewrite_extra(&tx, &t, |obj| swap_extra_value(obj, &t.key, &value, None))?;
+    tx.commit()?;
     Ok(Json(json!({ "ok": true })))
 }
 

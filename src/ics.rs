@@ -8,12 +8,41 @@ fn esc(s: &str) -> String {
         .replace('\n', "\\n")
 }
 
+/// RFC 5545 的行折叠：一行最多 75 字节，续行以一个空格起头。
+/// 按字节折，但不能切开一个 UTF-8 字符——中文名字二十几个字就越线了。
+fn fold(line: &str) -> String {
+    let mut out = String::with_capacity(line.len() + line.len() / 64);
+    let mut used = 0;
+    for c in line.chars() {
+        let n = c.len_utf8();
+        if used + n > 75 {
+            out.push_str("\r\n ");
+            used = 1; // 续行的前导空格自己占一个字节
+        }
+        out.push(c);
+        used += n;
+    }
+    out
+}
+
+fn put(out: &mut String, s: &str) {
+    out.push_str(&fold(s));
+    out.push_str("\r\n");
+}
+
 /// 把合并到期时间线渲染成 ICS 日历（每项一个全天事件，前一天日历级提醒）。
 pub fn calendar(items: &[Value]) -> String {
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
-    let mut out = String::from(
-        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Kalends//ZH\r\nCALSCALE:GREGORIAN\r\nX-WR-CALNAME:Kalends 续费\r\n",
-    );
+    let mut out = String::new();
+    for l in [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Kalends//ZH",
+        "CALSCALE:GREGORIAN",
+        "X-WR-CALNAME:Kalends 续费",
+    ] {
+        put(&mut out, l);
+    }
     for it in items {
         let kind = it["kind"].as_str().unwrap_or("item");
         let id = it["id"].as_i64().unwrap_or(0);
@@ -35,14 +64,20 @@ pub fn calendar(items: &[Value]) -> String {
                 desc.push_str(a);
             }
         }
-        out.push_str(&format!(
-            "BEGIN:VEVENT\r\nUID:kalends-{kind}-{id}-{date}\r\nDTSTAMP:{stamp}\r\nDTSTART;VALUE=DATE:{date}\r\nSUMMARY:{}\r\nDESCRIPTION:{}\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:{}\r\nTRIGGER:-P1D\r\nEND:VALARM\r\nEND:VEVENT\r\n",
-            esc(&summary),
-            esc(&desc),
-            esc(&summary),
-        ));
+        put(&mut out, "BEGIN:VEVENT");
+        put(&mut out, &format!("UID:kalends-{kind}-{id}-{date}"));
+        put(&mut out, &format!("DTSTAMP:{stamp}"));
+        put(&mut out, &format!("DTSTART;VALUE=DATE:{date}"));
+        put(&mut out, &format!("SUMMARY:{}", esc(&summary)));
+        put(&mut out, &format!("DESCRIPTION:{}", esc(&desc)));
+        put(&mut out, "BEGIN:VALARM");
+        put(&mut out, "ACTION:DISPLAY");
+        put(&mut out, &format!("DESCRIPTION:{}", esc(&summary)));
+        put(&mut out, "TRIGGER:-P1D");
+        put(&mut out, "END:VALARM");
+        put(&mut out, "END:VEVENT");
     }
-    out.push_str("END:VCALENDAR\r\n");
+    put(&mut out, "END:VCALENDAR");
     out
 }
 
@@ -73,6 +108,22 @@ mod tests {
         assert!(ics.contains("SUMMARY:续费：Netflix\\, 家庭版"));
         assert!(ics.contains("DESCRIPTION:USD 15.50"));
         assert!(ics.contains("TRIGGER:-P1D"));
+    }
+
+    #[test]
+    fn folds_long_lines_without_splitting_a_character() {
+        // 60 个汉字 = 180 字节，SUMMARY 行必然要折；折点不能落在字符中间
+        let long = "朔".repeat(60);
+        let ics = calendar(&[json!({
+            "kind": "subs", "id": 1, "due": "2026-08-01", "name": long, "verb": "续费",
+        })]);
+        for l in ics.split("\r\n") {
+            assert!(l.len() <= 75, "{} 字节的行没折：{l}", l.len());
+        }
+        assert!(ics.contains("\r\n "), "根本没有折行");
+        // 把续行接回去应当还原成原样（RFC 5545 的解析方式）
+        let unfolded = ics.replace("\r\n ", "");
+        assert!(unfolded.contains(&format!("SUMMARY:续费：{long}")), "折回去对不上原文");
     }
 
     #[test]

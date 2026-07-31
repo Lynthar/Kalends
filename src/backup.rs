@@ -94,7 +94,11 @@ pub async fn scheduler(db: crate::Db, data_dir: PathBuf) {
             };
             match result {
                 Ok(r) => tracing::info!("backup done: {}", r.snapshot.display()),
-                Err(e) => tracing::warn!("backup failed: {e:#}"),
+                Err(e) => {
+                    tracing::warn!("backup failed: {e:#}");
+                    // 判断「今天备过了吗」看的就是这个文件，半截的快照会让备份从此静默停摆
+                    let _ = fs::remove_file(&today_snap);
+                }
             }
         }
         tokio::time::sleep(std::time::Duration::from_secs(1800)).await;

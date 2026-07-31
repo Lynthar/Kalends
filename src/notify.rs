@@ -52,8 +52,13 @@ pub fn email_cfg(conn: &Connection) -> Option<EmailCfg> {
     (!cfg.host.is_empty() && !cfg.from.is_empty() && !cfg.to.is_empty()).then_some(cfg)
 }
 
+/// 出网请求（Telegram 与 TMDB 共用）。**必须带超时**：reqwest 默认既没有连接超时
+/// 也没有总超时，而通知调度器是一条条顺序 await 的——一根挂死的连接能把之后所有提醒
+/// 拖到下次重启，日志里还什么都看不到。
 pub fn http_client(proxy: &str) -> Result<reqwest::Client> {
-    let mut builder = reqwest::Client::builder();
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30)); // 含响应体，海报下载也走这条
     if !proxy.is_empty() {
         builder = builder.proxy(reqwest::Proxy::all(proxy)?);
     }

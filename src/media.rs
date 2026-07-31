@@ -35,6 +35,12 @@ fn normalized(mut b: Value) -> Result<Value, ApiError> {
     if s(&b, "title").is_none() {
         return Err(bad("标题不能为空").into());
     }
+    // 评分越界会一路渲染到界面上（99 星把整行撑爆）；不填＝没评分，那是允许的
+    if let Some(r) = i(&b, "rating") {
+        if !(1..=5).contains(&r) {
+            return Err(bad("评分只能是 1–5 星").into());
+        }
+    }
     if s(&b, "kind").is_none() {
         b["kind"] = json!("电影");
     }
@@ -114,10 +120,14 @@ async fn list(State(app): State<App>, Query(q): Query<HashMap<String, String>>) 
         conds.push(format!("status=?{}", binds.len()));
     }
     if let Some(text) = q.get("q").map(|v| v.trim()).filter(|v| !v.is_empty()) {
-        binds.push(format!("%{text}%"));
+        // % 与 _ 是 LIKE 的通配符：不转义的话搜「100%」等于搜「以 100 开头的一切」
+        let pat = text.replace('\\', r"\\").replace('%', r"\%").replace('_', r"\_");
+        binds.push(format!("%{pat}%"));
         let n = binds.len();
+        let cols = ["title", "orig_title", "review", "directors", "actors"];
         conds.push(format!(
-            "(title LIKE ?{n} OR orig_title LIKE ?{n} OR review LIKE ?{n} OR directors LIKE ?{n} OR actors LIKE ?{n})"
+            "({})",
+            cols.map(|c| format!(r"{c} LIKE ?{n} ESCAPE '\'")).join(" OR ")
         ));
     }
     if !conds.is_empty() {
