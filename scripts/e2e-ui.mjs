@@ -224,6 +224,12 @@ check('胶囊点击翻转为升序', await evl(`JSON.parse(localStorage.getItem(
 await evl(`document.querySelector('#view-pills .p-sort .x').click()`);
 await sleep(200);
 check('胶囊 × 清除排序', await evl(`JSON.parse(localStorage.getItem('kalends.views.v1')).subs.sort`) === null);
+// 周期列按周期长短排，不是显示文案的字母序（那样 Annual 会排在 Monthly 前面，读者无从理解）
+check('周期列取的排序值是周期长短', await evl(`(() => {
+  const v = COLS.subs.cycle.val;
+  return [v({ cycle: 'monthly' }), v({ cycle: 'annual' }), v({ cycle: 'days', cycle_days: 181 }), v({ cycle: null })].join(',');
+})()`) === '30,365,181,');
+check('周期列按数值比较而不是中文串', await evl(`COLS.subs.cycle.str`) === 0);
 
 /* 6. 列筛选（菜单直达，全列可筛）+ 筛选胶囊 */
 check('菜单进入筛选', await menuClick('#view-subs th[data-k="category"]', '筛选'));
@@ -609,6 +615,61 @@ for (const [key, mark] of [['subs', 'notes'], ['sims', 'notes'], ['vps', 'notes'
     `前 ${JSON.stringify(before.extra)} 后 ${JSON.stringify(after?.extra)}`);
   check(`${key} 还原`, (await put(`/api/items/${before.id}`, before)).ok); // 不给后续断言留脏数据
 }
+
+/* 12e-2. 详情表单「打开 → 什么都不改 → 保存」必须是幂等的。
+   按字段逐条追加断言（多选、星级…）兜不住这一族，所以这里整行深比对：
+   周期曾经在这条路上被写坏——表单初值取的是格子里的显示文案（Monthly），
+   保存就把它写回了 items.cycle，存储键丢失，于是周期格变空、支出漏这一条、
+   按「上次续费+周期」推日期的库整条掉出到期时间线与 ICS。 */
+const stripVolatile = o => {
+  const { updated_at, ...rest } = o || {};
+  return JSON.stringify(rest);
+};
+await evl(`loadAll()`); // 12e 用接口改过数据，表单读的是 state，先对齐再比对
+await sleep(700);
+for (const key of ['subs', 'sims', 'vps']) {
+  const items = () => fetch(`${APP}api/collections/${key}/items`).then(r => r.json());
+  const rows = await items();
+  const before = rows.find(r => r.cycle) || rows[0]; // 优先挑有周期的行，那正是出事的字段
+  await evl(`switchTab('${key}')`);
+  await sleep(200);
+  await evl(`openItemDialog('${key}', state['${key}'].find(r => r.id === ${before.id}))`);
+  await sleep(400);
+  if (key === 'subs') {
+    check('周期下拉存的是档位键、显示的才是文案', await evl(`(() => {
+      const el = document.querySelector('#item-fields [data-f="cycle"]');
+      return el ? el.value + '|' + (el.options[el.selectedIndex]?.textContent ?? '') : '(缺)';
+    })()`) === `${before.cycle}|${{ weekly: 'Weekly', monthly: 'Monthly', quarterly: 'Quarterly', semiannual: 'Semiannual', annual: 'Annual', biennial: 'Biennial', triennial: 'Triennial', lifetime: 'Lifetime', days: 'Custom' }[before.cycle]}`);
+  }
+  await evl(`document.querySelector('#form-item').requestSubmit()`);
+  await sleep(900);
+  const after = (await items()).find(r => r.id === before.id);
+  check(`${key} 详情表单原样保存不动任何字段`, stripVolatile(before) === stripVolatile(after),
+    `\n    前 ${stripVolatile(before)}\n    后 ${stripVolatile(after)}`);
+}
+// 自定义天数没填天数：表单该拦下（就地编辑器早就拦了，表单一直没拦）。
+// 挑 subs——SIM 的周期恒为自定义天数，当初就没把 cycle 注册成字段，表单里没有这个控件
+const daysRow = (await fetch(`${APP}api/collections/subs/items`).then(r => r.json())).find(r => r.cycle);
+await evl(`switchTab('subs')`);
+await sleep(200);
+await evl(`openItemDialog('subs', state.subs.find(r => r.id === ${daysRow.id}))`);
+await sleep(400);
+await evl(`(() => {
+  document.querySelector('#item-fields [data-f="cycle"]').value = 'days';
+  document.querySelector('#item-fields [data-f="cycle_days"]').value = '';
+})()`);
+await evl(`document.querySelector('#form-item').requestSubmit()`);
+await sleep(700);
+check('表单拦下「自定义周期不填天数」', await evl(`!!document.querySelector('#dlg-item')?.open`) === true);
+check('拦下时给的是错误提示', await evl(
+  `(() => { const t = document.querySelector('#toast'); return !t.hidden && t.classList.contains('err') && t.textContent; })()`
+) === '自定义周期要填天数');
+check('拦下时没有落库', (await fetch(`${APP}api/collections/subs/items`).then(r => r.json()))
+  .find(r => r.id === daysRow.id)?.cycle === daysRow.cycle);
+await evl(`document.querySelector('#dlg-item').close()`);
+// 这条错误提示是本段期望的产物（err 态挂 4.2 秒），收掉它，别飘到下一段的「无错误提示」断言里
+await evl(`(() => { const t = document.querySelector('#toast'); clearTimeout(t._h); t.hidden = true; t.classList.remove('err'); })()`);
+await sleep(150);
 
 /* 12f. SIM 点格即编（整行 PUT 曾在此静默失败） */
 await evl(`document.querySelector('.tab[data-tab="sims"]').click()`);
@@ -1217,6 +1278,58 @@ check('日期列不折行', await evl(
 await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] });
 await sleep(400);
 await shot('09-dark');
+
+/* 18. 库删光也不能把界面打崩。放在最后跑——这一段会把预置库连数据一起删掉。
+   预置库过去在界面上删不掉（后端一直放行、文档也写着可删），而新库的表格容器
+   锚在 VPS 那张表上：VPS 一删，同一会话里再建库就是 null.after()，loadAll 断在那儿。 */
+await send('Emulation.setEmulatedMedia', { features: [] });
+await sleep(300);
+// 出异常时给出 FAIL 而不是让整个脚本崩掉，负向对照才跑得完整套
+const evlSafe = async expr => {
+  try { return { ok: true, v: await evl(expr) }; } catch (e) { return { ok: false, v: String(e.message).slice(0, 300) }; }
+};
+await evl(`switchTab('vps')`);
+await sleep(250);
+await evl(`openCollDialog(collOf('vps'))`);
+await sleep(350);
+check('预置库的库设置里有删除入口', await evl(`!document.querySelector('#coll-del').hidden`) === true);
+await evl(`document.querySelector('#coll-del').click()`); // confirm 由 CDP 自动 accept
+await sleep(1400);
+check('预置库删得掉', (await (await fetch(APP + 'api/collections')).json()).every(c => c.key !== 'vps'));
+check('删掉后标签与容器一并撤走', await evl(
+  `!document.querySelector('.tab[data-tab="vps"]') && !document.querySelector('.tablewrap[data-tab="vps"]')`) === true);
+// 同一会话里再建库：原来的锚点已经不在了
+const anchorProbe = await post('/api/collections', { name: '锚点探针' });
+const rebuilt = await evlSafe(`loadAll()`);
+check('删掉 VPS 后同一会话仍能建库', rebuilt.ok, rebuilt.v);
+await sleep(700);
+check('新库的表格容器建起来了', await evl(
+  `!!document.querySelector('.tablewrap[data-tab="${anchorProbe.key}"]')`) === true);
+// 删到一个不剩：列宽结算、视图胶囊、表内搜索都会拿到一张不存在的表
+for (const c of await (await fetch(APP + 'api/collections')).json()) {
+  await fetch(`${APP}api/collections/${c.id}`, { method: 'DELETE' });
+}
+const emptied = await evlSafe(`loadAll()`);
+check('删到一个库不剩也不崩', emptied.ok, emptied.v);
+await sleep(700);
+check('标签行空了', await evl(`document.querySelectorAll('.tab[data-tab]').length`) === 0);
+const typed = await evlSafe(`(() => {
+  const s = document.querySelector('#t-search');
+  s.value = 'x';
+  s.dispatchEvent(new Event('input'));
+  window.dispatchEvent(new Event('resize'));
+})()`);
+await sleep(500);
+check('零库时搜索与窗口缩放都不崩', typed.ok, typed.v);
+check('零库时也没有冒出 console 异常', consoleMsgs.filter(m => !m.includes('favicon')).length === 0,
+  JSON.stringify(consoleMsgs.slice(0, 3)));
+const revived = await post('/api/collections', { name: '重建' });
+const revivedLoad = await evlSafe(`loadAll()`);
+check('零库之后还能重新建库', revivedLoad.ok, revivedLoad.v);
+await sleep(800);
+check('重建的库直接就是当前表', await evl(
+  `state.tab === '${revived.key}' && !document.querySelector('.tablewrap[data-tab="${revived.key}"]').hidden`) === true);
+await shot('10-after-wipe');
 
 const errs = consoleMsgs.filter(m => !m.includes('favicon'));
 check('无 console 错误', errs.length === 0, JSON.stringify(errs));

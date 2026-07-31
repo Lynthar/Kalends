@@ -27,6 +27,9 @@ const CYCLE_LABEL = {
   weekly: 'Weekly', monthly: 'Monthly', quarterly: 'Quarterly', semiannual: 'Semiannual',
   annual: 'Annual', biennial: 'Biennial', triennial: 'Triennial', lifetime: 'Lifetime', days: 'Custom',
 };
+// 周期下拉的档位与次序（就地编辑器与详情表单共用，'' = 不设周期）。
+// 选项的 value 恒为存储键（monthly），显示的才是 CYCLE_LABEL 的文案（Monthly）。
+const CYCLE_ORDER = ['', 'monthly', 'annual', 'biennial', 'triennial', 'quarterly', 'semiannual', 'weekly', 'days', 'lifetime'];
 const M_KINDS = ['电影', '剧集', '动画', '游戏'];
 const M_STATUSES = ['想看', '在看', '看过', '弃'];
 
@@ -205,6 +208,8 @@ function renderTotals() {
 const BLANK = '（空）';
 const cmpZh = (a, b) => String(a).localeCompare(String(b), 'zh');
 const CYCLE_RANK = { weekly: 7, monthly: 30, quarterly: 91, semiannual: 182, annual: 365, biennial: 730, triennial: 1095, lifetime: 1e9 };
+// 周期列按周期长短排序：文案的字母序（Annual < Custom < Monthly）对读者没有意义
+const cycleRank = it => it.cycle === 'days' ? (it.cycle_days ?? null) : (CYCLE_RANK[it.cycle] ?? null);
 const dayDiff = (a, b) => Math.round((a - b) / 864e5);
 const todayDate = () => new Date((state.overview?.today || '1970-01-01') + 'T00:00:00');
 
@@ -540,6 +545,7 @@ const MIN_COLW = 52;
 
 function applyWidths(tab) {
   const thead = $(HEAD_SEL[tab]);
+  if (!thead) return; // 这张表不在了（库刚被删，或一个库都不剩）：没有列宽要结算
   const v = views[tab];
   const w = v.widths || {};
   const table = thead.closest('table');
@@ -1249,6 +1255,7 @@ function renderViewPills(tab) {
   if (tab !== 'media' && tab !== state.tab) return; // 三张续费表共用一行，只画当前标签页的
   el.innerHTML = '';
   const v = views[tab];
+  if (!v) { el.hidden = true; return; } // 这张表的视图偏好已随库一起删掉
   const s = v.sort;
   const pills = [];
   if (s) {
@@ -1318,21 +1325,24 @@ const ROW_BODY = {
   },
 };
 
-// 行对象 → 整行 PUT 的体。后端是全量替换语义：字段集漏一项就被置空，
-// 所以按注册表把每个可写字段都带上。**parent_id 与 logo 没被注册成字段**
-// （子行归属与图标由专门的 UI 管），必须在这里显式带回去，否则一次编辑就清掉它们。
+/* 行对象 → 整行 PUT 的体。后端是全量替换语义：body 里漏一列，那一列就被置空。
+   **不能只按字段注册表拼**——注册表管的是「界面上有哪些列」，并不覆盖每个真列：
+   SIM 的周期恒为自定义天数，当初就没注册 cycle 列，于是 SIM 条目每编辑一次
+   周期就被清一次（剩余天数算不出、整条掉出到期时间线与 ICS）；parent_id 与 logo
+   另有专门 UI，同样没注册。所以先按行数据铺满真列，再让字段集里的值覆盖。 */
+// items 的可写真列，与后端 WRITE_COLS 一一对应
+const ITEM_COLS = ['name', 'parent_id', 'status', 'price', 'currency', 'cycle', 'cycle_days',
+  'next_renewal', 'last_renewed', 'url', 'notes', 'logo'];
+
 function itemBodyFromRow(key, r) {
   const b = { extra: { ...(r.extra || {}) } };
+  for (const k of ITEM_COLS) if (r[k] != null) b[k] = r[k];
   for (const f of fieldsOf(key)) {
-    if (f.src === 'calc') continue;
-    if (f.src === 'col') {
-      const v = r[f.key];
-      b[f.key] = f.ftype === 'num' ? (v ?? undefined) : (Array.isArray(v) ? v : (v ?? ''));
-    }
+    if (f.src !== 'col') continue;
+    const v = r[f.key];
+    b[f.key] = f.ftype === 'num' ? (v ?? undefined) : (Array.isArray(v) ? v : (v ?? ''));
   }
   b.name = r.name ?? '';
-  if (r.parent_id != null) b.parent_id = r.parent_id;
-  if (r.logo) b.logo = r.logo;
   return b;
 }
 
@@ -1514,9 +1524,8 @@ function starEditor(tab, it, td, k, save) {
 // 周期编辑：付费周期下拉 + 按天数时的天数输入（订阅周期列 / VPS 周期列共用）
 function cycleEditor(tab, it, td) {
   const box = cellPopShell(td, '付费周期');
-  const order = ['', 'monthly', 'annual', 'biennial', 'triennial', 'quarterly', 'semiannual', 'weekly', 'days', 'lifetime'];
   box.insertAdjacentHTML('beforeend', `<div class="fp-form">
-    <select class="mini-select fp-op" data-cycle>${order.map(c => `<option value="${c}"${c === (it.cycle || '') ? ' selected' : ''}>${c ? CYCLE_LABEL[c] : '—'}</option>`).join('')}</select>
+    <select class="mini-select fp-op" data-cycle>${CYCLE_ORDER.map(c => `<option value="${c}"${c === (it.cycle || '') ? ' selected' : ''}>${c ? CYCLE_LABEL[c] : '—'}</option>`).join('')}</select>
     <input class="fp-q" type="number" min="1" data-days placeholder="天数" value="${esc(String(it.cycle_days ?? ''))}">
   </div><div class="cp-foot"><button type="button" class="btn primary mini">保存</button></div>`);
   const sel = box.querySelector('[data-cycle]');
@@ -2005,6 +2014,7 @@ let tSearchTimer;
 $('#t-search').addEventListener('input', e => {
   clearTimeout(tSearchTimer);
   tSearchTimer = setTimeout(() => {
+    if (!views[state.tab]) return; // 一个库都不剩时没有表可搜
     views[state.tab].q = e.target.value;
     saveViews();
     RENDER[state.tab]();
@@ -2068,13 +2078,24 @@ function semOf(key, status) {
 }
 const statusOrder = key => (fieldOf(key, 'status')?.options || []).map(o => o.v);
 
-// 字段取值：真列直接读、extra 读挂载点、calc 由服务端或模板算出
-function fieldVal(f, r) {
-  if (f.src === 'col') return f.key === 'cycle' ? cycleText(r) : r[f.key];
+/* 字段取值有两个：**显示值与编辑值必须分开**。
+   周期是唯一一个存储键与呈现文案不同的字段（monthly ↔ Monthly）——拿显示值当表单初值，
+   保存时就把文案写回了 items.cycle，存储键就此丢失：周期格变空、支出漏算这一条、
+   「上次续费+周期」的库连到期日都推不出来（条目从时间线与 ICS 上消失）。真踩过。
+   表格与筛选读 fieldVal，表单与编辑器一律读 fieldRaw。 */
+// 编辑值：真列直接读、extra 读挂载点、calc 由服务端或模板算出
+function fieldRaw(f, r) {
+  if (f.src === 'col') return r[f.key];
   if (f.src === 'extra') return (r.extra || {})[f.key];
   if (f.key === 'left') return r.days_left;
   if (f.ftype === 'tpl') return tplText(f, r);
   return null;
+}
+
+// 显示值：在编辑值之上套一层呈现（目前只有周期需要）
+function fieldVal(f, r) {
+  if (f.src === 'col' && f.key === 'cycle') return cycleText(r);
+  return fieldRaw(f, r);
 }
 
 // 模板列：按 ' / ' 分段，段首占位字段为空则整段不出现（复刻 VPS「规格」的既有观感）
@@ -2096,13 +2117,15 @@ function tplText(f, r) {
 function colFromField(key, f) {
   const t = f.ftype === 'tpl' ? 'text' : f.ftype;
   const numeric = t === 'num' || t === 'star';
+  const isCycle = f.src === 'col' && f.key === 'cycle';
   const get = r => fieldVal(f, r);
   return {
     t, fkey: f.key, src: f.src, custom: f.builtin ? 0 : f.id,
     conv: CONV_TYPES.includes(t) ? 1 : 0,
     ord: f.key === 'status' ? statusOrder(key) : (t === 'star' ? ['1', '2', '3', '4', '5'] : null),
-    str: numeric ? 0 : 1,
+    str: numeric || isCycle ? 0 : 1,
     val: f.key === 'status' ? ordVal(statusOrder(key), r => r.status)
+      : isCycle ? cycleRank
       : numeric ? r => { const v = get(r); return v == null || v === '' ? null : +v; }
       : get,
     fvals: r => {
@@ -2189,7 +2212,11 @@ function ensureCollDom(c) {
     wrap.hidden = state.tab !== key;
     wrap.innerHTML = `<table class="grid"><thead><tr></tr></thead><tbody id="${esc(key)}-body" data-tab="${esc(key)}"></tbody></table>
       <p class="empty" id="${esc(key)}-empty" hidden>◌ 空架待书</p>`;
-    document.querySelector('.tablewrap[data-tab="vps"]').after(wrap);
+    // 挂在最后一张表之后。别锚在某个预置库上——那个库是可以被删掉的，
+    // 删掉之后同一会话里再建库就会拿 null 去 .after()，整个 loadAll 断在这里
+    const wraps = document.querySelectorAll('#page-renewals .tablewrap[data-tab]');
+    if (wraps.length) wraps[wraps.length - 1].after(wrap);
+    else $('#view-pills').after(wrap);
   }
   HEAD_SEL[key] = `.tablewrap[data-tab="${key}"] thead`;
   SEARCH_FIELDS[key] = r => [r.name, r.notes, ...Object.values(r.extra || {}).flatMap(v => Array.isArray(v) ? v : [v])];
@@ -2219,8 +2246,11 @@ function syncColls() {
     document.querySelector(`.tab[data-tab="${k}"]`)?.remove();
     w.remove();
     delete views[k]; // 本机视图偏好跟着走，否则 localStorage 里堆一堆已删库的列宽/筛选
-    if (state.tab === k) switchTab(colls()[0]?.key || 'subs');
+    // 落到剩下的第一个库；一个都不剩时 key 是 undefined，交给下面的守卫
+    if (state.tab === k) switchTab(colls()[0]?.key);
   });
+  // 当前标签指向一个不存在的库（删空之后又建了一个）：落到第一个，否则新表建好却是隐藏的
+  if (colls().length && !keys.has(state.tab)) switchTab(colls()[0].key);
   saveViews();
 }
 
@@ -2350,11 +2380,22 @@ function fieldOptions(key, f) {
   const out = (f.options || []).map(o => o.v);
   const seen = new Set(out);
   for (const r of state[key] || []) {
-    const v = fieldVal(f, r);
+    const v = fieldRaw(f, r);
     const vals = Array.isArray(v) ? v.map(String) : v == null || v === '' ? [] : [String(v)];
     for (const x of vals) if (!seen.has(x)) { seen.add(x); out.push(x); }
   }
   return out;
+}
+
+// 单选下拉的候选：一律 {v: 存回去的值, label: 给人看的文案}。
+// 周期的词表是固定档位，不从数据里长——那样长出来的会是上一次存进去的东西。
+function selOptions(key, f, cur) {
+  if (f.src === 'col' && f.key === 'cycle') {
+    return CYCLE_ORDER.filter(Boolean).map(v => ({ v, label: CYCLE_LABEL[v] }));
+  }
+  const vs = fieldOptions(key, f);
+  if (cur && !vs.includes(cur)) vs.push(cur);
+  return vs.map(v => ({ v, label: v }));
 }
 
 // 多选清单末尾的「新选项」输入：回车加一枚勾好的复选框（已有就勾上）。
@@ -2386,7 +2427,7 @@ function openItemDialog(key, it) {
   box.innerHTML = '';
   for (const f of fieldsOf(key)) {
     if (f.src === 'calc') continue; // 算出来的列不可编辑
-    const v = it ? fieldVal(f, it) : '';
+    const v = it ? fieldRaw(f, it) : ''; // 编辑值，不是格子里那份呈现
     const val = Array.isArray(v) ? v.join(', ') : (v ?? '');
     const lab = document.createElement('label');
     if (f.ftype === 'multi') {
@@ -2411,10 +2452,9 @@ function openItemDialog(key, it) {
         <input type="hidden" data-f="${esc(f.key)}" value="${n || ''}">`;
     } else if (f.ftype === 'sel') {
       const cur = val === '' ? '' : String(val);
-      const opts = fieldOptions(key, f);
-      if (cur && !opts.includes(cur)) opts.push(cur);
       lab.innerHTML = `<span>${esc(f.name || f.key)}</span><select data-f="${esc(f.key)}">`
-        + `<option value=""></option>${opts.map(o => `<option${o === cur ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+        + `<option value=""></option>${selOptions(key, f, cur).map(o =>
+          `<option value="${esc(o.v)}"${o.v === cur ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}</select>`;
     } else if (f.ftype === 'status') {
       const opts = statusOrder(key);
       lab.innerHTML = `<span>${esc(f.name || f.key)}</span><select data-f="${esc(f.key)}">${opts.map(o => `<option${o === (val || 'Planned') ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
@@ -2517,6 +2557,8 @@ document.addEventListener('submit', async e => {
   if (!key) return;
   const body = itemBody(key, row || {});
   if (!body.name) { toast('名称不能为空', true); return; }
+  // 与就地编辑器同一条规矩：选了自定义天数却不填数，既算不出到期日，周期还显示成 "Every 0 days"
+  if (body.cycle === 'days' && !(+body.cycle_days > 0)) { toast('自定义周期要填天数', true); return; }
   try {
     if (id) await api(`/api/items/${id}`, { method: 'PUT', body: JSON.stringify(body) });
     else await api(`/api/collections/${encodeURIComponent(key)}/items`, { method: 'POST', body: JSON.stringify(body) });
@@ -2683,15 +2725,16 @@ async function openCollDialog(c) {
     }
   }
   const del = $('#coll-del');
-  del.hidden = !c || c.builtin;
+  // 预置库同样可删：它们只是"出厂自带"，不是不可动的内置件（后端一直放行）
+  del.hidden = !c;
   del.onclick = async () => {
-    if (!confirm(`删除库「${c.name}」及其全部条目？此操作不可撤销。`)) return;
+    const n = (state[c.key] || []).length;
+    if (!confirm(`删除库「${c.name}」${n ? `及其 ${n} 个条目` : ''}？此操作不可撤销。`)) return;
     try {
       await api(`/api/collections/${c.id}`, { method: 'DELETE' });
       d.close();
       toast('已删除');
-      if (state.tab === c.key) switchTab('subs');
-      await loadAll();
+      await loadAll(); // 当前标签落到哪张表，由 syncColls 统一收拾
     } catch (e) { toast(e.message, true); }
   };
   d.showModal();
