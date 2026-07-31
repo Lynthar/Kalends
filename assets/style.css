@@ -174,6 +174,10 @@ main { max-width: 1400px; margin: 0 auto; padding: .6rem 1.4rem 3rem; }
 .ledger li.d-week .days { color: var(--honey); }
 .ledger li.d-far  .days { color: var(--ink-2); }
 @keyframes urgent { 50% { text-shadow: 0 0 14px rgba(232, 84, 58, .65); } }
+/* 状态语义说不发提醒的条目（Ending＝到期不续）：留在时间线上，但不摆出紧迫的脸色 */
+.ledger li.quiet { opacity: .62; }
+.ledger li.quiet.d-over .days, .ledger li.quiet.d-soon .days, .ledger li.quiet.d-week .days { color: var(--ink-2); }
+.ledger li.quiet.d-over .days { animation: rise .45s var(--spring) calc(var(--i, 0) * 45ms) both; }
 .ledger .due { color: var(--ink-2); font-variant-numeric: tabular-nums; font-size: .85rem; }
 .ledger .what .nm { font-weight: 600; }
 .ledger .what .meta { color: var(--ink-2); font-size: .78rem; }
@@ -592,6 +596,17 @@ dialog h3 {
 .mchecks { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .8rem; max-height: 5.2rem; overflow-y: auto; }
 .mopts .check { font-weight: 500; }
 .mopts .mopt-add { font-size: .82rem !important; }
+/* 续费台账：设置页里的只读流水，条数会长，限高自己滚 */
+.ledger-log { max-height: 13rem; overflow-y: auto; }
+.lg-row {
+  display: grid; grid-template-columns: 5.6rem 1fr auto; gap: .7rem; align-items: baseline;
+  padding: .3rem .1rem; border-bottom: 1px solid var(--grid-line); font-size: .82rem;
+}
+.lg-row:last-child { border-bottom: 0; }
+.lg-d { color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.lg-n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lg-n small { color: var(--ink-2); margin-left: .45rem; font-size: .72rem; }
+.lg-a { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .chanset { border: 1px solid var(--line); border-radius: 12px; padding: .7rem .8rem .8rem; margin-top: 1rem; }
 .chanset .btn { margin-top: .7rem; }
 .ics-row { display: flex; gap: .5rem; }

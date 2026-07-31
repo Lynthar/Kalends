@@ -140,11 +140,16 @@ async fn overview(State(app): State<App>) -> R {
     })))
 }
 
+/// 续费台账，给设置页的只读列表用。带上库名与条目名——光有 kind + item_id 读不出是哪一笔；
+/// 条目名按 (id, 所属库) 取：items 的 id 在删除后会被复用，只按 id 取会张冠李戴。
+/// 库或条目已删的旧账原样留着，名字给空，由界面回落到编号。
 async fn ledger_list(State(app): State<App>) -> R {
     let conn = app.db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT id,kind,item_id,renewed_at,amount,currency,note FROM renewal_ledger
-         ORDER BY renewed_at DESC, id DESC LIMIT 500",
+        "SELECT l.id, l.kind, l.item_id, l.renewed_at, l.amount, l.currency, l.note, c.name,
+                (SELECT i.name FROM items i WHERE i.id = l.item_id AND i.collection_id = c.id)
+         FROM renewal_ledger l LEFT JOIN collections c ON c.key = l.kind
+         ORDER BY l.renewed_at DESC, l.id DESC LIMIT 500",
     )?;
     let rows: Vec<Value> = stmt
         .query_map([], |r| {
@@ -156,6 +161,8 @@ async fn ledger_list(State(app): State<App>) -> R {
                 "amount": r.get::<_, Option<f64>>(4)?,
                 "currency": r.get::<_, Option<String>>(5)?,
                 "note": r.get::<_, Option<String>>(6)?,
+                "coll_name": r.get::<_, Option<String>>(7)?,
+                "item_name": r.get::<_, Option<String>>(8)?,
             }))
         })?
         .collect::<rusqlite::Result<_>>()?;

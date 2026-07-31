@@ -1279,6 +1279,99 @@ await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-sch
 await sleep(400);
 await shot('09-dark');
 
+/* 17.5. 状态语义关掉提醒的条目（Ending＝到期不续）在到期栏里要看得出区别：
+   engine 一直随 upcoming 下发 muted，界面此前完全没用它，于是「不续」和「该续」长得一样。 */
+await send('Emulation.setEmulatedMedia', { features: [] });
+await sleep(250);
+await evl(`setUpWindow('all')`); // HostB（Ending）到期在 61 天后，默认 30 天窗口看不到
+await evl(`if (state.upFolded) toggleUpFold()`); // 上一段把到期栏折起来了，展开才看得见也才截得到
+await sleep(700);
+const quiet = await evl(`(() => {
+  const li = [...document.querySelectorAll('#up-list li')];
+  const b = li.find(x => x.textContent.includes('HostB'));
+  const n = li.find(x => x.textContent.includes('Netflix'));
+  return {
+    bQuiet: !!b?.classList.contains('quiet'),
+    bMeta: b?.querySelector('.meta')?.textContent || '',
+    bDays: b ? getComputedStyle(b.querySelector('.days')).color : '',
+    nQuiet: !!n?.classList.contains('quiet'),
+  };
+})()`);
+check('不提醒的条目在到期栏里淡下去', quiet.bQuiet === true, JSON.stringify(quiet));
+check('并且在小字里注明不提醒', quiet.bMeta.includes('不提醒'), quiet.bMeta);
+check('照常提醒的条目不受影响', quiet.nQuiet === false, JSON.stringify(quiet));
+await shot('11-quiet-item');
+
+/* 17.6. 「已续费」记的那笔账要能被看到：写台账这条路 e2e 从没走过，
+   而台账在界面上一直没有入口——点完按钮，账进了库就再也见不到。 */
+const ledgerTarget = (await (await fetch(APP + 'api/collections/subs/items')).json())
+  .find(r => r.name === 'Netflix');
+await evl(`switchTab('subs')`);
+await sleep(300);
+await evl(`document.querySelector('#subs-body tr[data-id="${ledgerTarget.id}"] [data-renew]').click()`);
+await sleep(1300);
+const led = await (await fetch(APP + 'api/ledger')).json();
+const entry = led.find(x => x.item_id === ledgerTarget.id && x.kind === 'subs');
+check('「已续费」写了一笔台账', !!entry, JSON.stringify(led.slice(0, 2)));
+check('台账带出条目名与库名', entry?.item_name === 'Netflix' && entry?.coll_name === '订阅', JSON.stringify(entry));
+check('续费把到期日往后推了',
+  (await (await fetch(APP + 'api/collections/subs/items')).json())
+    .find(r => r.id === ledgerTarget.id).next_renewal > ledgerTarget.next_renewal);
+await evl(`openSettings()`);
+await sleep(800);
+check('设置页里列出了这笔台账', await evl(
+  `[...document.querySelectorAll('#ledger-list .lg-row')].some(r => r.textContent.includes('Netflix'))`) === true);
+check('台账行带上了金额', await evl(
+  `[...document.querySelectorAll('#ledger-list .lg-row')].find(r => r.textContent.includes('Netflix'))?.querySelector('.lg-a').textContent`
+) === 'USD 15.49');
+await evl(`document.querySelector('#ledger-list').scrollIntoView({ block: 'center' })`);
+await sleep(400);
+await shot('12-ledger');
+await evl(`document.querySelector('#dlg-settings').close()`);
+await sleep(250);
+
+/* 17.7. 子行归属此前只能靠接口改：详情表单里根本没有「父条目」这一项，
+   界面上既建不出「服务 → 套餐档位」的比价结构，也解不开已有的。 */
+const parentRows = await (await fetch(APP + 'api/collections/subs/items')).json();
+const mjRow = parentRows.find(r => r.name === 'Midjourney');
+const orphan = parentRows.find(r => r.name === '旧订阅');
+await evl(`switchTab('subs')`);
+await evl(`(() => { views.subs.collapsed = []; saveViews(); renderColl('subs'); })()`); // 上一段折叠过父行
+await sleep(350);
+await evl(`openItemDialog('subs', state.subs.find(r => r.id === ${orphan.id}))`);
+await sleep(450);
+check('详情表单里有父条目下拉', await evl(`!!document.querySelector('#item-fields [data-parent]')`) === true);
+check('候选是同库顶层行、不含自己也不含子行', await evl(`(() => {
+  const sel = document.querySelector('#item-fields [data-parent]');
+  if (!sel) return '(没有父条目下拉)';
+  const vs = [...sel.options].map(o => o.textContent.trim());
+  return vs.includes('（顶层）') && vs.includes('Midjourney') && !vs.includes('旧订阅') && !vs.includes('Basic Plan');
+})()`) === true);
+await evl(`(() => { const s = document.querySelector('#item-fields [data-parent]'); if (s) s.value = '${mjRow.id}'; })()`);
+await sleep(200);
+await shot('13-parent-picker');
+await evl(`document.querySelector('#form-item').requestSubmit()`);
+await sleep(1200);
+check('选中父条目后落库成子行', (await (await fetch(APP + 'api/collections/subs/items')).json())
+  .find(r => r.id === orphan.id)?.parent_id === mjRow.id);
+check('表格里也缩进成子行', await evl(
+  `!!document.querySelector('#subs-body tr[data-id="${orphan.id}"]')?.classList.contains('subrow')`) === true);
+// 已经有子行的条目不能再挂到别人下面（两层上限，后端 check_parent 同样会拒）
+await evl(`openItemDialog('subs', state.subs.find(r => r.id === ${mjRow.id}))`);
+await sleep(450);
+check('已有子行的条目禁用父条目下拉', await evl(
+  `document.querySelector('#item-fields [data-parent]')?.disabled ?? '(没有父条目下拉)'`) === true);
+await evl(`document.querySelector('#dlg-item').close()`);
+await sleep(250);
+// 选回「（顶层）」＝脱离父行
+await evl(`openItemDialog('subs', state.subs.find(r => r.id === ${orphan.id}))`);
+await sleep(450);
+await evl(`(() => { const s = document.querySelector('#item-fields [data-parent]'); if (s) s.value = ''; })()`);
+await evl(`document.querySelector('#form-item').requestSubmit()`);
+await sleep(1200);
+check('选回顶层就脱离父行', (await (await fetch(APP + 'api/collections/subs/items')).json())
+  .find(r => r.id === orphan.id)?.parent_id == null);
+
 /* 18. 库删光也不能把界面打崩。放在最后跑——这一段会把预置库连数据一起删掉。
    预置库过去在界面上删不掉（后端一直放行、文档也写着可删），而新库的表格容器
    锚在 VPS 那张表上：VPS 一删，同一会话里再建库就是 null.after()，loadAll 断在那儿。 */

@@ -122,9 +122,10 @@ function renderUpcoming() {
     const d = it.days_left;
     const cls = d < 0 ? 'd-over' : d <= 3 ? 'd-soon' : d <= 7 ? 'd-week' : 'd-far';
     const daysTxt = d < 0 ? `${-d}<small>天前</small>` : d === 0 ? `今<small>到期</small>` : `${d}<small>天后</small>`;
-    const meta = [collName(it.kind), it.cycle, it.action].filter(Boolean).join(' · ');
+    // muted＝状态语义关掉了提醒（Ending 到期不续）：还在时间线上，但不该催人
+    const meta = [collName(it.kind), it.cycle, it.action, it.muted ? '不提醒' : ''].filter(Boolean).join(' · ');
     const li = document.createElement('li');
-    li.className = cls;
+    li.className = cls + (it.muted ? ' quiet' : '');
     li.style.setProperty('--i', idx);
     li.innerHTML = `
       <span class="days">${daysTxt}</span>
@@ -1628,6 +1629,36 @@ function openSettings() {
   f.em_to.value = em.to || '';
   $('#ics-url').value = `${location.origin}/calendar.ics?token=${st['ics.token'] || ''}`;
   $('#dlg-settings').showModal();
+  if (MODULES.includes('renewals')) loadLedger(); // 不挡对话框，读回来再填
+}
+
+/* 续费台账：每次「已续费 / 已保号」记的那一笔，此前只进库不露面。
+   条目或库删掉之后旧账仍在（那是历史），名字取不到就回落到编号。 */
+async function loadLedger() {
+  const box = $('#ledger-list');
+  box.textContent = '读取中…';
+  box.className = 'ledger-log note';
+  try {
+    const rows = await api('/api/ledger');
+    box.className = 'ledger-log';
+    if (!rows.length) {
+      box.className = 'ledger-log note';
+      box.textContent = '还没有记过账——表格里点「已续费 / 已保号」就会写一笔';
+      return;
+    }
+    box.innerHTML = '';
+    for (const r of rows) {
+      const div = document.createElement('div');
+      div.className = 'lg-row';
+      div.innerHTML = `<span class="lg-d">${esc(r.renewed_at)}</span>
+        <span class="lg-n">${esc(r.item_name || `#${r.item_id}`)}<small>${esc(r.coll_name || r.kind)}</small></span>
+        <span class="lg-a">${esc(money(r.currency, r.amount))}</span>`;
+      box.appendChild(div);
+    }
+  } catch (e) {
+    box.className = 'ledger-log note';
+    box.textContent = '台账读取失败：' + e.message;
+  }
 }
 
 function settingsBody() {
@@ -2464,8 +2495,26 @@ function openItemDialog(key, it) {
     }
     box.appendChild(lab);
   }
+  box.appendChild(parentRow(key, it));
   if (it) box.appendChild(logoRow(it));
   d.showModal();
+}
+
+/* 父条目：子行只有两层（服务 → 套餐档位），所以候选是同库的顶层行。
+   自己已经有子行时不能再挂到别人下面——后端 check_parent 一样会拒，这里先把口封上，
+   免得用户填完一整张表单才被退回。parent_id 不是注册字段，值单独读、单独写。 */
+function parentRow(key, it) {
+  const rows = state[key] || [];
+  const hasKids = !!it && rows.some(r => r.parent_id === it.id);
+  const cur = it?.parent_id ?? '';
+  const opts = rows.filter(r => !r.parent_id && (!it || r.id !== it.id));
+  const lab = document.createElement('label');
+  lab.innerHTML = `<span>父条目</span>
+    <select data-parent${hasKids ? ' disabled' : ''}${hasKids ? ' title="本条目已经有子行，子行只支持两层"' : ''}>
+      <option value="">（顶层）</option>
+      ${opts.map(r => `<option value="${r.id}"${r.id === cur ? ' selected' : ''}>${esc(r.name)}</option>`).join('')}
+    </select>`;
+  return lab;
 }
 
 /* 条目图标：上传/清除各走自己的端点，与表单的整行 PUT 不是一回事。
@@ -2538,6 +2587,9 @@ function itemBody(key, row) {
     else if (val == null || val === '' || (Array.isArray(val) && !val.length)) delete patch.extra[f.key];
     else patch.extra[f.key] = val;
   }
+  // 父条目有自己的下拉（不是注册字段）：选「（顶层）」＝ null ＝ 脱离父行
+  const psel = document.querySelector('#item-fields [data-parent]');
+  if (psel) patch.parent_id = psel.value ? +psel.value : null;
   return itemBodyFromRow(key, { ...row, ...patch });
 }
 

@@ -12,7 +12,7 @@ Everything that expires lands on one timeline. Subscriptions, SIM keep-alives an
 
 Each collection owns its columns and decides how due dates work: store the next due date directly, or derive it from the last renewal plus a cycle. Cycles run weekly through triennial, plus lifetime and arbitrary day counts, so a 181-day SIM keep-alive is a normal setting rather than a workaround.
 
-Prices are stored in their original currency and totalled per currency; nothing is quietly converted. Items nest one level deep (service → tier), so the plans you are comparing and the one you actually pay for sit in the same table.
+Prices are stored in their original currency and totalled per currency; nothing is quietly converted. Items nest one level deep (service → tier), so the plans you are comparing and the one you actually pay for sit in the same table. Marking something renewed moves the date on and writes a ledger entry you can read back from the settings page.
 
 Status values carry meaning rather than decoration. Each one declares whether it counts toward spend, fires alerts, and shows on the timeline, and you flip those three from the column header menu. `Deferred` has all three off, which turns it into a price-comparison shelf. `Ending` keeps its calendar entry and stops nagging.
 
@@ -66,7 +66,7 @@ Keep the SQLite file on local disk. Locking over SMB or NFS is not reliable enou
 
 每个库自己决定有哪些列、到期怎么算：要么直接记下次到期日，要么从上次续费按周期推。周期从周付到三年付，另有买断和任意天数，181 天的 SIM 保号在这里是个正常档位，不用绕。
 
-价格按原币存、分币种统计，不替你折算。条目可以套一层父子（服务 → 套餐档位），于是比价的那几档和你真在付的那档待在同一张表里。
+价格按原币存、分币种统计，不替你折算。条目可以套一层父子（服务 → 套餐档位），于是比价的那几档和你真在付的那档待在同一张表里。点一下「已续费」把日期往后推，同时记一笔账，可以在设置页里回看。
 
 状态不只是个标签。每个状态值自己声明计不计支出、发不发提醒、上不上时间线，这三个勾在表头菜单里改。`Deferred` 三个全关，于是成了比价目录；`Ending` 留在日历里，但不再提醒你。
 
