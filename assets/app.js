@@ -297,6 +297,9 @@ const customFields = tab => state.fields
   .filter(f => f.tbl === tab && !f.builtin)
   .sort((a, b) => a.pos - b.pos || a.id - b.id);
 const fieldOf = (tab, k) => state.fields.find(f => f.tbl === tab && f.key === k);
+// 值挂在行的 extra 里还是顶层：库的列看注册表的 src，媒体的自定义列看 custom。
+// 这也是"这列归不归用户管"的判据——改名/删除只对 extra 列开放，与后端一致。
+const inExtra = col => (col.src ? col.src === 'extra' : !!col.custom);
 
 // 把自定义列并进 COLS 并在操作列前插 th；rebuildHead 前会先清掉旧的
 function injectCustomCols(tab) {
@@ -1209,12 +1212,16 @@ function openHeadMenu(tab, th) {
   if (Object.keys(v.widths || {}).length) {
     items.push({ ic: '⟺', t: '还原列宽', act: () => { v.widths = {}; saveViews(); applyWidths(tab); } });
   }
-  if (COLS[tab][k].custom) {
+  // 值挂在 extra 里的列都归用户管——手加的自定义列，以及建库时按模板播下来的域字段。
+  // 判据用 src 而不是 builtin：预置库的分类/地点/规格参数一样是域字段，凭什么不能改名删除；
+  // 引擎真列（价格/周期/到期日）与算出来的列没有这两项，后端也只认 src='extra'。
+  if (inExtra(COLS[tab][k])) {
+    const fid = fieldOf(tab, k)?.id;
     items.push({ sep: 1 });
     items.push({ ic: '✎', t: '重命名列', act: () => openRenameColPop(tab, k, th), keepPop: true });
     items.push({ ic: '✕', t: '删除列', act: async () => {
       if (!confirm(`删除列「${th.dataset.label}」？该列在所有行的值将被清除，不可撤销。`)) return;
-      if (await fieldCall(`/api/fields/${COLS[tab][k].custom}`, 'DELETE', {})) await rebuildHead(tab);
+      if (await fieldCall(`/api/fields/${fid}`, 'DELETE', {})) await rebuildHead(tab);
     } });
   }
   popEl = document.createElement('div');
@@ -1457,9 +1464,6 @@ function pickEditor(tab, it, td, k, save) {
   }
   placePop(box, td);
 }
-
-// 值挂在行的 extra 里还是顶层：库的列看注册表的 src，媒体的自定义列看 custom
-const inExtra = col => (col.src ? col.src === 'extra' : !!col.custom);
 
 // 多选：勾选并集实时存；同样可现场新建选项
 function multiEditor(tab, it, td, k, save) {
@@ -2713,7 +2717,19 @@ function fillCollFields(c) {
     // 名称列不给关：它是行的唯一入口，且关掉会让表头与行的字段集对不上
     const locked = f.key === 'name';
     row.innerHTML = `<span class="fp-v">${esc(f.name || f.key)}</span>
-      <label class="check sem"${locked ? ' title="名称列承载详情入口，不能撤下表格"' : ''}><input type="checkbox"${f.shown || locked ? ' checked' : ''}${locked ? ' disabled' : ''}><span>上表</span></label>`;
+      <label class="check sem"${locked ? ' title="名称列承载详情入口，不能撤下表格"' : ''}><input type="checkbox"${f.shown || locked ? ' checked' : ''}${locked ? ' disabled' : ''}><span>上表</span></label>
+      ${f.src === 'extra'
+        ? '<button type="button" class="btn link fp-del" data-del title="删除此列">✕</button>'
+        : '<span class="fp-del"></span>'}`;
+    // 不上表的列没有表头，表头菜单那条删除入口够不着——这儿是它们唯一的出口
+    row.querySelector('[data-del]')?.addEventListener('click', async () => {
+      if (!confirm(`删除列「${f.name || f.key}」？该列在所有行的值将被清除，不可撤销。`)) return;
+      try {
+        await api(`/api/fields/${f.id}`, { method: 'DELETE' });
+        await rebuildHead(c.key); // 顺带刷字段注册表，下面这次重绘读到的才是删后的字段集
+        fillCollFields(c);
+      } catch (err) { toast(err.message, true); }
+    });
     if (!locked) row.querySelector('input').onchange = async e => {
       const on = e.target.checked;
       try {

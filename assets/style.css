@@ -329,7 +329,11 @@ main { max-width: 1400px; margin: 0 auto; padding: .6rem 1.4rem 3rem; }
 .vpill .x:hover { opacity: 1; color: var(--coral); }
 /* 表头属性菜单 */
 .thmenu {
-  position: fixed; z-index: 40; min-width: 11.5rem; max-height: 19rem; overflow-y: auto;
+  /* 最长的一份菜单（可改选项的 extra 列：类型/两个排序/筛选/选项/隐藏/还原列宽/改名/删除）
+     要能整份放下——之前 19rem 差 18px，末项「删除列」被切成半行藏在滚动条后面。
+     视口矮时仍退回滚动，别让浮层长出视口。 */
+  position: fixed; z-index: 40; min-width: 11.5rem;
+  max-height: min(24rem, calc(100vh - 4rem)); overflow-y: auto;
   background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
   padding: .3rem; box-shadow: var(--shadow-lift);
   animation: dlg-in .28s var(--spring);
@@ -480,6 +484,8 @@ th.drop-r { box-shadow: inset -3px 0 0 var(--aqua); }
 /* 库设置里的字段面板：拖动调序 + 上不上表 */
 .fpanel { max-height: 15rem; overflow: auto; border: 1px solid var(--line); border-radius: .55rem; padding: .3rem .55rem; }
 .fpanel .opt-row { font-size: .8rem; }
+/* 删除只对 extra 列开放，不可删的行留一个同宽空位，好让「上表」排在同一竖线上 */
+.fpanel .fp-del { flex: none; width: 1.15rem; text-align: center; padding: 0; }
 .addcol {
   border: 0; background: none; cursor: pointer; color: var(--ink-2); font: inherit;
   font-size: .95rem; padding: 0 .2rem; border-radius: 6px; line-height: 1.3;

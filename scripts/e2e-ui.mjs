@@ -1065,6 +1065,97 @@ check('状态格仍不给现场新建（只挑不建）', await evl(
   `!document.querySelector('.cellpop .opt-add')`) === true);
 await evl(`closePop()`);
 
+/* 12i-2. 哪些列删得掉：判据是 src='extra'（值挂在行里），不是 builtin。
+   预置库播下来的域字段（订阅的分类、VPS 的地点/规格参数）与手加的自定义列同权，都能改名删除；
+   引擎真列与算出来的列一项都不给。**shown=0 的列压根没有表头**，表头菜单够不着它们，
+   所以库设置的字段面板里那颗 ✕ 是它们唯一的出口——曾经两处都没有，用户一列也删不掉。 */
+const delFs = await (await fetch(`${APP}api/fields`)).json();
+const thMenuOf = async (tab, k) => {
+  await evl(`closePop()`);
+  await evl(`switchTab('${tab}')`);
+  await sleep(300);
+  await evl(`document.querySelector('.tablewrap[data-tab="${tab}"] th[data-k="${k}"]').click()`);
+  await sleep(250);
+  const txt = await evl(`[...document.querySelectorAll('.thmenu .mi')].map(x => x.textContent).join('|')`);
+  await evl(`closePop()`);
+  await sleep(120);
+  return txt;
+};
+// 预置库的域字段：builtin=1 但值在 extra 里，照样归用户管
+const seededExtra = delFs.find(f => f.tbl === 'subs' && f.builtin && f.src === 'extra' && f.shown);
+check('预置库有 builtin 的 extra 域字段（本段前提）', !!seededExtra, JSON.stringify(seededExtra));
+const mSeeded = await thMenuOf('subs', seededExtra.key);
+check(`预置域字段「${seededExtra.name}」菜单里有删除列`, mSeeded.includes('删除列'), mSeeded);
+check(`预置域字段「${seededExtra.name}」菜单里有重命名列`, mSeeded.includes('重命名列'), mSeeded);
+// 多出改名/删除两项后，最长的那份菜单曾撑破 max-height：末项「删除列」被切成半行藏进滚动条
+await evl(`switchTab('subs')`);
+await sleep(300);
+await evl(`document.querySelector('.tablewrap[data-tab="subs"] th[data-k="${seededExtra.key}"]').click()`);
+await sleep(250);
+const menuBox = await evl(`(() => {
+  const m = document.querySelector('.thmenu');
+  const r = m.getBoundingClientRect();
+  return { cut: m.scrollHeight > m.clientHeight, bottom: Math.round(r.bottom), vh: innerHeight };
+})()`);
+check('最长的表头菜单整份放得下，不靠内部滚动', menuBox.cut === false, JSON.stringify(menuBox));
+check('菜单也没长出视口', menuBox.bottom <= menuBox.vh, JSON.stringify(menuBox));
+await evl(`closePop()`);
+await sleep(120);
+// 负向：引擎真列与算出来的列不给这两项，删了没有意义（后端也只认 src='extra'）
+const mCol = await thMenuOf('subs', 'price');
+check('引擎真列（价格）没有删除列', !mCol.includes('删除列'), mCol);
+check('引擎真列（价格）没有重命名列', !mCol.includes('重命名列'), mCol);
+const vpsCalc = delFs.find(f => f.tbl === 'vps' && f.src === 'calc' && f.shown);
+const mCalc = await thMenuOf('vps', vpsCalc.key);
+check(`算出来的列（${vpsCalc.name}）没有删除列`, !mCalc.includes('删除列'), mCalc);
+check('后端同样拒绝删非 extra 列',
+  (await fetch(`${APP}api/fields/${delFs.find(f => f.tbl === 'subs' && f.key === 'price').id}`,
+    { method: 'DELETE' })).status === 404);
+
+// 字段面板：extra 行有 ✕，真列/算出来的行没有
+await evl(`closePop()`);
+await evl(`switchTab('${BK}')`);
+await sleep(300);
+await evl(`openCollDialog(collOf('${BK}'))`);
+await sleep(600);
+const panelDel = await evl(`(() => {
+  const rows = [...document.querySelectorAll('#coll-fields .opt-row')];
+  return rows.map(r => [r.querySelector('.fp-v').textContent, !!r.querySelector('[data-del]')]);
+})()`);
+const panelBy = Object.fromEntries(panelDel);
+const nameOfKey = k => delFs.find(f => f.tbl === BK && f.key === k)?.name;
+check('字段面板给 extra 列出了删除按钮',
+  panelBy[nameOfKey('registrar')] === true && panelBy[nameOfKey('dns')] === true, JSON.stringify(panelDel));
+check('字段面板不给真列/算出来的列删除按钮',
+  panelBy['名称'] === false && panelBy['费用'] === false && panelBy['备注'] === false, JSON.stringify(panelDel));
+await shot('16-field-panel-delete');
+
+// shown=0 的列：表头上没有它，只能从面板删——删完表头不该有任何变化
+const headBefore = await evl(`[...document.querySelectorAll('.tablewrap[data-tab="${BK}"] thead th')].map(t => t.dataset.k).join()`);
+check('待删的 dns 本来就不在表头上', !headBefore.split(',').includes('dns'), headBefore);
+const rowsBefore = await evl(`document.querySelectorAll('#coll-fields .opt-row').length`);
+await evl(`[...document.querySelectorAll('#coll-fields .opt-row')]
+  .find(r => r.querySelector('.fp-v').textContent === ${JSON.stringify(nameOfKey('dns'))})
+  ?.querySelector('[data-del]')?.click()`);
+await sleep(1200);
+check('面板删掉不上表的列：注册表里已注销',
+  !(await (await fetch(`${APP}api/fields`)).json()).some(f => f.tbl === BK && f.key === 'dns'));
+check('面板少一行',
+  await evl(`document.querySelectorAll('#coll-fields .opt-row').length`) === rowsBefore - 1);
+check('表头不受影响（本来就没有这列）',
+  await evl(`[...document.querySelectorAll('.tablewrap[data-tab="${BK}"] thead th')].map(t => t.dataset.k).join()`) === headBefore);
+
+// 上表的 extra 列从面板删掉，表头要跟着收回去
+await evl(`[...document.querySelectorAll('#coll-fields .opt-row')]
+  .find(r => r.querySelector('.fp-v').textContent === ${JSON.stringify(nameOfKey('registrar'))})
+  ?.querySelector('[data-del]')?.click()`);
+await sleep(1200);
+check('面板删掉上表的列：表头跟着收回',
+  !(await evl(`[...document.querySelectorAll('.tablewrap[data-tab="${BK}"] thead th')].map(t => t.dataset.k).join()`))
+    .split(',').includes('registrar'));
+await evl(`document.querySelector('#dlg-coll').close()`);
+await sleep(200);
+
 check('删掉收尾测试库', (await fetch(`${APP}api/collections/${bc.id}`, { method: 'DELETE' })).ok);
 await evl(`loadAll()`);
 await sleep(900);
