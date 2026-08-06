@@ -3,7 +3,7 @@
 const $ = s => document.querySelector(s);
 const MODULES = window.KALENDS_MODULES || ['renewals', 'media'];
 const state = {
-  overview: null, subs: [], sims: [], vps: [], settings: {}, media: [], fields: [],
+  overview: null, subs: [], sims: [], vps: [], settings: {}, media: [], fields: [], fx: null,
   tab: 'subs', page: 'renewals', mKind: '全部', mStatus: '全部', mQ: '',
   upWindow: '30', upFolded: localStorage.getItem('kalends.upfold') === '1',
 };
@@ -62,6 +62,39 @@ function esc(s) {
 }
 
 const money = (c, p) => (p == null || !c) ? '' : `${c} ${Number(p).toFixed(2)}`;
+
+/* ── 币种折算：只发生在呈现层 ────────────────────────────────────────────
+   原币入账那条不变（items.price + items.currency 存的永远是原币），这里只决定
+   「显示成什么」。汇率表整份由 /api/fx 下发（内置平均汇率打底、拉到的实时值盖上面），
+   所以换算只有前端这一份实现。通知文案与 ICS 不走这里——那是发到外部系统的内容，
+   数字要对得上真实账单。 */
+const fxCode = c => String(c || '').trim().toUpperCase();
+const fxRate = c => state.fx?.rates?.[fxCode(c)];
+const fxDisplay = () => state.fx?.display || '';
+
+// 折不出来就给 null（表里没这个币种的报价）——编一个数字比不显示更糟
+function fxConv(amount, from, to) {
+  if (amount == null || !from || !to) return null;
+  const [f, t] = [fxCode(from), fxCode(to)];
+  if (f === t) return amount;
+  const [a, b] = [fxRate(f), fxRate(t)];
+  return a && b ? amount / a * b : null;
+}
+
+/// 一笔钱该怎么显示：{main 主行, sub 小字里的原币}。没开折算或折不出来时 sub 为空。
+function moneyView(c, p) {
+  if (p == null || !c) return { main: '', sub: '' };
+  const to = fxDisplay();
+  const v = to && fxCode(to) !== fxCode(c) ? fxConv(p, c, to) : null;
+  return v == null ? { main: money(c, p), sub: '' } : { main: money(to, v), sub: money(c, p) };
+}
+
+// 金额的通用呈现：折算值在主行，原币缩在小字里（没开折算时就只有主行）
+function amtHtml(c, p) {
+  const { main, sub } = moneyView(c, p);
+  if (!main) return '';
+  return esc(main) + (sub ? `<span class="orig">${esc(sub)}</span>` : '');
+}
 // 空名条目（表尾新建的空行还没填）要有个看得见的占位，否则整格空着、⤢ 入口也难找
 const nameCell = n => (n ? esc(n) : '<span class="unnamed">未命名</span>');
 
@@ -77,10 +110,11 @@ async function loadAll() {
   const hasR = MODULES.includes('renewals');
   const hasM = MODULES.includes('media');
   // 先取概览（里面带库清单）与设置，之后才知道有哪些库要拉条目
-  [state.overview, state.settings, state.media] = await Promise.all([
+  [state.overview, state.settings, state.media, state.fx] = await Promise.all([
     hasR ? api('/api/overview') : { today: '', upcoming: [], totals: [], collections: [] },
     api('/api/settings'),
     hasM ? api('/api/media') : [],
+    api('/api/fx'), // 汇率表整份下发，折算在呈现层做
   ]);
   const wins = ['7', '14', '30', '60', '90', '180', 'all'];
   state.upWindow = wins.includes(state.settings['ui.upcoming_days'])
@@ -134,7 +168,7 @@ function renderUpcoming() {
       <span class="days">${daysTxt}</span>
       <span class="due">${esc(it.due)}</span>
       <span class="what"><div class="nm">${esc(it.name)}</div><div class="meta">${esc(meta)}</div></span>
-      <span class="amt">${esc(money(it.currency, it.price))}</span>
+      <span class="amt">${amtHtml(it.currency, it.price)}</span>
       <button class="btn mini ghost" data-renew="${it.kind}:${it.id}" type="button">已${esc(it.verb || '续费')}</button>`;
     ol.appendChild(li);
   });
@@ -196,7 +230,8 @@ async function doRenew(key) {
 /* ── 支出 ── */
 function renderTotals() {
   const el = $('#totals');
-  const ts = state.overview.totals;
+  // 后端恒按原币分币种给（engine::totals），折算在这里做
+  const ts = totalsShown(state.overview.totals);
   el.innerHTML = ts.length ? '' : '<span class="note">暂无在订支出</span>';
   for (const t of ts) {
     const div = document.createElement('div');
@@ -206,6 +241,27 @@ function renderTotals() {
       <span class="y">≈ ${t.annual.toFixed(2)} /年</span>`;
     el.appendChild(div);
   }
+  $('#totals-hint').textContent = fxDisplay() ? `仅在订项，折算成 ${fxDisplay()}` : '仅在订项，分币种';
+  // 折算时把折不出来的币种如实说出来，别让总额看着像"全都算进去了"
+  const missed = fxDisplay() ? state.overview.totals.filter(t => fxConv(t.monthly, t.currency, fxDisplay()) == null) : [];
+  $('#totals-note').hidden = !missed.length;
+  if (missed.length) {
+    $('#totals-note').textContent = `${missed.map(t => t.currency).join('、')} 没有汇率，未计入`;
+  }
+}
+
+/// 开了折算就并成一笔，否则原样分币种。折不出来的币种不并入，单独留一行。
+function totalsShown(ts) {
+  const to = fxDisplay();
+  if (!to) return ts;
+  let m = 0, has = false;
+  const rest = [];
+  for (const t of ts) {
+    const v = fxConv(t.monthly, t.currency, to);
+    if (v == null) rest.push(t);
+    else { m += v; has = true; }
+  }
+  return has ? [{ currency: to, monthly: m, annual: m * 12 }, ...rest] : rest;
 }
 
 /* ── 表格视图：列排序 / 列筛选 / 表内搜索 ── */
@@ -1877,6 +1933,41 @@ function cycleEditor(tab, it, td) {
   placePop(box, td);
 }
 
+/* 币种候选：数据里用过的 ∪ 汇率表里有的。词表本就从数据里长，汇率表只是让空库首装时
+   下拉里也有东西可选（否则第一条得先手打一个 ISO 码）。 */
+function currencyOptions(tab, cur) {
+  const used = new Set((state[tab] || []).map(r => fxCode(r.currency)).filter(Boolean));
+  if (cur) used.add(fxCode(cur));
+  const rest = Object.keys(state.fx?.rates || {}).filter(c => !used.has(c));
+  return [...[...used].sort(), ...rest];
+}
+
+/* 费用格是复合格：金额 + 币种（币种不再单独占一列，2026-08-07 合并）。
+   与周期那格同一形状——按列键special case，不为此新造一种字段类型。 */
+function priceEditor(tab, it, td) {
+  const box = cellPopShell(td, colLabel(tab, 'price'));
+  const cur = fxCode(it.currency);
+  box.insertAdjacentHTML('beforeend', `<div class="fp-form">
+    <input class="fp-q" type="number" step="any" data-price placeholder="金额" value="${esc(String(it.price ?? ''))}">
+    <select class="mini-select fp-op" data-cur><option value="">—</option>${
+      currencyOptions(tab, cur).map(c => `<option value="${esc(c)}"${c === cur ? ' selected' : ''}>${esc(c)}</option>`).join('')
+    }</select>
+  </div><div class="cp-foot"><button type="button" class="btn primary mini">保存</button></div>`);
+  const amt = box.querySelector('[data-price]');
+  const sel = box.querySelector('[data-cur]');
+  const commit = () => {
+    closePop();
+    patchRow(tab, it, {
+      price: amt.value === '' ? undefined : +amt.value,
+      currency: sel.value || undefined,
+    });
+  };
+  box.querySelector('.cp-foot button').onclick = commit;
+  box.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') commit(); });
+  placePop(box, td);
+  amt.focus();
+}
+
 function openCellPop(tab, it, k, td) {
   const id = `cell:${tab}:${it.id}:${k}`;
   if (popKey === id) { closePop(); return; }
@@ -1891,6 +1982,8 @@ function openCellPop(tab, it, k, td) {
   if (col.src === 'calc') return openItemDialog(tab, it);
   // 周期是复合格：周期枚举 + 自定义天数
   if (k === 'cycle') return cycleEditor(tab, it, td);
+  // 费用也是：金额 + 币种（币种并进了这一格，不再单独占一列）
+  if (k === 'price' && col.src === 'col') return priceEditor(tab, it, td);
   const save = v => patchRow(tab, it, toExtra ? extraPatch(it, k, v) : { [spec.f || k]: v });
   if (spec.inputs) return inputsEditor(tab, it, td, spec.inputs, patch => patchRow(tab, it, patch));
   if (t === 'sel' || t === 'status') return pickEditor(tab, it, td, k, save);
@@ -1922,6 +2015,36 @@ document.addEventListener('click', e => {
 });
 
 /* ── 设置页 ── */
+/* 设置页的币种折算那一栏。候选＝汇率表里有的 ∪ 数据里用过的（后者可能没有报价，
+   仍然让它出现在下拉里，选中后界面会如实说"这个币种没有汇率"而不是悄悄漏掉）。 */
+function syncFxPanel() {
+  const fx = state.fx || { rates: {}, live: [] };
+  const used = new Set();
+  for (const c of colls()) for (const r of state[c.key] || []) if (r.currency) used.add(fxCode(r.currency));
+  const codes = [...new Set([...Object.keys(fx.rates || {}), ...used])].sort();
+  const sel = $('#fx-display');
+  const cur = fxCode(state.settings['fx.display']);
+  sel.innerHTML = '<option value="">不折算（分币种显示）</option>'
+    + codes.map(c => `<option value="${esc(c)}"${c === cur ? ' selected' : ''}>${esc(c)}${fx.rates[c] ? '' : '（无汇率）'}</option>`).join('');
+  $('#fx-status').textContent = fx.live?.length
+    ? `实时汇率 ${fx.live.length} 种，取自 ${fx.fetched_at || '未知日期'}（${fx.source}）；其余用内置平均汇率 ${fx.baseline_period}`
+    : `当前用内置平均汇率（${fx.baseline_period}）。未拉过实时汇率——这是唯一一处按需出网，不点就不发生。`;
+}
+
+$('#fx-refresh').onclick = async e => {
+  const btn = e.target;
+  btn.disabled = true;
+  btn.textContent = '拉取中…';
+  try {
+    state.fx = await api('/api/fx/refresh', { method: 'POST', body: '{}' });
+    syncFxPanel();
+    toast(`已更新 ${state.fx.live.length} 种汇率`);
+    renderAll();
+  } catch (err) { toast(err.message, true); }
+  btn.disabled = false;
+  btn.textContent = '拉取实时汇率';
+};
+
 function openSettings() {
   const st = state.settings;
   const f = $('#form-settings').elements;
@@ -1935,6 +2058,7 @@ function openSettings() {
   } catch { f.thresholds.value = ''; }
   f.digest_time.value = st['notify.digest_time'] || '09:00';
   f.window_days.value = st['notify.window_days'] || '14';
+  syncFxPanel();
   let tg = {}, em = {};
   try { tg = JSON.parse(st['notify.telegram'] || '{}'); } catch {}
   try { em = JSON.parse(st['notify.email'] || '{}'); } catch {}
@@ -1975,7 +2099,7 @@ async function loadLedger() {
       div.className = 'lg-row';
       div.innerHTML = `<span class="lg-d">${esc(r.renewed_at)}</span>
         <span class="lg-n">${esc(r.item_name || `#${r.item_id}`)}<small>${esc(r.coll_name || r.kind)}</small></span>
-        <span class="lg-a">${esc(money(r.currency, r.amount))}</span>`;
+        <span class="lg-a">${amtHtml(r.currency, r.amount)}</span>`;
       box.appendChild(div);
     }
   } catch (e) {
@@ -1995,6 +2119,7 @@ function settingsBody() {
     'notify.thresholds': JSON.stringify(thresholds.length ? thresholds : [14, 7, 3, 1, 0]),
     'notify.digest_time': f.digest_time.value || '09:00',
     'notify.window_days': String(+f.window_days.value || 14),
+    'fx.display': f.fx_display.value,
     'notify.telegram': JSON.stringify({
       enabled: f.tg_enabled.checked, bot_token: f.tg_token.value.trim(),
       chat_id: f.tg_chat.value.trim(), proxy: f.tg_proxy.value.trim(),
@@ -2685,8 +2810,11 @@ function renderColl(key) {
       if (f.key === 'status') return `<td>${stPill(it.status)}</td>`;
       if (f.key === 'left') return `<td class="wide">${leftBar(it)}</td>`;
       if (f.key === 'price') {
+        // 币种并进了这一格：主行是金额（开了折算就是折算值），小字里挂原币与周期
         const cyc = cycleShown ? '' : cycleText(it);
-        return `<td class="amt">${esc(money(it.currency, it.price))}${cyc ? `<div class="muted" style="font-size:.72rem">${esc(cyc)}</div>` : ''}</td>`;
+        const { main, sub } = moneyView(it.currency, it.price);
+        const note = [sub, cyc].filter(Boolean).join(' · ');
+        return `<td class="amt">${esc(main)}${note ? `<div class="muted" style="font-size:.72rem">${esc(note)}</div>` : ''}</td>`;
       }
       if (f.ftype === 'date') return `<td class="cdate">${esc(v || '')}</td>`;
       if (f.ftype === 'tpl') return `<td class="cdate">${esc(v || '')}</td>`;
@@ -2859,6 +2987,16 @@ function fieldControl(key, f, it) {
   } else if (f.ftype === 'status') {
     const opts = statusOrder(key);
     lab.innerHTML = `<span>${esc(f.name || f.key)}</span><select data-f="${esc(f.key)}">${opts.map(o => `<option${o === (val || 'Planned') ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+  } else if (f.key === 'price' && f.src === 'col') {
+    // 币种并进费用栏：金额与币种一起填。currency 不是注册字段（迁移 0013 撤了它的列），
+    // 值由这枚 select 写，itemBody 单独读——与 parent_id 同一处理方式
+    const cur = fxCode(it?.currency);
+    lab.className = 'span2';
+    lab.innerHTML = `<span>${esc(f.name || f.key)}</span>
+      <span class="pricebox"><input type="number" step="any" data-f="price" value="${esc(val)}">
+      <select data-f="currency"><option value="">—</option>${
+        currencyOptions(key, cur).map(c => `<option value="${esc(c)}"${c === cur ? ' selected' : ''}>${esc(c)}</option>`).join('')
+      }</select></span>`;
   } else {
     const type = f.ftype === 'num' ? 'number' : f.ftype === 'date' ? 'date' : 'text';
     lab.innerHTML = `<span>${esc(f.name || f.key)}</span><input type="${type}"${type === 'number' ? ' step="any"' : ''} data-f="${esc(f.key)}" value="${esc(val)}">`;
@@ -2962,6 +3100,9 @@ function itemBody(key, row) {
   // 父条目有自己的下拉（不是注册字段）：选「（顶层）」＝ null ＝ 脱离父行
   const psel = document.querySelector('#item-fields [data-parent]');
   if (psel) patch.parent_id = psel.value ? +psel.value : null;
+  // 币种同理：它并进了费用栏，迁移 0013 起不再是注册字段，上面那圈循环读不到它
+  const csel = document.querySelector('#item-fields [data-f="currency"]');
+  if (csel) patch.currency = csel.value;
   return itemBodyFromRow(key, { ...row, ...patch });
 }
 

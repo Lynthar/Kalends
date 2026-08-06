@@ -820,3 +820,11 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
 .tab.tab-add { color: var(--ink-2); opacity: .75; }
 .tab.tab-add:hover { color: var(--aqua-deep); opacity: 1; }
 .tab.tab-add::after { display: none; }
+
+/* 金额里的原币小字：折算后主行是折算值，原币缩在后面（表格里另起一行，别处跟在后面） */
+.orig { color: var(--muted); font-size: .72rem; margin-left: .35rem; font-weight: 500; }
+.ledger .amt .orig, .lg-a .orig { display: block; margin: 0; }
+/* 详情表单里的费用栏：金额 + 币种一起填 */
+.pricebox { display: flex; gap: .4rem; }
+.pricebox input { flex: 1 1 auto; min-width: 0; }
+.pricebox select { flex: 0 0 6.5rem; }

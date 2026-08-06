@@ -58,9 +58,10 @@
   <section class="panel">
     <div class="rubric-row">
       <h2 class="rubric">月度支出</h2>
-      <span class="note">仅在订项，分币种</span>
+      <span class="note" id="totals-hint">仅在订项，分币种</span>
     </div>
     <div id="totals" class="totals"></div>
+    <p class="note" id="totals-note" hidden></p>
   </section>
 
   <section class="panel">
@@ -238,6 +239,18 @@
       <label>摘要发送时间<input name="digest_time" type="time"></label>
       <label>摘要窗口（天）<input name="window_days" type="number" min="1"></label>
     </div>
+    <fieldset class="chanset">
+      <legend>币种折算</legend>
+      <div class="fgrid">
+        <label>统一显示币种
+          <select name="fx_display" id="fx-display"><option value="">不折算（分币种显示）</option></select>
+        </label>
+        <label class="span2 note-label">
+          <span id="fx-status" class="note"></span>
+        </label>
+      </div>
+      <button type="button" class="btn ghost" id="fx-refresh">拉取实时汇率</button>
+    </fieldset>
     <fieldset class="chanset">
       <legend><label class="check"><input type="checkbox" name="tg_enabled">Telegram</label></legend>
       <div class="fgrid">

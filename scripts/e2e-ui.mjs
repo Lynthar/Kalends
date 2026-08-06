@@ -728,7 +728,7 @@ await evl(`switchTab('${NK}')`);
 await sleep(400);
 const nheads = await evl(`[...document.querySelectorAll('.tablewrap[data-tab="${NK}"] thead th')].map(t => t.dataset.k)`);
 check('表头由字段注册表生成（自定义列在操作列前）',
-  nheads.slice(0, 7).join() === 'name,status,price,currency,cycle,next_renewal,notes'
+  nheads.slice(0, 6).join() === 'name,status,price,cycle,next_renewal,notes'
   && nheads.at(-1) === 'ops' && nheads.some(k => /^c\d+$/.test(k)), nheads);
 check('两行条目渲染', await evl(`document.querySelectorAll('#${NK}-body tr').length`) === 2);
 check('Active 行有续费按钮、Planned 行没有（状态语义驱动）', await evl(`(() => {
@@ -980,7 +980,7 @@ await evl(`openCollDialog(collOf('${BK}'))`);
 await sleep(600);
 check('库设置浮层出现字段面板',
   await evl(`!document.querySelector('#coll-fields-box').hidden
-    && document.querySelectorAll('#coll-fields .opt-row').length === 13`) === true);
+    && document.querySelectorAll('#coll-fields .opt-row').length === 12`) === true);
 const fb = await evl(`[...document.querySelectorAll('#coll-fields .opt-row .fp-v')].map(e => e.textContent)`);
 await evl(`(() => {
   const rows = [...document.querySelectorAll('#coll-fields .opt-row')];
@@ -1554,7 +1554,7 @@ check('名称格里的 ⤢ 详情入口还看得见', await evl(`(() => {
   return !!td && td.style.display !== 'none' && !!td.querySelector('.rowopen');
 })()`) === true, nameCellDiag);
 
-/* 17.10. 详情表单的开放词表（币种/分类/支付方式…）建库时是空的，而表单的 sel 是个纯
+/* 17.10. 详情表单的开放词表（分类/支付方式/注册商…）建库时是空的，而表单的 sel 是个纯
    下拉：空库首装点「＋新建」，这几栏一个候选都没有、也没处输入，只能先存个残缺条目再
    回表格用就地编辑器把值造出来。周期是固定档位词表，不给现场新增——放开了会有人把
    Monthly 这样的文案写回 items.cycle，按周期推日期的库整条掉出到期时间线。 */
@@ -1563,16 +1563,16 @@ await sleep(450);
 check('开放词表的下拉旁有「新选项」输入', await evl(
   `!!document.querySelector('#item-fields .sopts select[data-f="category"]')
    && !!document.querySelector('#item-fields .sopts .sopt-add')`) === true);
-check('币种同样有（首装最先撞上的就是它）', await evl(
-  `!!document.querySelector('#item-fields .sopts select[data-f="currency"] + .sopt-add, #item-fields .sopts select[data-f="currency"] ~ .sopt-add')`) === true);
+check('支付方式同样有', await evl(
+  `!!document.querySelector('#item-fields .sopts select[data-f="payment_method"] ~ .sopt-add')`) === true);
 check('周期是固定档位，不给现场新增', await evl(`(() => {
   const sel = document.querySelector('#item-fields select[data-f="cycle"]');
   return !!sel && !sel.closest('.sopts');
 })()`) === true);
 // 撤回修复做负向对照时这里会是 undefined：得让整份套件继续跑完，别崩在半路
-const soptAdd = `[...document.querySelectorAll('#item-fields .sopts')].find(x => x.querySelector('select[data-f="currency"]'))?.querySelector('.sopt-add')`;
+const soptAdd = `[...document.querySelectorAll('#item-fields .sopts')].find(x => x.querySelector('select[data-f="payment_method"]'))?.querySelector('.sopt-add')`;
 await evl(`${soptAdd}?.focus()`);
-await send('Input.insertText', { text: 'NZD' });
+await send('Input.insertText', { text: '云闪付' });
 // keyDown 带 text 才会产生「字符键」的默认行为（表单隐式提交），否则 preventDefault 测不出来
 await send('Input.dispatchKeyEvent', {
   type: 'keyDown', key: 'Enter', code: 'Enter', text: '\r', unmodifiedText: '\r',
@@ -1583,7 +1583,7 @@ await send('Input.dispatchKeyEvent', {
 });
 await sleep(350);
 check('回车把新值加进下拉并选中', await evl(
-  `document.querySelector('#item-fields select[data-f="currency"]').value`) === 'NZD');
+  `document.querySelector('#item-fields select[data-f="payment_method"]').value`) === '云闪付');
 check('回车没有顺手提交表单', await evl(`!!document.querySelector('#dlg-item')?.open`) === true);
 await evl(`document.querySelector('#item-fields [data-f="name"]').value = '首装新条目'`);
 await shot('20-form-sel-add');
@@ -1591,7 +1591,8 @@ await evl(`document.querySelector('#form-item').requestSubmit()`);
 await sleep(1200);
 const freshItem = (await (await fetch(APP + 'api/collections/subs/items')).json())
   .find(r => r.name === '首装新条目');
-check('现场加的币种一路存回了库', freshItem?.currency === 'NZD', JSON.stringify(freshItem?.currency));
+check('现场加的支付方式一路存回了库',
+  freshItem?.extra?.payment_method === '云闪付', JSON.stringify(freshItem?.extra));
 
 /* 17.11. 库的 key 曾经是 'k'||rowid 派生的，而 SQLite 不带 AUTOINCREMENT 会复用删掉的
    id；删库按设计保留台账（那张表存的是 kind 字符串，不跟外键走），于是新建的库会捡到
@@ -1903,6 +1904,119 @@ await sleep(400);
 await shot('22-row-gutter');
 await evl(`document.querySelector('#bulk-clear').click()`);
 await sleep(200);
+
+/* 17.20. 币种并进费用格：不再单独占一列，填金额的同时选币种。
+   数据层没变——items.price 与 items.currency 仍是两个真列，变的只是「界面上有哪些列」。 */
+await evl(`switchTab('subs')`);
+await sleep(400);
+check('币种不再是一列', await evl(
+  `[...document.querySelectorAll('#view-subs thead th')].some(t => t.dataset.k === 'currency')`) === false);
+check('字段注册表里也撤了（迁移 0013）',
+  (await (await fetch(APP + 'api/fields')).json()).filter(f => f.key === 'currency').length === 0);
+check('费用格仍然带着币种显示',
+  (await evl(`document.querySelector('#subs-body tr td[data-k="price"]')?.textContent`) || '').includes('USD'));
+// 点费用格开的是复合编辑器：金额 + 币种
+const fx_priceTd = `[...document.querySelectorAll('#subs-body tr')].find(t => t.querySelector('td[data-k="price"]')?.textContent.includes('USD')).querySelector('td[data-k="price"]')`;
+await evl(`${fx_priceTd}.click()`);
+await sleep(300);
+check('费用格是金额 + 币种的复合编辑器', await evl(
+  `!!document.querySelector('.cellpop [data-price]') && !!document.querySelector('.cellpop [data-cur]')`) === true);
+check('币种下拉里带着这一行的现值',
+  await evl(`document.querySelector('.cellpop [data-cur]')?.value`) === 'USD');
+await evl(`closePop()`);
+// 详情表单里也是同一枚控件，且整行 PUT 不会把 currency 清掉
+const fx_curRow = (await (await fetch(APP + 'api/collections/subs/items')).json()).find(r => r.currency === 'USD');
+await evl(`openItemDialog('subs', state.subs.find(x => x.id === ${fx_curRow.id}))`);
+await sleep(450);
+check('详情表单的费用栏里有币种下拉',
+  await evl(`!!document.querySelector('#item-fields .pricebox [data-f="currency"]')`) === true);
+check('币种下拉带着现值',
+  await evl(`document.querySelector('#item-fields .pricebox [data-f="currency"]').value`) === 'USD');
+await evl(`document.querySelector('#form-item').requestSubmit()`);
+await sleep(1200);
+const fx_afterSave = (await (await fetch(APP + 'api/collections/subs/items')).json()).find(r => r.id === fx_curRow.id);
+check('开表单直接保存不会清掉币种', fx_afterSave?.currency === 'USD', JSON.stringify(fx_afterSave?.currency));
+check('金额也原样', fx_afterSave?.price === fx_curRow.price, `${fx_curRow.price} → ${fx_afterSave?.price}`);
+// 上面两条走的是 itemBodyFromRow 从行数据铺底那条路，改不改代码都绿；真正要钉住的是
+// 「在表单里改了币种能存回去」——currency 不是注册字段，itemBody 得单独读它那枚控件
+await evl(`openItemDialog('subs', state.subs.find(x => x.id === ${fx_curRow.id}))`);
+await sleep(450);
+await evl(`(() => {
+  const sel = document.querySelector('#item-fields .pricebox [data-f="currency"]');
+  if (![...sel.options].some(o => o.value === 'EUR')) {
+    sel.appendChild(Object.assign(document.createElement('option'), { value: 'EUR', textContent: 'EUR' }));
+  }
+  sel.value = 'EUR';
+})()`);
+await evl(`document.querySelector('#form-item').requestSubmit()`);
+await sleep(1200);
+const fx_changed = (await (await fetch(APP + 'api/collections/subs/items')).json()).find(r => r.id === fx_curRow.id);
+check('在表单里改币种能存回去', fx_changed?.currency === 'EUR', JSON.stringify(fx_changed?.currency));
+// 改回去，后面的断言按 USD 算
+await put(`/api/items/${fx_curRow.id}`, { ...fx_changed, currency: 'USD' });
+await evl(`loadAll()`);
+await sleep(700);
+
+/* 17.21. 统一币种显示：折算只在呈现层，原币一律不动。 */
+const fx_fx0 = await (await fetch(APP + 'api/fx')).json();
+check('/api/fx 给出内置平均汇率', typeof fx_fx0.rates?.CNY === 'number' && fx_fx0.rates.USD === 1);
+check('默认不折算（这是按需出网，不点就不发生）', fx_fx0.display === '' && fx_fx0.live.length === 0);
+check('内置表说明了取样区间', typeof fx_fx0.baseline_period === 'string' && fx_fx0.baseline_period.length > 0);
+// 打开折算：表格费用格变成折算值 + 原币小字
+await put('/api/settings', { 'fx.display': 'CNY' });
+await evl(`loadAll()`);
+await sleep(900);
+const fx_cellTxt = await evl(`[...document.querySelectorAll('#subs-body td[data-k="price"]')]
+  .map(t => t.textContent).find(t => t.includes('CNY') && t.includes('USD')) || ''`);
+check('费用格显示折算值、原币退到小字', fx_cellTxt.startsWith('CNY') && fx_cellTxt.includes('USD'), fx_cellTxt);
+check('原币小字挂的是 .orig',
+  await evl(`!!document.querySelector('#subs-body td[data-k="price"] .orig, #subs-body td[data-k="price"] .muted')`) === true);
+// 折算是算对的：拿汇率表自己验一遍，别只看"有个数"
+check('折算值与汇率表对得上', await evl(`(() => {
+  const r = state.subs.find(x => x.currency === 'USD' && x.price != null);
+  const want = (r.price / state.fx.rates.USD * state.fx.rates.CNY).toFixed(2);
+  const td = document.querySelector('#subs-body tr[data-id="' + r.id + '"] td[data-k="price"]');
+  return td.textContent.includes(want);
+})()`) === true);
+check('存的仍是原币', (await (await fetch(APP + 'api/collections/subs/items')).json())
+  .find(r => r.id === fx_curRow.id)?.currency === 'USD');
+// 首页支出并成一笔
+check('月度支出并成一笔折算值', await evl(`document.querySelectorAll('#totals .cur').length`) === 1);
+check('并出来的那笔标的是显示币种',
+  await evl(`document.querySelector('#totals .cur .code')?.textContent`) === 'CNY');
+check('支出小字说明了折算成什么',
+  (await evl(`document.querySelector('#totals-hint').textContent`)).includes('CNY'));
+// 折不出来的币种要如实说，不能默默漏掉
+await post('/api/collections/subs/items',
+  { name: '无汇率币种', status: 'Active', price: 5, currency: 'XTS', cycle: 'monthly', next_renewal: day(20) });
+await evl(`loadAll()`);
+await sleep(900);
+check('没有汇率的币种如实标注、不并入总额',
+  await evl(`!document.querySelector('#totals-note').hidden
+    && document.querySelector('#totals-note').textContent.includes('XTS')`) === true);
+check('折不出来的那格原样显示原币', await evl(`(() => {
+  const r = state.subs.find(x => x.currency === 'XTS');
+  const td = document.querySelector('#subs-body tr[data-id="' + r.id + '"] td[data-k="price"]');
+  return td.textContent.includes('XTS');
+})()`) === true);
+await shot('23-fx-converted');
+// 设置页那一栏
+await evl(`openSettings()`);
+await sleep(600);
+check('设置页能选显示币种', await evl(`document.querySelector('#fx-display').value`) === 'CNY');
+check('说清楚了当前用的是内置平均汇率',
+  (await evl(`document.querySelector('#fx-status').textContent`)).includes('内置平均汇率'));
+check('有手动拉取按钮', await evl(`!!document.querySelector('#fx-refresh')`) === true);
+await evl(`document.querySelector('#dlg-settings').close()`);
+// 收拾：关掉折算、删掉那条无汇率条目，后面的段落按原样算
+await put('/api/settings', { 'fx.display': '' });
+const fx_xts = (await (await fetch(APP + 'api/collections/subs/items')).json()).find(r => r.currency === 'XTS');
+await raw(`/api/items/${fx_xts.id}`, 'DELETE');
+await evl(`loadAll()`);
+await sleep(800);
+check('关掉折算后又是分币种显示',
+  await evl(`document.querySelectorAll('#totals .cur').length`) >= 1
+  && await evl(`document.querySelector('#totals-note').hidden`) === true);
 
 /* 18. 库删光也不能把界面打崩。放在最后跑——这一段会把预置库连数据一起删掉。
    预置库过去在界面上删不掉（后端一直放行、文档也写着可删），而新库的表格容器
