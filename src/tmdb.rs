@@ -158,14 +158,54 @@ impl Tmdb {
     }
 
     pub async fn poster(&self, path: &str) -> Result<Vec<u8>> {
+        self.image("w500", path).await
+    }
+
+    /// 图片一律经服务端取：浏览器直连 image.tmdb.org 会绕开 `meta.proxy`（被墙环境
+    /// 配了代理也全是空图），也是「出网收敛到服务端」这条唯一的破口。
+    pub async fn image(&self, size: &str, path: &str) -> Result<Vec<u8>> {
         let resp = self
             .client
-            .get(format!("https://image.tmdb.org/t/p/w500{path}"))
+            .get(format!("https://image.tmdb.org/t/p/{size}{path}"))
             .send()
             .await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("海报下载失败：{}", resp.status()));
+            return Err(anyhow!("图片下载失败：{}", resp.status()));
         }
         Ok(resp.bytes().await?.to_vec())
+    }
+}
+
+/// TMDB 的图片路径形如 `/aBc123.jpg`：只放行这个形状，免得这个端点变成
+/// 「让服务端替我 GET 任意路径」的跳板。
+pub fn image_path_ok(p: &str) -> bool {
+    let Some(name) = p.strip_prefix('/') else { return false };
+    !name.is_empty()
+        && name.len() <= 128
+        && name.matches('.').count() == 1
+        && name
+            .rsplit('.')
+            .next()
+            .is_some_and(|e| matches!(e, "jpg" | "jpeg" | "png" | "webp" | "svg"))
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::image_path_ok;
+
+    #[test]
+    fn image_path_accepts_tmdb_shape_and_nothing_else() {
+        assert!(image_path_ok("/aBc123XYZ.jpg"));
+        assert!(image_path_ok("/x-y_z.webp"));
+        // 没有前导斜杠、越级、带查询串、拼别的主机、扩展名不认：一律不放行
+        assert!(!image_path_ok("aBc.jpg"));
+        assert!(!image_path_ok("/../../etc/passwd"));
+        assert!(!image_path_ok("/a.jpg?x=1"));
+        assert!(!image_path_ok("//evil.example/a.jpg"));
+        assert!(!image_path_ok("/a.php"));
+        assert!(!image_path_ok("/"));
     }
 }

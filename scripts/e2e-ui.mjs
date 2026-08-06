@@ -1633,6 +1633,78 @@ check('表尾「＋ 新建」也能用键盘走到', await evl(`(() => {
   return nr.tabIndex === 0 && nr.getAttribute('role') === 'button';
 })()`) === true);
 
+/* 17.13. TMDB 搜索缩略图此前直连 image.tmdb.org：绕开 meta.proxy（被墙环境配了代理
+   也全是空图），且是浏览器直连第三方的唯一出口。改成经服务端转发，路径要校验。 */
+check('缩略图不再直连 image.tmdb.org',
+  !(await (await fetch(APP + 'app.js')).text()).includes('image.tmdb.org'));
+const thumbBad = await fetch(APP + 'api/tmdb/thumb?path=' + encodeURIComponent('/../../etc/passwd'));
+check('转发端点拦下不合法路径', thumbBad.status === 400, String(thumbBad.status));
+// 路径不合法＝请求本身的问题＝400；未配 Key 是配置故障，与 fetch_cover 一致保持 500
+// （第 14 段那条注释是同一个决定：别因为分了级就把真故障也降级）
+const thumbNoKey = await fetch(APP + 'api/tmdb/thumb?path=' + encodeURIComponent('/abc123.jpg'));
+const thumbNoKeyBody = await thumbNoKey.json().catch(() => ({}));
+if ((await (await fetch(APP + 'api/settings')).json())['meta.tmdb_key']) {
+  console.log('SKIP 缩略图无 Key 断言（本实例已配置 TMDB Key）');
+} else {
+  check('未配 Key 时缩略图仍是 500 且报错清晰',
+    thumbNoKey.status === 500 && String(thumbNoKeyBody.error || '').includes('TMDB API Key'),
+    `${thumbNoKey.status} ${JSON.stringify(thumbNoKeyBody)}`);
+}
+
+/* 17.14. 媒体的自定义列此前只有表格里点格能改，海报墙用户等于没有入口；更要命的是
+   媒体表单的提交体压根不带 extra，而后端 `values_of` 恒写 extra——用详情表单存一次
+   就把自定义列的值全清了（实测坐实过）。 */
+// 加列走的是接口而不是界面：等同于「别处（另一台设备/另一个标签页）加了列」。
+// 媒体的 COLS 此前只在 boot 与 rebuildHead 各注入一次，而 loadAll 每次都刷字段注册表，
+// 于是这边会拿着旧 COLS 去渲染新字段，colType 读到 undefined 把整个 renderAll 打断。
+const mfield = await post('/api/fields', { tbl: 'media', name: '片源', ftype: 'text' });
+const mrow = (await (await fetch(APP + 'api/media')).json())[0];
+await put(`/api/media/${mrow.id}`, { ...mrow, extra: { [mfield.key]: 'BD 原盘' } });
+// 得等 loadAll 自己结算再问它成没成：它抛的是异步异常，同步去查 DOM 只会看到上一轮
+// 渲染留下的行，两版都「通过」。**而且值必须先落到某一行上**——cellVal 对空值提前返回，
+// 列刚建好、还没有任何行有值时根本走不到 colType，那一刻同样测不出东西（两条都真踩过）。
+check('别处加了媒体列，这边 loadAll 不崩', await evl(
+  `loadAll().then(() => 'ok', e => 'ERR: ' + (e && e.message))`) === 'ok');
+await sleep(900);
+check('新列的表头也补上了', await evl(
+  `!!document.querySelector('#m-tablewrap thead th[data-k="${mfield.key}"]')`) === true);
+check('表头没有被注入两遍', await evl(
+  `document.querySelectorAll('#m-tablewrap thead th[data-k="${mfield.key}"]').length`) === 1);
+await evl(`document.querySelector('.nav-tab[data-page="media"]').click()`);
+await sleep(400);
+await evl(`openMediaDialog(state.media.find(m => m.id === ${mrow.id}))`);
+await sleep(500);
+check('媒体表单里出现了自定义列', await evl(
+  `!document.querySelector('#m-extra-fold').hidden
+   && !!document.querySelector('#m-extra-fields [data-f="${mfield.key}"]')`) === true);
+check('自定义列的现值被读进控件', await evl(
+  `document.querySelector('#m-extra-fields [data-f="${mfield.key}"]')?.value`) === 'BD 原盘');
+check('已有值时那一段自动摊开', await evl(`document.querySelector('#m-extra-fold').open`) === true);
+// 撤回修复做负向对照时这个控件不在场：要让套件继续跑完，别崩在半路
+await evl(`(() => { const el = document.querySelector('#m-extra-fields [data-f="${mfield.key}"]'); if (el) el.value = 'REMUX'; })()`);
+await shot('21-media-extra');
+await evl(`document.querySelector('#form-media').requestSubmit()`);
+await sleep(1400);
+const msaved = (await (await fetch(APP + 'api/media')).json()).find(m => m.id === mrow.id);
+check('改动落库', msaved?.extra?.[mfield.key] === 'REMUX', JSON.stringify(msaved?.extra));
+check('保存没有清掉条目本身的字段',
+  msaved?.title === mrow.title && msaved?.rating === mrow.rating,
+  `${msaved?.title} / ${msaved?.rating}`);
+// 负向对照的靶子：表单不带 extra 时后端会把它写成 NULL，所以这条要一直有人守着
+await put(`/api/media/${mrow.id}`, { ...msaved, extra: { [mfield.key]: '守着' } });
+await evl(`loadAll().catch(() => {})`); // 负向对照时这里本就会抛，别让它打断套件
+await sleep(700);
+await evl(`openMediaDialog(state.media.find(m => m.id === ${mrow.id}))`);
+await sleep(500);
+await evl(`document.querySelector('#form-media').requestSubmit()`);
+await sleep(1400);
+check('开表单直接保存不动自定义列的值',
+  (await (await fetch(APP + 'api/media')).json()).find(m => m.id === mrow.id)?.extra?.[mfield.key] === '守着');
+await fetch(`${APP}api/fields/${mfield.id}`, { method: 'DELETE' });
+await evl(`document.querySelector('.nav-tab[data-page="renewals"]').click()`);
+await evl(`loadAll().catch(() => {})`); // 负向对照时这里本就会抛，别让它打断套件
+await sleep(700);
+
 /* 18. 库删光也不能把界面打崩。放在最后跑——这一段会把预置库连数据一起删掉。
    预置库过去在界面上删不掉（后端一直放行、文档也写着可删），而新库的表格容器
    锚在 VPS 那张表上：VPS 一删，同一会话里再建库就是 null.after()，loadAll 断在那儿。 */

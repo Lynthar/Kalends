@@ -28,6 +28,7 @@ pub fn router() -> Router<App> {
         .route("/api/media/from_tmdb", post(from_tmdb))
         .route("/api/media/{id}/fetch_cover", post(fetch_cover))
         .route("/api/tmdb/search", get(tmdb_search))
+        .route("/api/tmdb/thumb", get(tmdb_thumb))
         .route("/covers/{name}", get(cover_file))
 }
 
@@ -243,6 +244,33 @@ async fn tmdb_search(State(app): State<App>, Query(q): Query<HashMap<String, Str
     };
     let client = tmdb::Tmdb::new(&key, &proxy)?;
     Ok(Json(json!(client.search(tv, &text).await?)))
+}
+
+/// 搜索结果里的小图。转发而不是让浏览器直连 image.tmdb.org——直连绕开 `meta.proxy`
+/// （被墙环境配了代理也全是空图），也是「出网只从服务端走」的唯一破口。
+async fn tmdb_thumb(
+    State(app): State<App>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Response, ApiError> {
+    let path = q.get("path").map(String::as_str).unwrap_or_default();
+    if !tmdb::image_path_ok(path) {
+        return Err(bad("图片路径不合法").into());
+    }
+    let (key, proxy) = {
+        let conn = app.db.lock().unwrap();
+        meta_cfg(&conn)
+    };
+    let client = tmdb::Tmdb::new(&key, &proxy)?;
+    let bytes = client.image("w92", path).await?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/jpeg"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 /// 选中 TMDB 条目 → 建档 + 海报本地化，返回新条目 id。

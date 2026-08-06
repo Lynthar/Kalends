@@ -97,6 +97,7 @@ function renderAll() {
   renderUpcoming();
   renderTotals();
   syncColls();
+  syncMediaCols();
   for (const c of colls()) renderColl(c.key);
   renderMedia();
 }
@@ -352,12 +353,28 @@ async function rebuildHead(tab) {
     renderColl(tab);
     return;
   }
-  const thead = $(HEAD_SEL[tab]);
-  thead.rows[0].innerHTML = THEAD_HTML[tab];
-  thead.closest('.tablewrap').querySelector('.newrow')?.remove();
-  injectCustomCols(tab);
-  initHead(tab);
+  rebuildMediaHead();
   RENDER[tab]();
+}
+
+// 媒体表的表头走模板快照那条老路：先还原成模板再注入，不能直接重入 injectCustomCols
+//（它只追加 th、不清旧的，重入一次多一列）
+function rebuildMediaHead() {
+  const thead = $(HEAD_SEL.media);
+  thead.rows[0].innerHTML = THEAD_HTML.media;
+  thead.closest('.tablewrap').querySelector('.newrow')?.remove();
+  injectCustomCols('media');
+  initHead('media');
+}
+
+/* 媒体的自定义列此前只在 boot 与 rebuildHead 各注入过一次，而 loadAll 每次都刷字段
+   注册表：别处（另一台设备、另一个标签页，或直接调接口）加了列之后，这边下一次
+   loadAll 就会拿着旧 COLS 去渲染新字段，`colType` 读到 undefined 直接把整个 renderAll
+   打断——界面停在半路。库那边由 syncColls → ensureCollDom 兜着，这是对称的那一半。 */
+function syncMediaCols() {
+  const want = customFields('media').map(FKEY).join();
+  const have = Object.keys(COLS.media).filter(k => COLS.media[k].custom).join();
+  if (want !== have) rebuildMediaHead();
 }
 
 function customTds(tab, it) {
@@ -1903,6 +1920,18 @@ function openMediaDialog(it) {
   } else {
     setStars('');
   }
+  // 自定义列此前只有表格里点格能改，海报墙用户等于没有入口
+  const ex = $('#m-extra-fields');
+  const exFields = customFields('media');
+  ex.innerHTML = '';
+  for (const cf of exFields) ex.appendChild(fieldControl('media', cf, it));
+  $('#m-extra-fold').hidden = !exFields.length;
+  // 已经有值就摊开（与「游戏字段」按类别自动展开同理）：藏在一次点击后面，
+  // 等于海报墙用户仍然看不见自己填过什么
+  $('#m-extra-fold').open = exFields.some(cf => {
+    const v = (it?.extra || {})[cf.key];
+    return v != null && v !== '' && !(Array.isArray(v) && !v.length);
+  });
   $('#m-tmdb-box').hidden = !!it || f.kind.value === '游戏';
   $('#m-game-fold').open = f.kind.value === '游戏';
   $('#m-fetch-cover').hidden = !it || f.kind.value === '游戏';
@@ -1962,9 +1991,17 @@ $('#form-media').elements.kind.addEventListener('change', e => {
 $('#form-media').addEventListener('submit', async e => {
   e.preventDefault();
   const f = e.target.elements;
-  const body = {};
+  // 后端是全量替换语义（`values_of` 恒写 extra，body 里没有就写 NULL），所以自定义列的值
+  // 得从行数据铺起再让表单覆盖——不铺的话，用详情表单存一次就把它们全清了（实测过）
+  const body = { extra: { ...(editingMedia?.extra || {}) } };
   for (const k of M_STR) body[k] = f[k].value;
   for (const k of [...M_INT, ...M_REAL]) body[k] = f[k].value === '' ? undefined : +f[k].value;
+  for (const cf of customFields('media')) {
+    const val = readFieldControl('#m-extra-fields', cf);
+    if (val === NO_CONTROL) continue; // 控件不在场＝别动这个键，不是"用户清空了"
+    if (val == null || val === '' || (Array.isArray(val) && !val.length)) delete body.extra[cf.key];
+    else body.extra[cf.key] = val;
+  }
   // 表单不含封面字段，编辑时带上原值以免被清空
   if (editingMedia && editingMedia.cover) body.cover = editingMedia.cover;
   try {
@@ -1989,7 +2026,7 @@ async function tmdbSearch() {
       const div = document.createElement('div');
       div.className = 'tmdb-hit';
       div.innerHTML = `
-        ${h.poster ? `<img src="https://image.tmdb.org/t/p/w92${esc(h.poster)}" alt="" onerror="this.hidden=true">` : ''}
+        ${h.poster ? `<img src="/api/tmdb/thumb?path=${encodeURIComponent(h.poster)}" alt="" loading="lazy" onerror="this.hidden=true">` : ''}
         <span class="ti">${esc(h.title || '')}（${esc(String(h.year || '?'))}）<small>${esc(h.orig_title || '')}</small></span>
         <button class="btn mini primary" type="button">选用</button>`;
       div.querySelector('button').onclick = async ev => {
@@ -2669,7 +2706,8 @@ function itemBody(key, row) {
 
 // 详情表单里的星级：点星写进隐藏输入（与就地编辑的 starEditor 同一套呈现）
 document.addEventListener('click', e => {
-  const b = e.target.closest('#item-fields .stars button[data-v]');
+  // 两张表单都可能有星级字段（媒体的自定义列走 #m-extra-fields），别只认库那一张
+  const b = e.target.closest('#item-fields .stars button[data-v], #m-extra-fields .stars button[data-v]');
   if (!b) return;
   const n = +b.dataset.v || 0;
   b.closest('label').querySelector('input[data-f]').value = n || '';
