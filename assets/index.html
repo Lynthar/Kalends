@@ -108,6 +108,7 @@
       <div class="tab-actions">
         <input id="m-search" class="searchbox" placeholder="搜标题 / 短评 / 导演 / 主演">
         <select id="m-sort" class="mini-select">
+          <option value="pos">手动</option>
           <option value="marked">标记日期</option>
           <option value="year">年份</option>
           <option value="rating">我的评分</option>
@@ -296,6 +297,13 @@
     </div>
   </form>
 </dialog>
+
+<!-- 勾选任意行后浮出的批量操作条 -->
+<div id="bulkbar" hidden>
+  <span id="bulk-n"></span>
+  <button id="bulk-del" class="btn danger" type="button">删除</button>
+  <button id="bulk-clear" class="btn ghost" type="button">取消</button>
+</div>
 
 <div id="toast" hidden></div>
 <script src="/config.js"></script>

@@ -306,12 +306,25 @@ await sleep(250);
 check('切回单选清除覆写', await evl(`JSON.parse(localStorage.getItem('kalends.views.v1')).subs.types?.category`) === undefined);
 check('标签数恢复', await evl(`document.querySelectorAll('#subs-body .tag').length`) === tagsBefore);
 
-/* 9. ＋新建行是加条目的唯一入口，右上角那颗绿按钮改成了建库 */
+/* 9. ＋新建行直接插一行空行（Notion 式，不再弹表单），右上角那颗绿按钮是建库 */
+const subsN0 = await evl(`document.querySelectorAll('#subs-body tr').length`);
 await evl(`document.querySelector('#view-subs .newrow').click()`);
-await sleep(300);
-check('新建行开订阅表单', await evl(`document.querySelector('#dlg-item').open`) === true);
-await evl(`document.querySelector('#dlg-item').close()`);
-await sleep(150);
+await sleep(700);
+check('新建行不再弹表单', await evl(`!!document.querySelector('#dlg-item')?.open`) === false);
+check('直接多出一行', await evl(`document.querySelectorAll('#subs-body tr').length`) === subsN0 + 1);
+check('新行是「未命名」占位', await evl(`!!document.querySelector('#subs-body .unnamed')`) === true);
+// 编辑器开在新行的名称格上。这条曾经假绿过一轮：focusNewRow 先 scrollIntoView 再开浮层，
+// 而滚动事件是异步派发的、全局 scroll 监听会把刚开的浮层关掉——开出来又被自己关掉
+check('就地编辑器开在新行上', await evl(`!!document.querySelector('.cellpop')`) === true,
+  await evl(`String(popKey)`));
+check('编辑器认的是新行的名称格', (await evl(`String(popKey)`)).endsWith(':name'));
+await evl(`closePop()`);
+// 收拾干净：后面的断言都按原来的行数算
+const blankId = await evl(`Math.max(...state.subs.map(x => x.id))`);
+await raw(`/api/items/${blankId}`, 'DELETE');
+await evl(`loadAll()`);
+await sleep(500);
+check('收拾回原来的行数', await evl(`document.querySelectorAll('#subs-body tr').length`) === subsN0);
 // 按视觉角色取那颗绿按钮（不按 id——旧版的 ＋ 库 标签也叫 #coll-add，认 id 的断言两版都过）
 const PRIMARY = `document.querySelector('#page-renewals .tab-actions .btn.primary')`;
 check('标签行不再有「＋ 库」', await evl(
@@ -1259,7 +1272,10 @@ check('表头列数与行内格数一致', await evl(`(() => {
 const codeOf = async (path, method, body) => (await raw(path, method, body)).status;
 check('改不存在的条目 → 404', await codeOf('/api/items/999999', 'PUT', { name: 'x' }) === 404);
 check('往不存在的库里加条目 → 404', await codeOf('/api/collections/nope/items', 'POST', { name: 'x' }) === 404);
-check('条目缺名称 → 400', await codeOf('/api/collections/subs/items', 'POST', { status: 'Active' }) === 400);
+// 空名不再是客户端错误：表尾「＋ 新建」就是先插一行空的、再就地填（界面上渲染成「未命名」）
+const blank9 = await post('/api/collections/subs/items', { status: 'Active' });
+check('条目缺名称是允许的', typeof blank9.id === 'number', JSON.stringify(blank9));
+await raw(`/api/items/${blank9.id}`, 'DELETE');
 check('未知字段类型 → 400', await codeOf('/api/fields', 'POST', { tbl: 'subs', name: 'x', ftype: 'bogus' }) === 400);
 check('未知建库模板 → 400', await codeOf('/api/collections', 'POST', { name: 'x', template: 'bogus' }) === 400);
 check('改不存在的列 → 404', await codeOf('/api/fields/999999', 'PUT', { name: 'x', shown: true }) === 404);
@@ -1704,6 +1720,189 @@ await fetch(`${APP}api/fields/${mfield.id}`, { method: 'DELETE' });
 await evl(`document.querySelector('.nav-tab[data-page="renewals"]').click()`);
 await evl(`loadAll().catch(() => {})`); // 负向对照时这里本就会抛，别让它打断套件
 await sleep(700);
+
+/* 17.15. 行首浮标：⠿ 拖动手柄 + 复选框，占的是首格预留的左内边距而不是一列。
+   浮标住在名称格里，所以字形必须由 CSS ::before 画——写成按钮文本就会混进
+   td.textContent，行文本从此永远带一个 ⠿（复制整行、断言取值都会看见）。 */
+await evl(`switchTab('subs')`);
+await sleep(400);
+// 断言的是不变式本身（首个可见格拿到 .c0、且只有它拿到），不假定名称列排在最左——
+// 前面的段落会改列序，写死成 name 就变成在测「列序没被动过」
+check('首个可见格拿到 .c0（不是 :first-child）', await evl(`(() => {
+  const vis = [...document.querySelector('#subs-body tr').children].filter(td => td.style.display !== 'none');
+  return vis[0].classList.contains('c0') && !vis.slice(1).some(td => td.classList.contains('c0'));
+})()`) === true);
+check('浮标在首格里', await evl(`!!document.querySelector('#subs-body tr td.c0 > .rowgut')`) === true);
+check('手柄与复选框都在', await evl(`(() => {
+  const g = document.querySelector('#subs-body tr .rowgut');
+  return !!g.querySelector('[data-grip]') && !!g.querySelector('[data-sel]');
+})()`) === true);
+check('⠿ 不混进行文本', (await evl(`document.querySelector('#subs-body tr td.c0').textContent`)).includes('⠿') === false);
+check('⠿ 由 ::before 画出来',
+  await evl(`getComputedStyle(document.querySelector('#subs-body tr .rgrip'), '::before').content`) === '"⠿"');
+check('表头也有全选框', await evl(`!!document.querySelector('#view-subs thead th.c0 [data-selall]')`) === true);
+// 把一个可隐藏的列挪到最左、再把它藏起来：隐藏列只是 display:none、没从 DOM 里摘掉，
+// 所以 :first-child 会落在看不见的格上，吸附与浮标一起失效。藏 name 是不行的（它撤不下来），
+// 藏一个本来就不在最左的列也测不出什么——必须让被藏的那个正好排在 DOM 首位
+await evl(`views.subs.order = ['category', ...colKeys('subs').filter(k => k !== 'category')];
+           views.subs.hiddenCols = ['category']; saveViews(); renderColl('subs')`);
+await sleep(300);
+check('首列被藏起来时 .c0 落到第一个看得见的格上', await evl(`(() => {
+  const tr = document.querySelector('#subs-body tr');
+  const vis = [...tr.children].filter(td => td.style.display !== 'none');
+  return tr.children[0].style.display === 'none'
+    && vis[0].classList.contains('c0') && !!vis[0].querySelector('.rowgut');
+})()`) === true);
+await evl(`views.subs.order = null; views.subs.hiddenCols = []; saveViews(); renderColl('subs')`);
+await sleep(300);
+
+/* 17.16. 多选与批量删除：行末那颗「删」已经撤了，选区 + 批量条是唯一的删除出口。 */
+check('行末不再有「删」按钮',
+  await evl(`!!document.querySelector('#subs-body tr td.ops [data-del]')`) === false);
+check('没勾选时批量条是收着的', await evl(`document.querySelector('#bulkbar').hidden`) === true);
+await evl(`(() => { const b = document.querySelector('#subs-body tr [data-sel]'); b.checked = true; b.dispatchEvent(new Event('change')); })()`);
+await sleep(250);
+check('勾一行就浮出批量条', await evl(`document.querySelector('#bulkbar').hidden`) === false);
+check('批量条报出选中数', (await evl(`document.querySelector('#bulk-n').textContent`)).includes('1'));
+check('选中的行有高亮', await evl(`!!document.querySelector('#subs-body tr.selrow')`) === true);
+check('勾选后复选框常驻（表上挂 .selecting）',
+  await evl(`!!document.querySelector('#view-subs table.selecting')`) === true);
+await evl(`document.querySelector('#view-subs thead [data-selall]').checked = true;
+           document.querySelector('#view-subs thead [data-selall]').dispatchEvent(new Event('change'))`);
+await sleep(250);
+const subsRowsNow = await evl(`document.querySelectorAll('#subs-body tr').length`);
+check('全选把整表勾上', await evl(`document.querySelectorAll('#subs-body tr.selrow').length`) === subsRowsNow);
+await evl(`document.querySelector('#bulk-clear').click()`);
+await sleep(200);
+check('取消把选区清干净', await evl(`document.querySelector('#bulkbar').hidden`) === true);
+check('取消后行高亮也撤了', await evl(`document.querySelectorAll('#subs-body tr.selrow').length`) === 0);
+// 真删：建两条一次性条目再批量删掉，别动播种数据
+const bulkA = await post('/api/collections/subs/items', { name: '批量甲', status: 'Planned' });
+const bulkB = await post('/api/collections/subs/items', { name: '批量乙', status: 'Planned' });
+const delRes = await (await raw('/api/items/bulk_delete', 'POST', { ids: [bulkA.id, bulkB.id] })).json();
+check('批量删除端点一次删两条', delRes.deleted === 2, JSON.stringify(delRes));
+const afterBulk = await (await fetch(APP + 'api/collections/subs/items')).json();
+check('两条都没了', afterBulk.some(x => x.id === bulkA.id || x.id === bulkB.id) === false);
+check('批量删除缺 ids → 400', (await raw('/api/items/bulk_delete', 'POST', {})).status === 400);
+// 换表要把选区带走，否则会对着看不见的表按删除
+await evl(`(() => { const b = document.querySelector('#subs-body tr [data-sel]'); b.checked = true; b.dispatchEvent(new Event('change')); })()`);
+await sleep(200);
+await evl(`switchTab('vps')`);
+await sleep(300);
+check('换表清掉选区', await evl(`document.querySelector('#bulkbar').hidden`) === true);
+await evl(`switchTab('subs')`);
+await sleep(300);
+
+/* 17.17. 手动排序：无列排序时的基态就是 pos（此前是名称字母序，拖出来的顺序无处安放）。
+   按列排序时拖动的位置存不住，手柄随之停用。 */
+// 前面的段落留了列排序在身上，先还原到该走的分支——否则测的是「按列排序」那条路
+await evl(`setSort('subs', 'price', null)`);
+await sleep(300);
+// 子行是吸附在父行下渲染的，所以单调性只对顶层行成立
+check('无排序时顶层按 pos 排', await evl(`(() => {
+  const pos = [...document.querySelectorAll('#subs-body tr:not(.subrow)')]
+    .map(t => state.subs.find(x => x.id === +t.dataset.id).pos);
+  return pos.every((p, i) => i === 0 || p >= pos[i - 1]);
+})()`) === true);
+const ordBefore = await evl(`[...document.querySelectorAll('#subs-body tr')].map(t => +t.dataset.id)`);
+// 把顶层第一行挪到第二个顶层行之后（子行跟着父行整块走）
+const topIds = await evl(`[...document.querySelectorAll('#subs-body tr:not(.subrow)')].map(t => +t.dataset.id)`);
+await evl(`applyRowOrder('subs', moveRow('subs', ${topIds[0]}, ${topIds[1]}, true))`);
+await sleep(600);
+const ordAfter = await evl(`[...document.querySelectorAll('#subs-body tr')].map(t => +t.dataset.id)`);
+check('拖动改变了行序', JSON.stringify(ordAfter) !== JSON.stringify(ordBefore),
+  `${ordBefore} → ${ordAfter}`);
+check('新序落了库', await (async () => {
+  const rows = await (await fetch(APP + 'api/collections/subs/items')).json();
+  const byPos = [...rows].sort((a, b) => a.pos - b.pos).map(r => r.id);
+  return JSON.stringify(byPos) === JSON.stringify(ordAfter);
+})() === true);
+check('刷新之后顺序还在', await (async () => {
+  await evl(`loadAll()`); await sleep(600);
+  const now = await evl(`[...document.querySelectorAll('#subs-body tr')].map(t => +t.dataset.id)`);
+  return JSON.stringify(now) === JSON.stringify(ordAfter);
+})() === true);
+// 父行整块搬：子行仍然紧跟着它的父行
+check('子行仍吸附在父行下', await evl(`(() => {
+  const trs = [...document.querySelectorAll('#subs-body tr')];
+  return trs.every((t, i) => !t.classList.contains('subrow') || (i > 0 && !trs[i - 1].classList.contains('subrow')
+    || state.subs.find(x => x.id === +t.dataset.id).parent_id === state.subs.find(x => x.id === +trs[i - 1].dataset.id).parent_id));
+})()`) === true);
+// 同级约束：把子行拖到顶层行上要被拦下
+const kidId = await evl(`state.subs.find(x => x.parent_id)?.id`);
+check('子行拖不到顶层去', await evl(`moveRow('subs', ${kidId}, ${topIds[0]}, true)`) === null);
+// 按列排序时手柄停用
+await menuClick('#view-subs th[data-k="price"]', '升序');
+await sleep(300);
+check('按列排序后手柄停用', await evl(`!!document.querySelector('#subs-body .rgrip.off')`) === true);
+check('停用的手柄给出了原因',
+  (await evl(`document.querySelector('#subs-body .rgrip').title`)).includes('清掉列排序'));
+await evl(`setSort('subs', 'price', null)`);
+await sleep(300);
+check('清掉排序后手柄又能拖', await evl(`!!document.querySelector('#subs-body .rgrip.off')`) === false);
+
+/* 17.18. 键盘挪行：手柄不进 Tab 序（一行一个停靠点已经够多），改用复选框上的 Alt+↑/↓。 */
+const kbBefore = await evl(`[...document.querySelectorAll('#subs-body tr:not(.subrow)')].map(t => +t.dataset.id)`);
+await evl(`nudgeRow('subs', ${kbBefore[0]}, 1)`);
+await sleep(600);
+const kbAfter = await evl(`[...document.querySelectorAll('#subs-body tr:not(.subrow)')].map(t => +t.dataset.id)`);
+check('Alt+↓ 把行往下挪了一格', kbAfter[1] === kbBefore[0], `${kbBefore} → ${kbAfter}`);
+await evl(`nudgeRow('subs', ${kbBefore[0]}, -1)`);
+await sleep(600);
+check('Alt+↑ 挪得回来',
+  JSON.stringify(await evl(`[...document.querySelectorAll('#subs-body tr:not(.subrow)')].map(t => +t.dataset.id)`))
+  === JSON.stringify(kbBefore));
+check('手柄不在 Tab 序里', await evl(`document.querySelector('#subs-body .rgrip').tabIndex`) === -1);
+check('复选框可聚焦', await evl(`document.querySelector('#subs-body [data-sel]').tabIndex`) !== -1);
+
+/* 17.19. 媒体侧同样三件事。媒体的默认序仍是「最近标记」——拖拽是排序下拉里新增的
+   「手动」档，选中才可拖，否则 439 条会被一次性冻结成当前顺序。 */
+await evl(`document.querySelector('.nav-tab[data-page="media"]').click()`);
+await evl(`views.media.view = 'table'; saveViews(); renderMedia()`);
+await sleep(500);
+check('媒体排序下拉有「手动」档',
+  await evl(`!!document.querySelector('#m-sort option[value="pos"]')`) === true);
+check('媒体默认序仍是最近标记（不是手动）', await evl(`views.media.sort?.key`) !== 'pos');
+check('非手动档时媒体手柄停用', await evl(`!!document.querySelector('#m-body .rgrip.off')`) === true);
+check('媒体行末也没有「删」了',
+  await evl(`!!document.querySelector('#m-body tr td.ops [data-del]')`) === false);
+await evl(`setSort('media', 'pos', 1)`);
+await sleep(400);
+check('选了手动档手柄就活了', await evl(`!!document.querySelector('#m-body .rgrip.off')`) === false);
+const mOrd0 = await evl(`[...document.querySelectorAll('#m-body tr')].map(t => +t.dataset.id)`);
+await evl(`applyRowOrder('media', moveRow('media', ${mOrd0[0]}, ${mOrd0[mOrd0.length - 1]}, true))`);
+await sleep(600);
+const mOrd1 = await evl(`[...document.querySelectorAll('#m-body tr')].map(t => +t.dataset.id)`);
+check('媒体拖动改变了行序', mOrd1[mOrd1.length - 1] === mOrd0[0], `${mOrd0} → ${mOrd1}`);
+check('媒体新序落了库', await (async () => {
+  const rows = await (await fetch(APP + 'api/media')).json();
+  const byPos = [...rows].sort((a, b) => a.pos - b.pos).map(r => r.id);
+  return JSON.stringify(byPos) === JSON.stringify(mOrd1);
+})() === true);
+// 媒体的新建空行 + 批量删除
+const mN0 = await evl(`document.querySelectorAll('#m-body tr').length`);
+await evl(`document.querySelector('#m-tablewrap .newrow').click()`);
+await sleep(800);
+check('媒体新建也是直接插空行', await evl(`document.querySelectorAll('#m-body tr').length`) === mN0 + 1);
+check('媒体空标题渲染成「未命名」', await evl(`!!document.querySelector('#m-body .unnamed')`) === true);
+await evl(`closePop()`);
+const mBlank = await evl(`Math.max(...state.media.map(x => x.id))`);
+const mDel = await (await raw('/api/media/bulk_delete', 'POST', { ids: [mBlank] })).json();
+check('媒体批量删除端点可用', mDel.deleted === 1, JSON.stringify(mDel));
+await evl(`setSort('media', 'marked', -1)`);
+await evl(`loadAll()`);
+await sleep(600);
+check('媒体收拾回原来的行数', await evl(`document.querySelectorAll('#m-body tr').length`) === mN0);
+await evl(`document.querySelector('.nav-tab[data-page="renewals"]').click()`);
+await sleep(400);
+// 拍在该看的状态下：滚到表格、勾两行，让浮标（复选框常驻）、行高亮与批量条一起入镜
+await evl(`document.querySelector('#view-subs').scrollIntoView({ block: 'center' })`);
+await evl(`[...document.querySelectorAll('#subs-body tr [data-sel]')].slice(0, 2)
+  .forEach(b => { b.checked = true; b.dispatchEvent(new Event('change')); })`);
+await sleep(400);
+await shot('22-row-gutter');
+await evl(`document.querySelector('#bulk-clear').click()`);
+await sleep(200);
 
 /* 18. 库删光也不能把界面打崩。放在最后跑——这一段会把预置库连数据一起删掉。
    预置库过去在界面上删不掉（后端一直放行、文档也写着可删），而新库的表格容器

@@ -62,6 +62,8 @@ function esc(s) {
 }
 
 const money = (c, p) => (p == null || !c) ? '' : `${c} ${Number(p).toFixed(2)}`;
+// 空名条目（表尾新建的空行还没填）要有个看得见的占位，否则整格空着、⤢ 入口也难找
+const nameCell = n => (n ? esc(n) : '<span class="unnamed">未命名</span>');
 
 // 仅放行 http/https，防止 url 字段存入 javascript: 等协议
 function safeUrl(u) {
@@ -463,7 +465,7 @@ function setEmpty(sel, shown, base) {
 const SEARCH_FIELDS = {};
 const RENDER = { media: renderMedia };   // 库的渲染器由 ensureCollDom 注册
 const HEAD_SEL = { media: '#m-tablewrap thead' };   // 库的表头选择器由 ensureCollDom 注册
-const M_DIR_DEFAULT = { marked: -1, year: -1, rating: -1, douban: -1, title: 1 };
+const M_DIR_DEFAULT = { pos: 1, marked: -1, year: -1, rating: -1, douban: -1, title: 1 };
 
 // dir: 1 升 / -1 降 / null 清除（媒体表的默认序 标记日期↓ 视同无排序）
 function setSort(tab, k, dir) {
@@ -569,7 +571,7 @@ function initHead(tab) {
     e.preventDefault();
     nr.click();
   });
-  nr.onclick = () => (tab === 'media' ? openMediaDialog(null) : openItemDialog(tab, null));
+  nr.onclick = () => addRowInline(tab);
   thead.closest('.tablewrap').appendChild(nr);
   applyColumns(tab);
   applyWidths(tab);
@@ -787,6 +789,283 @@ function applyColumns(tab) {
     });
     if (o) for (const k of o) tr.appendChild(cells[keys.indexOf(k)]);
   }
+  markFirstCol(tab);
+}
+
+/* ── 行首浮标：多选与手动排序（Notion 式）────────────────────────────────
+   浮标不是一列，是首格左内边距里的两个控件：⠿ 拖动手柄 + 复选框。做成真列的话
+   列宽三律、列序存储、隐藏列全都要再认一个新键，而它本就不是数据。
+   手动序的真源是后端的 items.pos / media_items.pos，只在「没按任何列排序」时生效；
+   按列排序时拖动的位置存不住，手柄随之停用（Notion 同款）。 */
+
+const tbodyOf = tab => $(HEAD_SEL[tab])?.parentElement.tBodies[0] || null;
+const curTab = () => (state.page === 'media' ? 'media' : state.tab);
+const byPos = (a, b) => (a.pos ?? 1e9) - (b.pos ?? 1e9) || a.id - b.id;
+const manualOrder = tab =>
+  tab === 'media' ? views.media.sort?.key === 'pos' : !views[tab].sort;
+
+const rowSel = {};                                  // tab → Set(选中的 id)
+const selOf = tab => (rowSel[tab] ||= new Set());
+
+/* 首格 = 第一个没被隐藏的格。隐藏列只是 display:none、并没有从 DOM 里摘掉，所以
+   ":first-child" 会落在看不见的格子上——吸附与浮标都得认这个算出来的 .c0。 */
+function markFirstCol(tab) {
+  const thead = $(HEAD_SEL[tab]);
+  if (!thead) return;
+  const rows = [thead.rows[0], ...(thead.parentElement.tBodies[0]?.rows || [])];
+  for (const row of rows) {
+    if (!row) continue;
+    let first = null;
+    for (const c of row.children) {
+      c.classList.remove('c0');
+      if (!first && c.style.display !== 'none') first = c;
+    }
+    if (!first) continue;
+    first.classList.add('c0');
+    ensureGutter(tab, row, first, row.parentElement.tagName === 'THEAD');
+  }
+}
+
+function ensureGutter(tab, row, cell, head) {
+  let g = row.querySelector('.rowgut');
+  if (g) {
+    if (g.parentElement !== cell) cell.prepend(g); // 列序变了，浮标跟到新的首格里
+    return;
+  }
+  g = document.createElement('span');
+  g.className = 'rowgut';
+  g.innerHTML = head
+    ? '<input class="rgsel" type="checkbox" data-selall aria-label="全选本表">'
+    // 手柄不进 Tab 序——一行一个停靠点已经够多了；键盘改用复选框上的 Alt+↑ / Alt+↓
+    + ''
+    // ⠿ 由 CSS ::before 画，不写成按钮文本——浮标住在名称格里，写成文本就会混进
+    // td.textContent，行文本从此永远带一个 ⠿（复制整行、断言取值都会看见）
+    : '<button class="rgrip" data-grip type="button" tabindex="-1" aria-label="拖动排序"></button>'
+    + '<input class="rgsel" type="checkbox" data-sel aria-label="选择此行">';
+  cell.prepend(g);
+  head ? bindSelectAll(tab, g) : bindRowGutter(tab, row, g);
+}
+
+function bindSelectAll(tab, g) {
+  const box = g.querySelector('[data-selall]');
+  box.onclick = e => e.stopPropagation();       // 表头点击会开属性菜单
+  box.onchange = () => {
+    const s = selOf(tab);
+    for (const tr of tbodyOf(tab)?.rows || []) {
+      box.checked ? s.add(+tr.dataset.id) : s.delete(+tr.dataset.id);
+    }
+    syncSelUI(tab);
+  };
+}
+
+let rowDrag = null;   // {tab, id}
+
+function bindRowGutter(tab, tr, g) {
+  const id = +tr.dataset.id;
+  const box = g.querySelector('[data-sel]');
+  const grip = g.querySelector('[data-grip]');
+  box.onchange = () => {
+    box.checked ? selOf(tab).add(id) : selOf(tab).delete(id);
+    syncSelUI(tab);
+  };
+  // 键盘走到复选框上时用 Alt+↑ / Alt+↓ 挪行——拖拽对键盘用户是够不着的
+  box.onkeydown = e => {
+    if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+    e.preventDefault();
+    nudgeRow(tab, id, e.key === 'ArrowUp' ? -1 : 1);
+  };
+  if (!manualOrder(tab)) {
+    grip.classList.add('off');
+    grip.title = tab === 'media' ? '排序选「手动」后才能拖动' : '清掉列排序后才能拖动';
+    return;
+  }
+  grip.title = '拖动排序';
+  grip.onmousedown = () => { tr.draggable = true; };
+  tr.ondragstart = e => {
+    if (!tr.draggable) return;
+    rowDrag = { tab, id };
+    e.dataTransfer.effectAllowed = 'move';
+    closePop();
+    tr.classList.add('rdrag');
+  };
+  tr.ondragover = e => {
+    if (!rowDrag || rowDrag.tab !== tab || rowDrag.id === id) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const r = tr.getBoundingClientRect();
+    const after = e.clientY > r.top + r.height / 2;
+    tr.classList.toggle('drop-b', after);
+    tr.classList.toggle('drop-a', !after);
+  };
+  tr.ondragleave = () => tr.classList.remove('drop-a', 'drop-b');
+  tr.ondrop = e => {
+    e.preventDefault();
+    const after = tr.classList.contains('drop-b');
+    tr.classList.remove('drop-a', 'drop-b');
+    if (rowDrag?.tab === tab) applyRowOrder(tab, moveRow(tab, rowDrag.id, id, after));
+  };
+  tr.ondragend = () => {
+    tr.draggable = false;
+    for (const x of tbodyOf(tab)?.rows || []) x.classList.remove('rdrag', 'drop-a', 'drop-b');
+    rowDrag = null;
+  };
+}
+
+/* 全表（不经筛选）的手动序：顶层按 pos，子行紧跟各自的父行。
+   落表的 pos 恒按这个形状写，所以「只重排看得见的那几行」不会把被筛掉的行挤乱。 */
+function fullOrder(tab) {
+  const all = [...(state[tab] || [])].sort(byPos);
+  if (tab === 'media') return all;
+  const has = new Set(all.map(r => r.id));
+  const kids = new Map();
+  const top = [];
+  for (const r of all) {
+    if (r.parent_id && has.has(r.parent_id)) {
+      if (!kids.has(r.parent_id)) kids.set(r.parent_id, []);
+      kids.get(r.parent_id).push(r);
+    } else top.push(r);
+  }
+  return top.flatMap(r => [r, ...(kids.get(r.id) || [])]);
+}
+
+/// 把 src 挪到 tgt 之前/之后，返回全表的新 id 序；挪不了就返回 null。
+function moveRow(tab, srcId, tgtId, after) {
+  const list = fullOrder(tab);
+  const has = new Set(list.map(r => r.id));
+  const lvl = new Map(list.map(r => [r.id, r.parent_id && has.has(r.parent_id) ? 1 : 0]));
+  const si = list.findIndex(r => r.id === srcId);
+  const ti = list.findIndex(r => r.id === tgtId);
+  if (si < 0 || ti < 0 || si === ti) return null;
+  if (lvl.get(srcId) !== lvl.get(tgtId)) {
+    toast('只能在同一层里排序', true);
+    return null;
+  }
+  if (lvl.get(srcId) === 1 && list[si].parent_id !== list[ti].parent_id) {
+    toast('子行只能在同一个父条目下排序', true);
+    return null;
+  }
+  let len = 1;                                    // 顶层行连着它的子行整块搬
+  if (!lvl.get(srcId)) while (si + len < list.length && lvl.get(list[si + len].id)) len++;
+  const block = list.splice(si, len);
+  let to = list.findIndex(r => r.id === tgtId);
+  if (after) {
+    to++;
+    if (!lvl.get(tgtId)) while (to < list.length && lvl.get(list[to].id)) to++;
+  }
+  list.splice(to, 0, ...block);
+  return list.map(r => r.id);
+}
+
+// 键盘挪行：在同级里与相邻的那一行交换位置
+function nudgeRow(tab, id, step) {
+  if (!manualOrder(tab)) {
+    toast(tab === 'media' ? '排序选「手动」后才能挪行' : '清掉列排序后才能挪行', true);
+    return;
+  }
+  const list = fullOrder(tab);
+  const has = new Set(list.map(r => r.id));
+  const lvl = r => (r.parent_id && has.has(r.parent_id) ? 1 : 0);
+  const i = list.findIndex(r => r.id === id);
+  if (i < 0) return;
+  const peers = list.filter(r => lvl(r) === lvl(list[i]) && r.parent_id === list[i].parent_id);
+  const pi = peers.findIndex(r => r.id === id);
+  const tgt = peers[pi + step];
+  if (!tgt) return;
+  applyRowOrder(tab, moveRow(tab, id, tgt.id, step > 0), id);
+}
+
+async function applyRowOrder(tab, ids, refocus) {
+  if (!ids) return;
+  const path = tab === 'media' ? '/api/media/order' : `/api/collections/${tab}/items/order`;
+  try {
+    await api(path, { method: 'PUT', body: JSON.stringify({ ids }) });
+    // 本地同步 pos，省一次整表重取；渲染层无排序时就是按 pos 排
+    const at = new Map(ids.map((x, n) => [x, n + 1]));
+    for (const r of state[tab] || []) if (at.has(r.id)) r.pos = at.get(r.id);
+    RENDER[tab]();
+    if (refocus) tbodyOf(tab)?.querySelector(`tr[data-id="${refocus}"] [data-sel]`)?.focus();
+  } catch (e) { toast(e.message, true); }
+}
+
+/* ── 选区 ── */
+function syncSelUI(tab) {
+  const tb = tbodyOf(tab);
+  const s = selOf(tab);
+  if (tb) {
+    for (const id of [...s]) if (!tb.querySelector(`tr[data-id="${id}"]`)) s.delete(id);
+    tb.closest('table')?.classList.toggle('selecting', s.size > 0);
+    let shown = 0;
+    for (const tr of tb.rows) {
+      const on = s.has(+tr.dataset.id);
+      if (on) shown++;
+      tr.classList.toggle('selrow', on);
+      const b = tr.querySelector('[data-sel]');
+      if (b) b.checked = on;
+    }
+    const all = $(HEAD_SEL[tab])?.querySelector('[data-selall]');
+    if (all) {
+      all.checked = shown > 0 && shown === tb.rows.length;
+      all.indeterminate = shown > 0 && shown < tb.rows.length;
+    }
+  }
+  renderBulkBar();
+}
+
+function clearSel(tab) {
+  selOf(tab).clear();
+  syncSelUI(tab);
+}
+
+const clearAllSel = () => { for (const t of Object.keys(rowSel)) clearSel(t); };
+
+function renderBulkBar() {
+  const n = selOf(curTab()).size;
+  $('#bulkbar').hidden = !n;
+  if (n) $('#bulk-n').textContent = `已选 ${n} 项`;
+}
+
+$('#bulk-clear').onclick = () => clearSel(curTab());
+$('#bulk-del').onclick = async () => {
+  const tab = curTab();
+  const ids = [...selOf(tab)];
+  if (!ids.length) return;
+  if (!confirm(`删除选中的 ${ids.length} 项？此操作不可撤销。`)) return;
+  const path = tab === 'media' ? '/api/media/bulk_delete' : '/api/items/bulk_delete';
+  try {
+    await api(path, { method: 'POST', body: JSON.stringify({ ids }) });
+    selOf(tab).clear();
+    toast(`已删除 ${ids.length} 项`);
+    await loadAll();
+  } catch (e) { toast(e.message, true); }
+};
+
+/* 表尾「＋ 新建」：直接插一行空行、就地填（Notion 同款），不再弹表单。
+   空名/空标题后端是放行的；新行落在手动序末尾，所以按列排序时它可能不在末尾。 */
+async function addRowInline(tab) {
+  try {
+    const path = tab === 'media' ? '/api/media' : `/api/collections/${tab}/items`;
+    const { id } = await api(path, { method: 'POST', body: JSON.stringify({}) });
+    await loadAll();
+    focusNewRow(tab, id);
+  } catch (e) { toast(e.message, true); }
+}
+
+function focusNewRow(tab, id) {
+  const tr = tbodyOf(tab)?.querySelector(`tr[data-id="${id}"]`);
+  if (!tr) return void toast('新行建好了，但被当前的筛选或搜索挡住了');
+  const open = () => {
+    const cells = [...tr.children].filter(td => td.style.display !== 'none');
+    const td = cells.find(x => x.dataset.k === 'name' || x.dataset.k === 'title') || cells[0];
+    const it = state[tab]?.find(x => x.id === id);
+    if (td && it) openCellPop(tab, it, td.dataset.k, td);
+  };
+  const r = tr.getBoundingClientRect();
+  if (r.top >= 0 && r.bottom <= innerHeight) return open();
+  // 全局的 scroll 监听会关掉浮层（浮层是 fixed 的，滚动后就脱离锚点了），而
+  // scrollIntoView 派发 scroll 事件是异步的——先开编辑器的话会被自己这一下滚动关掉。
+  // 滚动事件在「更新渲染」里排在 rAF 回调之前，所以等一帧就够。
+  tr.scrollIntoView({ block: 'nearest' });
+  requestAnimationFrame(open);
 }
 
 // 每张表渲染完的收尾：列隐藏/列序、表宽对账、表头指示、视图胶囊行一次做齐
@@ -795,6 +1074,7 @@ function syncTable(tab) {
   applyWidths(tab); // 隐藏/恢复列后表宽必须重算，否则 fixed 布局把差额摊给其余列
   syncHeads(tab);
   renderViewPills(tab);
+  syncSelUI(tab); // 行是每次渲染重建的，勾选态要照着选区补回来
 }
 
 function syncHeads(tab) {
@@ -1641,16 +1921,6 @@ document.addEventListener('click', e => {
   if (it) openCellPop(tab, it, td.dataset.k, td);
 });
 
-/* ── 媒体条目删除（库的条目走 delColItem）── */
-async function delItem(kind, it) {
-  if (!confirm(`删除「${it.title || ''}」？此操作不可撤销。`)) return;
-  try {
-    await api(`/api/${kind}/${it.id}`, { method: 'DELETE' });
-    toast('已删除');
-    await loadAll();
-  } catch (e) { toast(e.message, true); }
-}
-
 /* ── 设置页 ── */
 function openSettings() {
   const st = state.settings;
@@ -1807,6 +2077,8 @@ function mediaRows() {
     rows = rows.filter(x => [x.title, x.orig_title, x.review, x.directors, x.actors]
       .some(v => v && String(v).toLowerCase().includes(q)));
   }
+  // 「手动」不是一列，排的是 media_items.pos——sortRows 走 COLS 查不到它
+  if (m.sort?.key === 'pos') return [...rows].sort(byPos);
   if (m.sort) return sortRows('media', rows, m.sort);
   return [...rows].sort((a, b) =>
     String(b.marked_at || '').localeCompare(String(a.marked_at || '')) || b.id - a.id);
@@ -1875,18 +2147,15 @@ function renderMedia() {
       const tr = document.createElement('tr');
       tr.dataset.id = it.id;
       tr.innerHTML = `
-        <td>${esc(it.title)}<button class="rowopen" data-open type="button" title="打开详情">⤢</button>${it.orig_title ? `<div class="muted" style="font-size:.75rem">${esc(it.orig_title)}</div>` : ''}</td>
+        <td>${nameCell(it.title)}<button class="rowopen" data-open type="button" title="打开详情">⤢</button>${it.orig_title ? `<div class="muted" style="font-size:.75rem">${esc(it.orig_title)}</div>` : ''}</td>
         <td>${cellVal('media', 'kind', it.kind)}</td>
         <td class="cdate">${esc(String(it.year || ''))}</td>
         <td>${starRow(it.rating)}</td>
         <td class="amt">${it.douban_rating ?? ''}</td>
         <td>${stPill(it.status)}</td>
         <td class="cdate">${esc(it.marked_at || '')}</td>
-        ${customTds('media', it)}<td class="ops">
-          <button class="btn link" data-del type="button">删</button>
-        </td>`;
+        ${customTds('media', it)}<td class="ops"></td>`;
       tr.querySelector('[data-open]').onclick = () => openMediaDialog(it);
-      tr.querySelector('[data-del]').onclick = () => delItem('media', it);
       tb.appendChild(tr);
     }
   }
@@ -2071,6 +2340,7 @@ $('#m-search').addEventListener('input', e => {
 document.querySelectorAll('.nav-tab[data-page]').forEach(b => b.onclick = () => {
   state.page = b.dataset.page;
   closePop();
+  clearAllSel(); // 选区跟着看得见的那张表走，换页就散掉，免得批量删到看不见的表里
   document.querySelectorAll('.nav-tab[data-page]').forEach(x => x.classList.toggle('on', x === b));
   $('#page-renewals').hidden = state.page !== 'renewals';
   $('#page-media').hidden = state.page !== 'media';
@@ -2100,6 +2370,7 @@ $('#btn-settings').onclick = openSettings;
 function switchTab(key) {
   state.tab = key;
   closePop();
+  clearAllSel(); // 同上：选区不跨表带走
   $('#t-search').value = views[key]?.q || '';
   document.querySelectorAll('.tab[data-tab]').forEach(x => x.classList.toggle('on', x.dataset.tab === key));
   document.querySelectorAll('.tablewrap[data-tab]').forEach(w => { w.hidden = w.dataset.tab !== key; });
@@ -2382,7 +2653,8 @@ function renderColl(key) {
   tb.innerHTML = '';
   const byId = Object.fromEntries(all.map(x => [x.id, x]));
   let rows = applyView(key, all);
-  if (!views[key].sort) rows = [...rows].sort((a, b) => cmpZh(a.name, b.name));
+  // 无列排序时的基态就是手动序（pos）。这里曾经按名称字母序排，那让「拖出来的顺序」无处安放
+  if (!views[key].sort) rows = [...rows].sort(byPos);
   const vis = new Set(rows.map(r => r.id));
   const kids = new Map();
   const top = [];
@@ -2408,7 +2680,7 @@ function renderColl(key) {
     const tds = fields.map(f => {
       const v = fieldVal(f, it);
       if (f.key === 'name') {
-        return `<td>${hasKids ? `<button class="tgl" data-tgl type="button" title="折叠 / 展开子行">${collapsed.has(it.id) ? '▸' : '▾'}</button>` : ''}${(!depth && parent) ? `<span class="sub-parent">${esc(parent.name)} ↳ </span>` : ''}${logoOf(it) ? `<img class="slogo" src="/logos/${esc(logoOf(it))}" alt="" loading="lazy">` : ''}${esc(it.name)}${safeUrl(it.url) ? ` <a class="btn link" href="${esc(safeUrl(it.url))}" target="_blank" rel="noreferrer">↗</a>` : ''}<button class="rowopen" data-open type="button" title="打开详情">⤢</button>${sub ? `<div class="muted" style="font-size:.75rem">${esc(sub)}</div>` : ''}</td>`;
+        return `<td>${hasKids ? `<button class="tgl" data-tgl type="button" title="折叠 / 展开子行">${collapsed.has(it.id) ? '▸' : '▾'}</button>` : ''}${(!depth && parent) ? `<span class="sub-parent">${esc(parent.name)} ↳ </span>` : ''}${logoOf(it) ? `<img class="slogo" src="/logos/${esc(logoOf(it))}" alt="" loading="lazy">` : ''}${nameCell(it.name)}${safeUrl(it.url) ? ` <a class="btn link" href="${esc(safeUrl(it.url))}" target="_blank" rel="noreferrer">↗</a>` : ''}<button class="rowopen" data-open type="button" title="打开详情">⤢</button>${sub ? `<div class="muted" style="font-size:.75rem">${esc(sub)}</div>` : ''}</td>`;
       }
       if (f.key === 'status') return `<td>${stPill(it.status)}</td>`;
       if (f.key === 'left') return `<td class="wide">${leftBar(it)}</td>`;
@@ -2426,10 +2698,8 @@ function renderColl(key) {
     const canRenew = sem.timeline && (c.due_anchor === 'last' || it.next_renewal);
     tr.innerHTML = `${tds}<td class="ops">
         ${canRenew ? `<button class="btn link" data-renew type="button">已${esc(c.verb || '续费')}</button>` : ''}
-        <button class="btn link" data-del type="button">删</button>
       </td>`;
     tr.querySelector('[data-open]').onclick = () => openItemDialog(key, it);
-    tr.querySelector('[data-del]').onclick = () => delColItem(key, it);
     const rb = tr.querySelector('[data-renew]');
     if (rb) rb.onclick = () => doRenew(`${key}:${it.id}`);
     const tg = tr.querySelector('[data-tgl]');
@@ -2447,15 +2717,6 @@ function renderColl(key) {
     if (kids.has(it.id) && !collapsed.has(it.id)) for (const k of kids.get(it.id)) emit(k, 1);
   }
   syncTable(key);
-}
-
-async function delColItem(key, it) {
-  if (!confirm(`删除「${it.name}」？`)) return;
-  try {
-    await api(`/api/items/${it.id}`, { method: 'DELETE' });
-    toast('已删除');
-    await loadAll();
-  } catch (e) { toast(e.message, true); }
 }
 
 /* ── 通用详情表单：按字段集生成 ── */

@@ -380,13 +380,63 @@ main { max-width: 1400px; margin: 0 auto; padding: .6rem 1.4rem 3rem; }
    hover 态也要显式对齐，否则悬停时首列不跟着变色。
    右边框沿用 .grid td:not(:last-child) 那条：实测 Chromium 下 collapse 的边框跟着
    吸附的格子走，不会脱开；换成 inset 阴影反而画在 padding 边而不是格子右缘，
-   中间会漏出后一列的内容。 */
-.grid th:first-child, .grid td:first-child {
+   中间会漏出后一列的内容。
+   吸附的是「第一个没被隐藏的格」而不是 :first-child——隐藏列只是 display:none、并没有从
+   DOM 里摘掉，把第一列藏起来时 :first-child 会落在一个不可见的格子上，真正露在最左边的
+   那列反而不吸附。applyColumns 结算完列序后给它打上 .c0。 */
+.grid th.c0, .grid td.c0 {
   position: sticky; left: 0; z-index: 1;
   background: var(--surface);
 }
-.grid thead th:first-child { z-index: 2; }
-.grid tbody tr:hover td:first-child { background: var(--surface-2); }
+.grid thead th.c0 { z-index: 2; }
+.grid tbody tr:hover td.c0 { background: var(--surface-2); }
+
+/* 行首浮标：⠿ 拖动手柄 + 复选框，占的是首格预留出来的左内边距。
+   没做成真列——那样列宽三律、列序存储、隐藏列全都要再认一个新键，而它本就不是数据。
+   跟着 .c0 一起吸附，横滚时不会跑掉；绝对定位的参照就是 .c0 那条 sticky
+   （position 非 static 即可当包含块，不必另加 relative）。 */
+/* 预留 2.5rem 就够（再宽会把首列的自然宽推过列宽三律的下限，拖窄那几条断言会翻）；
+   复选框与名字之间的空隙从浮标这一侧要——浮标比预留窄，右边自然留出一道缝 */
+.grid td.c0, .grid th.c0 { padding-left: 2.5rem; }
+tr.subrow td.c0 { padding-left: 4rem; }
+.rowgut {
+  position: absolute; left: .2rem; top: 0; height: 100%; width: 2rem;
+  display: flex; align-items: center; justify-content: flex-end; gap: .15rem;
+}
+.rowgut .rgrip {
+  cursor: grab; color: var(--muted); font-size: .95rem; line-height: 1;
+  opacity: 0; transition: opacity .15s; user-select: none; padding: 0 .1rem;
+  border: 0; background: none;
+}
+/* 字形走 ::before：浮标住在名称格里，写成按钮文本就会混进 td.textContent */
+.rowgut .rgrip::before { content: "⠿"; }
+.rowgut .rgrip.off { cursor: default; }
+tr:hover .rgrip { opacity: .5; }
+.rowgut .rgrip:hover { opacity: .9; }
+.rowgut .rgrip:active { cursor: grabbing; }
+.rowgut .rgsel { margin: 0; opacity: 0; transition: opacity .15s; cursor: pointer; }
+/* 勾了任意一行之后，所有复选框常驻——否则要靠悬停一个个找，选区看不出全貌 */
+tr:hover .rgsel, .grid.selecting .rgsel, .rgsel:checked { opacity: 1; }
+.rgrip:focus-visible, .rgsel:focus-visible { opacity: 1; outline: 2.5px solid var(--aqua); outline-offset: 1px; }
+tr.selrow td { background: var(--aqua-soft); }
+tr.selrow td.c0 { background: var(--aqua-soft); }
+/* 拖动中的落点提示：画在行的上/下缘 */
+tr.rdrag td { opacity: .45; }
+tr.drop-a td { box-shadow: inset 0 2px 0 var(--aqua); }
+tr.drop-b td { box-shadow: inset 0 -2px 0 var(--aqua); }
+
+/* 批量操作条：勾选任意行后浮出 */
+#bulkbar {
+  position: fixed; left: 50%; bottom: 1.4rem; transform: translateX(-50%);
+  display: flex; align-items: center; gap: .7rem; z-index: 40;
+  padding: .5rem .6rem .5rem 1.1rem; border-radius: 99px;
+  background: var(--surface); border: 1.5px solid var(--line);
+  box-shadow: 0 14px 34px -12px rgba(0, 0, 0, .3);
+  animation: rise .3s var(--spring) both;
+}
+#bulk-n { font-weight: 650; font-size: .88rem; }
+.btn.danger { background: var(--coral-soft); color: var(--coral); border-color: transparent; }
+.btn.danger:hover { background: var(--coral); color: #fff; transform: translateY(-1px); }
 th.dragging { opacity: .45; }
 th.drop-l { box-shadow: inset 3px 0 0 var(--aqua); }
 th.drop-r { box-shadow: inset -3px 0 0 var(--aqua); }
@@ -511,7 +561,9 @@ th.drop-r { box-shadow: inset -3px 0 0 var(--aqua); }
   transition: color .15s;
 }
 .tgl:hover { color: var(--aqua-deep); }
-tr.subrow td[data-k="name"] { padding-left: 2rem; }
+/* 子行的缩进跟着首格走（见上面 tr.subrow td.c0），不再按 data-k=name 认——
+   名称列不一定排在最左边，缩进画在中间某一列上看着就是错位。 */
+.unnamed { color: var(--muted); font-style: italic; }
 /* 订阅服务 logo：名称格小图标 + 表单预览 */
 .slogo {
   width: 20px; height: 20px; border-radius: 5px; object-fit: cover;
