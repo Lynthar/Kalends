@@ -173,9 +173,12 @@ impl Row {
             .and_then(|k| self.extra.get(k))
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty());
+        // 空名是允许的（表尾「＋ 新建」先插空行再就地填），但到期时间线、通知与 ICS 的
+        // 标题不能因此变成空串——日历里那会是一个没有名字的事件。
+        let name = if self.name.trim().is_empty() { "未命名" } else { self.name.trim() };
         match sub {
-            Some(s) => format!("{} · {}", self.name, s),
-            None => self.name.clone(),
+            Some(s) => format!("{name} · {s}"),
+            None => name.to_string(),
         }
     }
 }
@@ -258,6 +261,42 @@ mod tests {
 
     fn d(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    fn row(name: &str, subtitle: Option<&str>, extra: Value) -> Row {
+        Row {
+            key: "subs".into(),
+            verb: String::new(),
+            note_field: None,
+            subtitle: subtitle.map(str::to_string),
+            id: 1,
+            name: name.into(),
+            status: "Active".into(),
+            price: None,
+            currency: None,
+            cycle: None,
+            cycle_days: None,
+            next_renewal: None,
+            last_renewed: None,
+            due_anchor: "next".into(),
+            extra,
+        }
+    }
+
+    // 空名条目是允许的（表尾「＋ 新建」先插空行再就地填），但到期时间线、通知与 ICS
+    // 的标题不能因此变成空串——日历里那会是一个没有名字的事件
+    #[test]
+    fn title_falls_back_when_the_name_is_blank() {
+        assert_eq!(row("Netflix", None, json!({})).title(), "Netflix");
+        assert_eq!(row("", None, json!({})).title(), "未命名");
+        assert_eq!(row("   ", None, json!({})).title(), "未命名");
+        // 副标题照拼，前半段换成占位
+        let with_sub = row("", Some("product"), json!({ "product": "VPS-1" }));
+        assert_eq!(with_sub.title(), "未命名 · VPS-1");
+        assert_eq!(
+            row("HostA", Some("product"), json!({ "product": "VPS-1" })).title(),
+            "HostA · VPS-1"
+        );
     }
 
     #[test]

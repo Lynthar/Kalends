@@ -26,6 +26,8 @@ pub fn router() -> Router<App> {
         .route("/api/collections/order", put(set_order))
         .route("/api/collections/{id}", put(update).delete(remove))
         .route("/api/collections/{key}/items", get(items_list).post(items_create))
+        .route("/api/collections/{key}/items/order", put(items_order))
+        .route("/api/items/bulk_delete", post(items_bulk_delete))
         .route("/api/items/{id}", put(items_update).delete(items_delete))
         .route("/api/items/{id}/renew", post(items_renew))
         .route("/api/items/{id}/logo", post(logo_set).delete(logo_clear))
@@ -385,12 +387,14 @@ async fn set_order(State(app): State<App>, Json(b): Json<Value>) -> R {
         return Err(bad("缺少 ids").into());
     }
     let conn = app.db.lock().unwrap();
+    let tx = conn.unchecked_transaction()?;
     for (n, id) in ids.iter().enumerate() {
-        conn.execute(
+        tx.execute(
             "UPDATE collections SET pos=?1 WHERE id=?2",
             params![n as i64 + 1, id],
         )?;
     }
+    tx.commit()?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -419,8 +423,10 @@ async fn remove(State(app): State<App>, Path(id): Path<i64>) -> R {
 
 /* ── 条目 ───────────────────────────────────────────────────────── */
 
+// pos 排在最后：它不在 WRITE_COLS 里（手动序只由 /items/order 改，整行 PUT 碰不到它），
+// 追加在末尾就不必动 item_row 里既有的下标。
 const ITEM_COLS: &str = "id,collection_id,name,parent_id,status,price,currency,cycle,cycle_days,\
-                         next_renewal,last_renewed,url,notes,logo,extra,created_at,updated_at";
+                         next_renewal,last_renewed,url,notes,logo,extra,created_at,updated_at,pos";
 
 pub fn item_row(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -441,6 +447,7 @@ pub fn item_row(r: &rusqlite::Row) -> rusqlite::Result<Value> {
         "extra": extra_json(r.get::<_, Option<String>>(14)?),
         "created_at": r.get::<_, String>(15)?,
         "updated_at": r.get::<_, String>(16)?,
+        "pos": r.get::<_, Option<i64>>(17)?,
     }))
 }
 
@@ -448,8 +455,10 @@ pub fn item_row(r: &rusqlite::Row) -> rusqlite::Result<Value> {
 pub fn items_of(conn: &Connection, key: &str) -> anyhow::Result<Vec<Value>> {
     let id = coll_id(conn, key)?;
     let anchor = anchor_of(conn, id)?;
-    let mut stmt =
-        conn.prepare(&format!("SELECT {ITEM_COLS} FROM items WHERE collection_id=?1 ORDER BY id"))?;
+    // pos 为空的排在最后（迁移之前建的行不会有，理论上不该出现，出现了也别把它们藏起来）
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {ITEM_COLS} FROM items WHERE collection_id=?1 ORDER BY pos IS NULL, pos, id"
+    ))?;
     let mut rows: Vec<Value> = stmt
         .query_map([id], item_row)?
         .collect::<rusqlite::Result<_>>()?;
@@ -483,7 +492,9 @@ async fn items_list(State(app): State<App>, Path(key): Path<String>) -> R {
 /// 写入用的字段集：整行 PUT 语义是全量替换，没传的键一律置空。
 fn item_values(b: &Value) -> anyhow::Result<Vec<rusqlite::types::Value>> {
     use rusqlite::types::Value as V;
-    let name = s(b, "name").ok_or_else(|| bad("名称不能为空"))?;
+    // 空名是允许的：表尾「＋ 新建」直接插一行空行、就地填（Notion 同款），拦下它这条路就没了。
+    // 界面上空名渲染成灰色「未命名」占位，通知与 ICS 同样兜底，不会输出空标题。
+    let name = s(b, "name").unwrap_or_default();
     Ok(vec![
         V::from(name),
         i(b, "parent_id").map(V::from).unwrap_or(V::Null),
@@ -538,9 +549,16 @@ pub fn insert_item(conn: &Connection, coll: i64, b: &Value) -> anyhow::Result<i6
     check_parent(conn, coll, None, i(b, "parent_id"))?;
     let mut vals = item_values(b)?;
     vals.insert(0, rusqlite::types::Value::from(coll));
+    // 新行落在手动序末尾。pos 不在 WRITE_COLS 里，只在这里和 /items/order 两处写。
+    let pos: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(pos),0)+1 FROM items WHERE collection_id=?1",
+        [coll],
+        |r| r.get(0),
+    )?;
+    vals.push(rusqlite::types::Value::from(pos));
     conn.execute(
         &format!(
-            "INSERT INTO items(collection_id,{WRITE_COLS}) VALUES({})",
+            "INSERT INTO items(collection_id,{WRITE_COLS},pos) VALUES({})",
             (1..=vals.len()).map(|n| format!("?{n}")).collect::<Vec<_>>().join(",")
         ),
         rusqlite::params_from_iter(vals),
@@ -601,6 +619,57 @@ async fn items_delete(State(app): State<App>, Path(id): Path<i64>) -> R {
     let conn = app.db.lock().unwrap();
     delete_item(&app2, &conn, id)?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// 批量端点的 ids 数组（库与媒体共用）。
+pub fn id_list(b: &Value) -> anyhow::Result<Vec<i64>> {
+    let ids: Vec<i64> = b
+        .get("ids")
+        .and_then(|x| x.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_i64()).collect())
+        .unwrap_or_default();
+    if ids.is_empty() {
+        return Err(bad("缺少 ids"));
+    }
+    Ok(ids)
+}
+
+/// 整份手动序：收到的是这个库当前的完整行序，按下标落 pos。
+/// 只改属于该库的行——越库的 id 静默跳过，免得这个端点变成"替我改任意条目的 pos"。
+async fn items_order(State(app): State<App>, Path(key): Path<String>, Json(b): Json<Value>) -> R {
+    let ids = id_list(&b)?;
+    let conn = app.db.lock().unwrap();
+    let coll = coll_id(&conn, &key)?;
+    let tx = conn.unchecked_transaction()?;
+    for (n, id) in ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE items SET pos=?1 WHERE id=?2 AND collection_id=?3",
+            params![n as i64 + 1, id, coll],
+        )?;
+    }
+    tx.commit()?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// 批量删除。整批在一个事务里，要么全删要么一条不删——半途失败留下"删了一半"的选区，
+/// 用户看到的是删除按钮报错却又少了几行。图标文件在提交之后才清，回滚了就不会留孤儿。
+async fn items_bulk_delete(State(app): State<App>, Json(b): Json<Value>) -> R {
+    let ids = id_list(&b)?;
+    let conn = app.db.lock().unwrap();
+    let mut logos = Vec::new();
+    let tx = conn.unchecked_transaction()?;
+    for id in &ids {
+        let logo: Option<String> = tx
+            .query_row("SELECT logo FROM items WHERE id=?1", [id], |r| r.get(0))
+            .unwrap_or(None);
+        logos.push(logo);
+        tx.execute("DELETE FROM items WHERE id=?1", [id])?;
+    }
+    tx.commit()?;
+    for logo in logos {
+        remove_logo_file(&app, logo);
+    }
+    Ok(Json(json!({ "ok": true, "deleted": ids.len() })))
 }
 
 /// 记一笔续费：写台账并按库的到期模型推进日期。

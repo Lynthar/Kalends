@@ -23,6 +23,8 @@ const REAL_FIELDS: &[&str] = &["douban_rating", "playtime_hours"];
 pub fn router() -> Router<App> {
     Router::new()
         .route("/api/media", get(list).post(create))
+        .route("/api/media/order", put(set_order))
+        .route("/api/media/bulk_delete", post(bulk_delete))
         .route("/api/media/{id}", put(update).delete(delete))
         .route("/api/media/import", post(import))
         .route("/api/media/from_tmdb", post(from_tmdb))
@@ -33,9 +35,8 @@ pub fn router() -> Router<App> {
 }
 
 fn normalized(mut b: Value) -> Result<Value, ApiError> {
-    if s(&b, "title").is_none() {
-        return Err(bad("标题不能为空").into());
-    }
+    // 空标题是允许的：表尾「＋ 新建」直接插一行空行、就地填（与库那侧同款）。
+    // title 有 NOT NULL 约束，所以 values_of 会把它写成空串而不是 NULL。
     // 评分越界会一路渲染到界面上（99 星把整行撑爆）；不填＝没评分，那是允许的
     if let Some(r) = i(&b, "rating") {
         if !(1..=5).contains(&r) {
@@ -56,7 +57,11 @@ fn values_of(b: &Value) -> (Vec<&'static str>, Vec<SqlValue>) {
     let mut vals = Vec::new();
     for k in STR_FIELDS {
         cols.push(*k);
-        vals.push(s(b, k).map(SqlValue::from).unwrap_or(SqlValue::Null));
+        vals.push(if *k == "title" {
+            SqlValue::from(s(b, k).unwrap_or_default()) // NOT NULL：空标题写空串
+        } else {
+            s(b, k).map(SqlValue::from).unwrap_or(SqlValue::Null)
+        });
     }
     for k in INT_FIELDS {
         cols.push(*k);
@@ -72,7 +77,15 @@ fn values_of(b: &Value) -> (Vec<&'static str>, Vec<SqlValue>) {
 }
 
 fn insert(conn: &Connection, b: &Value) -> anyhow::Result<i64> {
-    let (cols, vals) = values_of(b);
+    let (mut cols, mut vals) = values_of(b);
+    // 新行落在手动序末尾。pos 只在这里和 /api/media/order 两处写，整行 PUT 碰不到它
+    //（values_of 只铺 STR/INT/REAL 三张表里的列，pos 不在其中）。
+    cols.push("pos");
+    vals.push(SqlValue::from(conn.query_row(
+        "SELECT COALESCE(MAX(pos),0)+1 FROM media_items",
+        [],
+        |r| r.get::<_, i64>(0),
+    )?));
     let placeholders: Vec<String> = (1..=cols.len()).map(|n| format!("?{n}")).collect();
     conn.execute(
         &format!(
@@ -188,6 +201,38 @@ async fn delete(State(app): State<App>, Path(id): Path<i64>) -> R {
         let _ = std::fs::remove_file(app.data_dir.join("covers").join(n));
     }
     Ok(Json(json!({ "ok": true })))
+}
+
+/// 整份手动序：收到的是当前的完整行序，按下标落 pos。
+async fn set_order(State(app): State<App>, Json(b): Json<Value>) -> R {
+    let ids = crate::collections::id_list(&b)?;
+    let conn = app.db.lock().unwrap();
+    let tx = conn.unchecked_transaction()?;
+    for (n, id) in ids.iter().enumerate() {
+        tx.execute("UPDATE media_items SET pos=?1 WHERE id=?2", params![n as i64 + 1, id])?;
+    }
+    tx.commit()?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// 批量删除。整批一个事务，海报文件在提交之后才清（回滚了就不会留孤儿）。
+async fn bulk_delete(State(app): State<App>, Json(b): Json<Value>) -> R {
+    let ids = crate::collections::id_list(&b)?;
+    let conn = app.db.lock().unwrap();
+    let mut covers = Vec::new();
+    let tx = conn.unchecked_transaction()?;
+    for id in &ids {
+        let cover: Option<String> = tx
+            .query_row("SELECT cover FROM media_items WHERE id=?1", [id], |r| r.get(0))
+            .unwrap_or(None);
+        covers.push(cover);
+        tx.execute("DELETE FROM media_items WHERE id=?1", [id])?;
+    }
+    tx.commit()?;
+    for name in covers.into_iter().flatten().filter(|n| crate::api::safe_name(n)) {
+        let _ = std::fs::remove_file(app.data_dir.join("covers").join(name));
+    }
+    Ok(Json(json!({ "ok": true, "deleted": ids.len() })))
 }
 
 /// 批量导入（Notion 迁移 / 豆伴 CSV 适配器共用）：douban_id 或 (title,year,kind) 已存在则跳过。

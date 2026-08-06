@@ -15,6 +15,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0009_coll_subline.sql"),
     include_str!("../migrations/0010_drop_price_history.sql"),
     include_str!("../migrations/0011_drop_legacy_tables.sql"),
+    include_str!("../migrations/0012_manual_order.sql"),
 ];
 
 pub fn open(data_dir: &Path) -> Result<Connection> {
