@@ -57,7 +57,11 @@ pub fn run(conn: &Connection, data_dir: &Path) -> Result<Report> {
             lines.push_str(&serde_json::to_string(&obj)?);
             lines.push('\n');
         }
-        fs::write(export_dir.join(format!("{table}.jsonl")), lines)?;
+        // 先写临时文件再改名：原地写崩在半途留下的是一份看着像样、实则截断的导出
+        let out = export_dir.join(format!("{table}.jsonl"));
+        let tmp = out.with_extension("jsonl.tmp");
+        fs::write(&tmp, lines)?;
+        fs::rename(&tmp, &out)?;
     }
 
     let mut snaps: Vec<PathBuf> = fs::read_dir(&backups)?

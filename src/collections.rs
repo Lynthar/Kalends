@@ -80,6 +80,26 @@ fn anchor_of(conn: &Connection, id: i64) -> anyhow::Result<String> {
     )?)
 }
 
+/// 新库的键：k<历史用过的最大编号 + 1>。
+///
+/// 不能拿 rowid 派生。SQLite 不带 AUTOINCREMENT 时会复用删掉的 id，而删库按设计保留
+/// 台账与通知日志（那两张表存的是 kind 字符串，不跟着外键走），于是新库会捡到旧库的
+/// kind：台账里凭空多出别人的付款记录，通知去重键也可能把新条目判成"已发过"而漏发。
+/// 所以编号要越过所有"曾经用过"的痕迹，而不只是现存的库。
+fn next_coll_key(conn: &Connection) -> rusqlite::Result<String> {
+    let n: i64 = conn.query_row(
+        "SELECT coalesce(max(n),0)+1 FROM (
+           SELECT CAST(substr(key, 2) AS INTEGER) n FROM collections       WHERE key  GLOB 'k[0-9]*'
+           UNION ALL
+           SELECT CAST(substr(kind,2) AS INTEGER)  FROM renewal_ledger     WHERE kind GLOB 'k[0-9]*'
+           UNION ALL
+           SELECT CAST(substr(kind,2) AS INTEGER)  FROM notification_log   WHERE kind GLOB 'k[0-9]*')",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(format!("k{n}"))
+}
+
 async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
     let tpl = match s(&b, "template") {
         Some(id) => Some(template(&id).ok_or_else(|| bad(format!("未知模板：{id}")))?),
@@ -101,11 +121,16 @@ async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
     let pos: i64 = conn.query_row("SELECT coalesce(max(pos),0)+1 FROM collections", [], |r| {
         r.get(0)
     })?;
-    // key 由 id 派生，避免用户起名撞上内置键或包含路径字符
-    conn.execute(
+    // 键自己生成，不让用户起名——免得撞上内置键或者带进路径字符
+    let key = next_coll_key(&conn)?;
+    // 建库与播字段集要么一起成、要么一条都不落：半途断在中间留下的是一个没有任何列的
+    // 空壳库，界面上是张点不动的空表
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "INSERT INTO collections(key,name,icon,due_anchor,subtitle,subline,verb,note_field,pos,builtin)
-         VALUES('',?1,?2,?3,NULL,?4,?5,NULL,?6,0)",
+         VALUES(?1,?2,?3,?4,NULL,?5,?6,NULL,?7,0)",
         params![
+            key,
             name,
             take("icon", tpl.and_then(|t| opt(t.icon))),
             anchor,
@@ -114,15 +139,14 @@ async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
             pos
         ],
     )?;
-    let id = conn.last_insert_rowid();
-    conn.execute("UPDATE collections SET key='k'||id WHERE id=?1", [id])?;
-    let key: String = conn.query_row("SELECT key FROM collections WHERE id=?1", [id], |r| r.get(0))?;
-    seed_fields(&conn, &key, &anchor, tpl)?;
-    let row = conn.query_row(
+    let id = tx.last_insert_rowid();
+    seed_fields(&tx, &key, &anchor, tpl)?;
+    let row = tx.query_row(
         &format!("SELECT {COLL_COLS} FROM collections WHERE id=?1"),
         [id],
         coll_row,
     )?;
+    tx.commit()?;
     Ok(Json(row))
 }
 
@@ -382,8 +406,11 @@ async fn remove(State(app): State<App>, Path(id): Path<i64>) -> R {
         .query_map([id], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
-    conn.execute("DELETE FROM collections WHERE id=?1", [id])?;
-    conn.execute("DELETE FROM fields WHERE tbl=?1", [&key])?;
+    // 库与它的字段注册表一起消失：只删掉一半的话，剩下的那半是一批够不着的孤儿列记录
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM collections WHERE id=?1", [id])?;
+    tx.execute("DELETE FROM fields WHERE tbl=?1", [&key])?;
+    tx.commit()?;
     for name in logos {
         remove_logo_file(&app2, Some(name));
     }
@@ -601,7 +628,10 @@ pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value
         return Err(missing("条目不存在"));
     };
     let today = engine::today();
-    conn.execute(
+    // 记账与推日期是一件事：只落成一半的话，账记了而到期日没动，界面照旧显示逾期，
+    // 而台账已经声称这笔付过了——"台账=事实"这条承诺就断在这里
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "INSERT INTO renewal_ledger(kind,item_id,renewed_at,amount,currency,note)
          VALUES(?1,?2,?3,?4,?5,?6)",
         params![
@@ -613,7 +643,7 @@ pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value
             s(b, "note"),
         ],
     )?;
-    if anchor == "next" {
+    let out = if anchor == "next" {
         let mut new_next: Option<String> = None;
         if let (Some(cy), Some(nx)) = (cycle.as_deref(), next.as_deref()) {
             if let Ok(start) = NaiveDate::parse_from_str(nx, "%Y-%m-%d") {
@@ -629,18 +659,21 @@ pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value
             }
         }
         if let Some(n) = &new_next {
-            conn.execute(
+            tx.execute(
                 "UPDATE items SET next_renewal=?1,updated_at=datetime('now') WHERE id=?2",
                 params![n, id],
             )?;
         }
-        return Ok(json!({ "next_renewal": new_next }));
-    }
-    conn.execute(
-        "UPDATE items SET last_renewed=?1,updated_at=datetime('now') WHERE id=?2",
-        params![today.to_string(), id],
-    )?;
-    Ok(json!({ "last_renewed": today.to_string() }))
+        json!({ "next_renewal": new_next })
+    } else {
+        tx.execute(
+            "UPDATE items SET last_renewed=?1,updated_at=datetime('now') WHERE id=?2",
+            params![today.to_string(), id],
+        )?;
+        json!({ "last_renewed": today.to_string() })
+    };
+    tx.commit()?;
+    Ok(out)
 }
 
 async fn items_renew(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value>) -> R {

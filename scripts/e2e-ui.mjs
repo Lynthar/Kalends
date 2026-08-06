@@ -1463,6 +1463,29 @@ await sleep(1200);
 check('选回顶层就脱离父行', (await (await fetch(APP + 'api/collections/subs/items')).json())
   .find(r => r.id === orphan.id)?.parent_id == null);
 
+/* 17.11. 库的 key 曾经是 'k'||rowid 派生的，而 SQLite 不带 AUTOINCREMENT 会复用删掉的
+   id；删库按设计保留台账（那张表存的是 kind 字符串，不跟外键走），于是新建的库会捡到
+   旧库的 kind——一个从没付过钱的新库，台账里凭空多出别人的付款记录。实测复现过。 */
+const kruA = await post('/api/collections', { name: '键复用甲', template: 'domain' });
+const kruItem = await post(`/api/collections/${kruA.key}/items`, {
+  name: 'reuse.example', status: 'Active', price: 12, currency: 'USD',
+  cycle: 'annual', next_renewal: '2026-12-01',
+});
+await post(`/api/items/${kruItem.id}/renew`, {});
+await fetch(`${APP}api/collections/${kruA.id}`, { method: 'DELETE' });
+const kruB = await post('/api/collections', { name: '键复用乙', template: 'blank' });
+check('删库后新建的库不复用旧 key', kruB.key !== kruA.key, `${kruA.key} → ${kruB.key}`);
+const kruLedger = await (await fetch(APP + 'api/ledger')).json();
+check('旧账没有被认到新库头上',
+  kruLedger.every(r => r.kind !== kruB.key),
+  JSON.stringify(kruLedger.filter(r => r.kind === kruB.key)));
+check('旧账仍留着当存档、库名回落成空',
+  kruLedger.some(r => r.kind === kruA.key && !r.coll_name),
+  JSON.stringify(kruLedger.map(r => [r.kind, r.coll_name])));
+await fetch(`${APP}api/collections/${kruB.id}`, { method: 'DELETE' });
+await evl(`loadAll()`);
+await sleep(700);
+
 /* 18. 库删光也不能把界面打崩。放在最后跑——这一段会把预置库连数据一起删掉。
    预置库过去在界面上删不掉（后端一直放行、文档也写着可删），而新库的表格容器
    锚在 VPS 那张表上：VPS 一删，同一会话里再建库就是 null.after()，loadAll 断在那儿。 */

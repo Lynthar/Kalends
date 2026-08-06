@@ -169,6 +169,27 @@ fn already_sent(
     .unwrap_or(false)
 }
 
+/// 摘要时刻，恒为零填充的 `HH:MM`。
+///
+/// 判断"到点了吗"是拿 `%H:%M` 的当前时刻做**字符串**比较，所以一个没零填充的
+/// `"9:00"` 会让 `"09:00" >= "9:00"` 乃至 `"23:59" >= "9:00"` 全为假——摘要从此永不
+/// 触发，且界面上看不出任何异常。界面的 `<input type=time>` 按规范写不出这种值，
+/// 但设置接口收任意字符串，所以在读出口这里补齐。
+fn digest_at(conn: &Connection) -> String {
+    normalize_hhmm(&db::get_setting(conn, "notify.digest_time").unwrap_or_default())
+}
+
+fn normalize_hhmm(raw: &str) -> String {
+    let mut parts = raw.trim().split(':');
+    match (
+        parts.next().and_then(|h| h.trim().parse::<u32>().ok()),
+        parts.next().and_then(|m| m.trim().parse::<u32>().ok()),
+    ) {
+        (Some(h), Some(m)) if h < 24 && m < 60 => format!("{h:02}:{m:02}"),
+        _ => "09:00".into(),
+    }
+}
+
 fn digest_sent(conn: &Connection, today: &str, channel: &str) -> bool {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM notification_log
@@ -195,8 +216,7 @@ pub async fn tick(db: &Db) -> Result<()> {
         let window: i64 = db::get_setting(&conn, "notify.window_days")
             .and_then(|s| s.parse().ok())
             .unwrap_or(14);
-        let digest_time =
-            db::get_setting(&conn, "notify.digest_time").unwrap_or_else(|| "09:00".into());
+        let digest_time = digest_at(&conn);
         let now_hhmm = chrono::Local::now().format("%H:%M").to_string();
         let today = engine::today().to_string();
         let ups = engine::upcoming(&conn)?;
@@ -307,6 +327,26 @@ pub async fn tick(db: &Db) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // 到点判定是字符串比较，所以「9:00」这种没零填充的值会让摘要永不触发
+    //（"09:00" >= "9:00" 与 "23:59" >= "9:00" 都是假），且界面上看不出异常。
+    #[test]
+    fn digest_time_is_zero_padded_or_falls_back() {
+        assert_eq!(normalize_hhmm("09:00"), "09:00");
+        assert_eq!(normalize_hhmm("9:00"), "09:00");
+        assert_eq!(normalize_hhmm(" 7:5 "), "07:05");
+        assert_eq!(normalize_hhmm("23:59"), "23:59");
+        // 越界与写不成样子的一律回落到默认，不留下一个永不触发的值
+        assert_eq!(normalize_hhmm("24:00"), "09:00");
+        assert_eq!(normalize_hhmm("12:60"), "09:00");
+        assert_eq!(normalize_hhmm("每天早上"), "09:00");
+        assert_eq!(normalize_hhmm(""), "09:00");
+        // 规范化过的值拿来做字符串比较，一天里任何时刻都能正确判定
+        let at = normalize_hhmm("9:00");
+        assert!("09:00" >= at.as_str());
+        assert!("23:59" >= at.as_str());
+        assert!("08:59" < at.as_str());
+    }
 
     #[test]
     fn line_reads_naturally_for_each_tense() {

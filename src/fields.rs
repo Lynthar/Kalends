@@ -150,17 +150,21 @@ async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
         [&tbl],
         |r| r.get(0),
     )?;
-    conn.execute(
+    // 键要等 id 才拼得出，所以两条语句得绑在一起：断在中间会留下一行 key=''，
+    // 而 UNIQUE(tbl,key) 会让这张表从此再也加不了列，得进库删行才能恢复
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "INSERT INTO fields(tbl,key,name,ftype,options,builtin,pos) VALUES(?1,'',?2,?3,'[]',0,?4)",
         params![tbl, name, ftype, pos],
     )?;
-    let id = conn.last_insert_rowid();
-    conn.execute("UPDATE fields SET key='c'||id WHERE id=?1", [id])?;
-    let row = conn.query_row(
+    let id = tx.last_insert_rowid();
+    tx.execute("UPDATE fields SET key='c'||id WHERE id=?1", [id])?;
+    let row = tx.query_row(
         "SELECT id,tbl,key,name,ftype,options,builtin,pos,src,shown,config FROM fields WHERE id=?1",
         [id],
         field_json,
     )?;
+    tx.commit()?;
     Ok(Json(row))
 }
 
