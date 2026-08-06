@@ -226,11 +226,10 @@ const TEMPLATES: &[Template] = &[
         anchor: "next",
         verb: "换证",
         subline: "",
-        // 证件多半没有周期费用：费用/币种/周期退进详情表单，不占表格列位
+        // 证件多半没有周期费用：费用与周期退进详情表单，不占表格列位
         base: &[
             ("next_renewal", "有效期至", 1),
             ("price", "工本费", 0),
-            ("currency", "", 0),
             ("cycle", "", 0),
         ],
         extra: &[
@@ -282,8 +281,8 @@ fn seed_fields(
     let mut defs: Vec<(&str, &str, &str, &str, i64, i64)> = vec![
         ("name", "名称", "text", "col", 1, 1),
         ("status", "状态", "status", "col", 1, 2),
+        // 币种不再是自己一列：它并进费用格里，跟着金额一起填（见 fx.rs / 迁移 0013）
         ("price", "费用", "num", "col", 1, 30),
-        ("currency", "币种", "sel", "col", 1, 31),
         ("cycle", "周期", "sel", "col", 1, 32),
     ];
     if anchor == "next" {

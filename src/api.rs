@@ -71,6 +71,8 @@ pub fn core_router() -> Router<App> {
 pub fn renewals_router() -> Router<App> {
     Router::new()
         .route("/api/overview", get(overview))
+        .route("/api/fx", get(fx_get))
+        .route("/api/fx/refresh", post(fx_refresh))
         .route("/api/ledger", get(ledger_list))
         .route("/api/notify/test", post(notify_test))
         .route("/calendar.ics", get(calendar))
@@ -138,6 +140,17 @@ async fn overview(State(app): State<App>) -> R {
         // 到期时间线里的 kind 是库键，前端要靠这份清单显示库名与到期动作说法
         "collections": crate::collections::collections(&conn)?,
     })))
+}
+
+/// 生效中的汇率表 + 显示币种。折算全在呈现层做，所以整张表下发给前端。
+async fn fx_get(State(app): State<App>) -> R {
+    let conn = app.db.lock().unwrap();
+    Ok(Json(crate::fx::state(&conn)))
+}
+
+/// 手动拉一次实时汇率（默认关着的那条出网，用户在设置页点一下才发生）。
+async fn fx_refresh(State(app): State<App>) -> R {
+    Ok(Json(crate::fx::refresh(&app.db).await?))
 }
 
 /// 续费台账，给设置页的只读列表用。带上库名与条目名——光有 kind + item_id 读不出是哪一笔；

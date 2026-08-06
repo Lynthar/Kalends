@@ -4,6 +4,7 @@ mod collections;
 mod db;
 mod engine;
 mod fields;
+mod fx;
 mod ics;
 mod media;
 mod notify;

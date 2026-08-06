@@ -16,6 +16,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0010_drop_price_history.sql"),
     include_str!("../migrations/0011_drop_legacy_tables.sql"),
     include_str!("../migrations/0012_manual_order.sql"),
+    include_str!("../migrations/0013_merge_currency_into_price.sql"),
 ];
 
 pub fn open(data_dir: &Path) -> Result<Connection> {
@@ -36,7 +37,7 @@ pub fn get_setting(conn: &Connection, key: &str) -> Option<String> {
 pub fn seed_defaults(conn: &Connection) -> Result<()> {
     let ics_token: String =
         conn.query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))?;
-    let defaults: [(&str, String); 9] = [
+    let defaults: [(&str, String); 11] = [
         ("auth.pin", String::new()),
         ("meta.tmdb_key", String::new()),
         ("meta.proxy", String::new()),
@@ -52,6 +53,10 @@ pub fn seed_defaults(conn: &Connection) -> Result<()> {
             r#"{"enabled":false,"host":"","port":465,"starttls":false,"username":"","password":"","from":"","to":""}"#.into(),
         ),
         ("ics.token", ics_token),
+        // 折算显示：空＝不折算，各币种分开呈现（原币入账那条永远不变）
+        ("fx.display", String::new()),
+        // 实时汇率默认关着：这一格为空就一直用 fx.rs 里的内置平均汇率
+        ("fx.rates", String::new()),
     ];
     for (k, v) in &defaults {
         conn.execute(
