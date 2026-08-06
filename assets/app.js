@@ -502,6 +502,9 @@ function initHead(tab) {
       v.order = o;
     }
   }
+  // 表头菜单曾经放行过隐藏名称列，已经踩下去的人光靠上面那段迁移救不回来（列集没变，
+  // 不走温和迁移那一支），所以每次都无条件把它捞出来
+  if (v.hiddenCols?.includes('name')) v.hiddenCols = v.hiddenCols.filter(k => k !== 'name');
   v.keys = keys;
   saveViews();
   sanitizeFilters(tab);
@@ -525,6 +528,16 @@ function initHead(tab) {
     initColDrag(tab, th);
     initColResize(tab, th);
     th.onclick = () => openHeadMenu(tab, th); // Notion 式：点表头开属性菜单
+    // 属性菜单是排序/筛选/改列/删列的唯一入口，只挂 click 就等于键盘用户全够不着。
+    // th 不是原生可聚焦元素，得自己给 tabindex 与语义，并把回车/空格接成"点一下"
+    th.tabIndex = 0;
+    th.setAttribute('role', 'button');
+    th.setAttribute('aria-haspopup', 'menu');
+    th.addEventListener('keydown', e => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault(); // 空格默认滚动页面
+      openHeadMenu(tab, th);
+    });
     th.classList.add('th-sort');
     th.appendChild(Object.assign(document.createElement('span'), { className: 'sind' }));
   });
@@ -532,6 +545,13 @@ function initHead(tab) {
   const nr = document.createElement('div');
   nr.className = 'newrow';
   nr.textContent = '＋ 新建';
+  nr.tabIndex = 0;
+  nr.setAttribute('role', 'button');
+  nr.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    nr.click();
+  });
   nr.onclick = () => (tab === 'media' ? openMediaDialog(null) : openItemDialog(tab, null));
   thead.closest('.tablewrap').appendChild(nr);
   applyColumns(tab);
@@ -606,7 +626,12 @@ function fitWidths(thead, table) {
   const natSum = pool.reduce((s, x) => s + x.w, 0) || 1;
   for (const x of pool) fitted.set(x.t, Math.max(MIN_COLW, Math.floor(x.w * room / natSum)));
   let total = 0;
-  for (const [t, px] of fitted) { t.style.width = px + 'px'; total += px; }
+  for (const px of fitted.values()) total += px;
+  // 压到下限还是塞不进容器时，压缩只剩坏处：横滚照样免不了，却把每一列都挤成省略号
+  //（390px 视口实测：九列全被压到 52px，表宽仍有 573px 要滚）。这时退回自然列宽——
+  // 滚是要滚的，至少每一格读得出来。判据是几何而不是视口阈值，桌面端的宽表同样受用。
+  if (total > avail + 1) return;
+  for (const [t, px] of fitted) t.style.width = px + 'px';
   table.classList.add('fixed');
   table.style.width = total + 'px';
 }
@@ -1204,11 +1229,15 @@ function openHeadMenu(tab, th) {
     items.push({ ic: '＋', t: '新增状态值…', act: () => openAddStatusPop(tab, k, th), keepPop: true });
     items.push({ ic: '◐', t: '状态语义…', act: () => openStatusSemPop(tab, k, th), keepPop: true });
   }
-  items.push({ ic: '⊘', t: '隐藏此列', act: () => {
-    v.hiddenCols = [...(v.hiddenCols || []), k];
-    saveViews();
-    RENDER[tab]();
-  } });
+  // 名称列不给隐藏：行的 ⤢ 详情入口与子行折叠钮都长在这一格里，撤掉它整库就没了全表单入口。
+  // 后端 PUT /api/fields/{id} 同样拒绝把它设成 shown=0，这里是本机视图那条口子。
+  if (k !== 'name') {
+    items.push({ ic: '⊘', t: '隐藏此列', act: () => {
+      v.hiddenCols = [...(v.hiddenCols || []), k];
+      saveViews();
+      RENDER[tab]();
+    } });
+  }
   if (Object.keys(v.widths || {}).length) {
     items.push({ ic: '⟺', t: '还原列宽', act: () => { v.widths = {}; saveViews(); applyWidths(tab); } });
   }
@@ -1393,11 +1422,14 @@ function cellPopShell(td, title) {
 // 多输入迷你表单（复合格与通用 text/num/date 共用）
 function inputsEditor(tab, it, td, fieldsDef, save) {
   const box = cellPopShell(td, colLabel(tab, td.dataset.k));
+  // 单输入时浮层标题已经是列名了，格内再标一次就是「价格」上下各一遍；
+  // 复合格（媒体的标题 / 又名）两个输入名字不同，那才需要各自的标签
+  const labelled = fieldsDef.length > 1;
   for (const [f, label, type] of fieldsDef) {
     const wrap = document.createElement('label');
     wrap.className = 'cp-field';
     const val = f in it ? it[f] : (it.extra || {})[td.dataset.k];
-    wrap.innerHTML = `${esc(label)}<input class="fp-q" type="${type}" ${type === 'number' ? 'step="any"' : ''} data-f="${esc(f)}">`;
+    wrap.innerHTML = `${labelled ? esc(label) : ''}<input class="fp-q" type="${type}" ${type === 'number' ? 'step="any"' : ''} data-f="${esc(f)}">`;
     wrap.querySelector('input').value = val ?? '';
     box.appendChild(wrap);
   }
@@ -1561,7 +1593,7 @@ function openCellPop(tab, it, k, td) {
   // 算出来的列（剩余天数 / 模板列）不能就地编辑，点它开详情表单去改源字段
   if (col.src === 'calc') return openItemDialog(tab, it);
   // 周期是复合格：周期枚举 + 自定义天数
-  if (spec.cycle || k === 'cycle') return cycleEditor(tab, it, td);
+  if (k === 'cycle') return cycleEditor(tab, it, td);
   const save = v => patchRow(tab, it, toExtra ? extraPatch(it, k, v) : { [spec.f || k]: v });
   if (spec.inputs) return inputsEditor(tab, it, td, spec.inputs, patch => patchRow(tab, it, patch));
   if (t === 'sel' || t === 'status') return pickEditor(tab, it, td, k, save);
@@ -1592,9 +1624,9 @@ document.addEventListener('click', e => {
   if (it) openCellPop(tab, it, td.dataset.k, td);
 });
 
-/* ── 订阅表（Notion 式子行：服务→套餐档位可折叠，比价一目了然）── */
+/* ── 媒体条目删除（库的条目走 delColItem）── */
 async function delItem(kind, it) {
-  if (!confirm(`删除「${it.name || it.vendor || it.title || ''}」？此操作不可撤销。`)) return;
+  if (!confirm(`删除「${it.title || ''}」？此操作不可撤销。`)) return;
   try {
     await api(`/api/${kind}/${it.id}`, { method: 'DELETE' });
     toast('已删除');
@@ -1602,7 +1634,7 @@ async function delItem(kind, it) {
   } catch (e) { toast(e.message, true); }
 }
 
-/* ── 订阅表单 ── */
+/* ── 设置页 ── */
 function openSettings() {
   const st = state.settings;
   const f = $('#form-settings').elements;
@@ -2085,8 +2117,8 @@ async function boot() {
 
 boot().catch(e => toast('加载失败：' + e.message, true));
 
-/* ══ 用户自建库：标签页 / 表头 / 行 / 详情表单全部由 /api/collections + /api/fields 生成 ══
-   预置三库（订阅 / SIM / VPS）暂时仍走各自的专用渲染器，切片 B2b 会一并收敛到这里。 */
+/* ══ 库：标签页 / 表头 / 行 / 详情表单全部由 /api/collections + /api/fields 生成 ══
+   预置三库（订阅 / SIM / VPS）与用户自建库同走这一份渲染器，没有第二条路径。 */
 
 const collOf = key => (state.overview?.collections || []).find(c => c.key === key);
 const colls = () => state.overview?.collections || [];
@@ -2422,10 +2454,14 @@ function fieldOptions(key, f) {
   return out;
 }
 
+// 周期是目前唯一「存储键 ≠ 呈现文案」的固定档位词表：既不从数据里长，也不接受现场新增。
+// 放开了就会有人把 Monthly 这样的文案写回 items.cycle，按周期推日期的库整条掉出
+// 到期时间线与 ICS（2026-07-31 真踩过）。
+const fixedVocab = f => f.src === 'col' && f.key === 'cycle';
+
 // 单选下拉的候选：一律 {v: 存回去的值, label: 给人看的文案}。
-// 周期的词表是固定档位，不从数据里长——那样长出来的会是上一次存进去的东西。
 function selOptions(key, f, cur) {
-  if (f.src === 'col' && f.key === 'cycle') {
+  if (fixedVocab(f)) {
     return CYCLE_ORDER.filter(Boolean).map(v => ({ v, label: CYCLE_LABEL[v] }));
   }
   const vs = fieldOptions(key, f);
@@ -2453,6 +2489,25 @@ function initMoptAdd(inp) {
   });
 }
 
+// 单选下拉旁的「新选项」输入：回车加一项并选中（已有就直接选中）。
+// 开放词表（币种/分类/注册商…）建库时是空的，没有这个入口的话首装第一条就填不出来——
+// 只能先存个残缺条目、再回表格用就地编辑器把值造出来。词表本就从数据里长，
+// 所以这里只管把值选上，存不存进词表交给保存后的常规流程。
+function initSoptAdd(inp) {
+  inp.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault(); // 不吃掉的话表单直接隐式提交
+    const val = inp.value.trim();
+    inp.value = '';
+    if (!val) return;
+    const sel = inp.parentElement.querySelector('select[data-f]');
+    if (![...sel.options].some(o => o.value === val)) {
+      sel.appendChild(Object.assign(document.createElement('option'), { value: val, textContent: val }));
+    }
+    sel.value = val;
+  });
+}
+
 function openItemDialog(key, it) {
   const c = collOf(key);
   editingItem = { key, id: it?.id ?? null, row: it || {} };
@@ -2462,46 +2517,55 @@ function openItemDialog(key, it) {
   box.innerHTML = '';
   for (const f of fieldsOf(key)) {
     if (f.src === 'calc') continue; // 算出来的列不可编辑
-    const v = it ? fieldRaw(f, it) : ''; // 编辑值，不是格子里那份呈现
-    const val = Array.isArray(v) ? v.join(', ') : (v ?? '');
-    const lab = document.createElement('label');
-    if (f.ftype === 'multi') {
-      // 勾选清单，不是逗号分隔的文本框——值里含 , ， 、 / 时，文本框存回去会把它拆成两个
-      const cur = new Set(Array.isArray(v) ? v.map(String) : v ? [String(v)] : []);
-      const opts = fieldOptions(key, f);
-      for (const x of cur) if (!opts.includes(x)) opts.push(x);
-      lab.className = 'span2';
-      // 勾选框超过三行就在自己的框里滚（长词表如 VPS 地点有 19 个值，否则把费用/到期挤出首屏）；
-      // 「新选项」输入框留在滚动框外，不然想加值得先滚到底
-      lab.innerHTML = `<span>${esc(f.name || f.key)}</span>
-        <span class="mopts"><span class="mchecks" data-mbox="${esc(f.key)}">${opts.map(o =>
-          `<label class="check"><input type="checkbox" value="${esc(o)}"${cur.has(o) ? ' checked' : ''}><span>${esc(o)}</span></label>`
-        ).join('')}</span><input class="mopt-add" placeholder="新选项，回车加入"></span>`;
-      initMoptAdd(lab.querySelector('.mopt-add'));
-    } else if (f.ftype === 'star') {
-      const n = +val || 0;
-      lab.innerHTML = `<span>${esc(f.name || f.key)}</span>
-        <span class="stars">${[1, 2, 3, 4, 5].map(i =>
-          `<button type="button" data-v="${i}"${i <= n ? ' class="lit"' : ''}>★</button>`).join('')
-        }<button type="button" class="star-clear" data-v="">清除</button></span>
-        <input type="hidden" data-f="${esc(f.key)}" value="${n || ''}">`;
-    } else if (f.ftype === 'sel') {
-      const cur = val === '' ? '' : String(val);
-      lab.innerHTML = `<span>${esc(f.name || f.key)}</span><select data-f="${esc(f.key)}">`
-        + `<option value=""></option>${selOptions(key, f, cur).map(o =>
-          `<option value="${esc(o.v)}"${o.v === cur ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}</select>`;
-    } else if (f.ftype === 'status') {
-      const opts = statusOrder(key);
-      lab.innerHTML = `<span>${esc(f.name || f.key)}</span><select data-f="${esc(f.key)}">${opts.map(o => `<option${o === (val || 'Planned') ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
-    } else {
-      const type = f.ftype === 'num' ? 'number' : f.ftype === 'date' ? 'date' : 'text';
-      lab.innerHTML = `<span>${esc(f.name || f.key)}</span><input type="${type}"${type === 'number' ? ' step="any"' : ''} data-f="${esc(f.key)}" value="${esc(val)}">`;
-    }
-    box.appendChild(lab);
+    box.appendChild(fieldControl(key, f, it));
   }
   box.appendChild(parentRow(key, it));
   if (it) box.appendChild(logoRow(it));
   d.showModal();
+}
+
+/* 一个字段 → 一枚表单控件。库的详情表单与媒体表单的自定义列共用这一份，
+   免得多选/星级/单选这几种非平凡控件各写一遍、各漏一处。 */
+function fieldControl(key, f, it) {
+  const v = it ? fieldRaw(f, it) : ''; // 编辑值，不是格子里那份呈现
+  const val = Array.isArray(v) ? v.join(', ') : (v ?? '');
+  const lab = document.createElement('label');
+  if (f.ftype === 'multi') {
+    // 勾选清单，不是逗号分隔的文本框——值里含 , ， 、 / 时，文本框存回去会把它拆成两个
+    const cur = new Set(Array.isArray(v) ? v.map(String) : v ? [String(v)] : []);
+    const opts = fieldOptions(key, f);
+    for (const x of cur) if (!opts.includes(x)) opts.push(x);
+    lab.className = 'span2';
+    // 勾选框超过三行就在自己的框里滚（长词表如 VPS 地点有 19 个值，否则把费用/到期挤出首屏）；
+    // 「新选项」输入框留在滚动框外，不然想加值得先滚到底
+    lab.innerHTML = `<span>${esc(f.name || f.key)}</span>
+      <span class="mopts"><span class="mchecks" data-mbox="${esc(f.key)}">${opts.map(o =>
+        `<label class="check"><input type="checkbox" value="${esc(o)}"${cur.has(o) ? ' checked' : ''}><span>${esc(o)}</span></label>`
+      ).join('')}</span><input class="mopt-add" placeholder="新选项，回车加入"></span>`;
+    initMoptAdd(lab.querySelector('.mopt-add'));
+  } else if (f.ftype === 'star') {
+    const n = +val || 0;
+    lab.innerHTML = `<span>${esc(f.name || f.key)}</span>
+      <span class="stars">${[1, 2, 3, 4, 5].map(i =>
+        `<button type="button" data-v="${i}"${i <= n ? ' class="lit"' : ''}>★</button>`).join('')
+      }<button type="button" class="star-clear" data-v="">清除</button></span>
+      <input type="hidden" data-f="${esc(f.key)}" value="${n || ''}">`;
+  } else if (f.ftype === 'sel') {
+    const cur = val === '' ? '' : String(val);
+    const sel = `<select data-f="${esc(f.key)}"><option value=""></option>${selOptions(key, f, cur).map(o =>
+      `<option value="${esc(o.v)}"${o.v === cur ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}</select>`;
+    // 开放词表配一个「新选项」输入框，不然空库首装时这一栏是个填不出东西的死胡同
+    lab.innerHTML = `<span>${esc(f.name || f.key)}</span>`
+      + (fixedVocab(f) ? sel : `<span class="sopts">${sel}<input class="sopt-add" placeholder="新选项，回车加入"></span>`);
+    if (!fixedVocab(f)) initSoptAdd(lab.querySelector('.sopt-add'));
+  } else if (f.ftype === 'status') {
+    const opts = statusOrder(key);
+    lab.innerHTML = `<span>${esc(f.name || f.key)}</span><select data-f="${esc(f.key)}">${opts.map(o => `<option${o === (val || 'Planned') ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+  } else {
+    const type = f.ftype === 'num' ? 'number' : f.ftype === 'date' ? 'date' : 'text';
+    lab.innerHTML = `<span>${esc(f.name || f.key)}</span><input type="${type}"${type === 'number' ? ' step="any"' : ''} data-f="${esc(f.key)}" value="${esc(val)}">`;
+  }
+  return lab;
 }
 
 /* 父条目：子行只有两层（服务 → 套餐档位），所以候选是同库的顶层行。
@@ -2569,24 +2633,30 @@ function logoRow(it) {
   return lab;
 }
 
-// 表单 → 整行 PUT/POST 的 body：真列放顶层，extra 字段收进 extra
+/* fieldControl 的反向：从表单里读回一个字段的值。控件不在场时给 NO_CONTROL，
+   调用方一律要跳过而不是当成空值——把"没这个控件"当成"用户清空了"，就是整行 PUT
+   语义下把字段清掉的那类事故。multi 与 star 没有单一的 [data-f]，所以要分支读。 */
+const NO_CONTROL = Symbol('no-control');
+function readFieldControl(scope, f) {
+  if (f.ftype === 'multi') {
+    // 勾选清单直接给数组，不经字符串往返——那正是含分隔符的值被拆坏的地方
+    const mbox = document.querySelector(`${scope} [data-mbox="${f.key}"]`);
+    if (!mbox) return NO_CONTROL;
+    return [...mbox.querySelectorAll('input[type=checkbox]:checked')].map(i => i.value);
+  }
+  const el = document.querySelector(`${scope} [data-f="${f.key}"]`);
+  if (!el) return NO_CONTROL;
+  const v = el.value.trim();
+  return f.ftype === 'num' || f.ftype === 'star' ? (v === '' ? undefined : Number(v)) : v;
+}
+
 // 表单 → 整行 PUT/POST 的体：先按表单值攒一个补丁，再交给 itemBodyFromRow 补全字段集
 function itemBody(key, row) {
   const patch = { extra: { ...(row.extra || {}) } };
   for (const f of fieldsOf(key)) {
     if (f.src === 'calc') continue;
-    let val;
-    if (f.ftype === 'multi') {
-      // 勾选清单直接给数组，不经字符串往返——那正是含分隔符的值被拆坏的地方
-      const mbox = document.querySelector(`#item-fields [data-mbox="${f.key}"]`);
-      if (!mbox) continue;
-      val = [...mbox.querySelectorAll('input[type=checkbox]:checked')].map(i => i.value);
-    } else {
-      const el = document.querySelector(`#item-fields [data-f="${f.key}"]`);
-      if (!el) continue;
-      const v = el.value.trim();
-      val = f.ftype === 'num' || f.ftype === 'star' ? (v === '' ? undefined : Number(v)) : v;
-    }
+    const val = readFieldControl('#item-fields', f);
+    if (val === NO_CONTROL) continue;
     if (f.src === 'col') patch[f.key] = val;
     else if (val == null || val === '' || (Array.isArray(val) && !val.length)) delete patch.extra[f.key];
     else patch.extra[f.key] = val;

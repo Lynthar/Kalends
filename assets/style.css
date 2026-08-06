@@ -375,6 +375,18 @@ main { max-width: 1400px; margin: 0 auto; padding: .6rem 1.4rem 3rem; }
 .grid.fixed { table-layout: fixed; }
 .grid.fixed td { overflow: hidden; text-overflow: ellipsis; }
 .grid.fixed .clip { max-width: none; }
+/* 横滚时首列吸附在左侧，滚到哪一列都还认得出自己在看哪一行（窄屏上尤其要紧）。
+   行本身没有底色、靠卡片的 --surface 透出来，吸附后得自己补一层不透明底，
+   hover 态也要显式对齐，否则悬停时首列不跟着变色。
+   右边框沿用 .grid td:not(:last-child) 那条：实测 Chromium 下 collapse 的边框跟着
+   吸附的格子走，不会脱开；换成 inset 阴影反而画在 padding 边而不是格子右缘，
+   中间会漏出后一列的内容。 */
+.grid th:first-child, .grid td:first-child {
+  position: sticky; left: 0; z-index: 1;
+  background: var(--surface);
+}
+.grid thead th:first-child { z-index: 2; }
+.grid tbody tr:hover td:first-child { background: var(--surface-2); }
 th.dragging { opacity: .45; }
 th.drop-l { box-shadow: inset 3px 0 0 var(--aqua); }
 th.drop-r { box-shadow: inset -3px 0 0 var(--aqua); }
@@ -517,6 +529,12 @@ tr.subrow td[data-k="name"] { padding-left: 2rem; }
 }
 tr:hover .rowopen { opacity: .75; }
 .rowopen:hover { color: var(--aqua-deep); background: var(--aqua-soft); opacity: 1; }
+/* 平时靠 opacity:0 藏着，键盘走到它上面必须现身——否则焦点环画在一个透明元素上，
+   等于键盘用户完全够不着全表单入口 */
+.rowopen:focus-visible { opacity: 1; outline: 2.5px solid var(--aqua); outline-offset: 1px; }
+/* 表头是自己加的 tabindex，得自己画焦点环（默认那圈会被格线盖掉看不清） */
+.grid th:focus-visible { outline: 2.5px solid var(--aqua); outline-offset: -2px; background: var(--surface-2); }
+.newrow:focus-visible { outline: 2.5px solid var(--aqua); outline-offset: -2px; color: var(--aqua-deep); }
 
 .bar { width: 7.5rem; }
 .bar .track { height: 6px; background: var(--line); border-radius: 99px; overflow: hidden; }
@@ -602,6 +620,15 @@ dialog h3 {
 .mchecks { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .8rem; max-height: 5.2rem; overflow-y: auto; }
 .mopts .check { font-weight: 500; }
 .mopts .mopt-add { font-size: .82rem !important; }
+/* 详情表单里的单选：下拉 + 现场新增。开放词表（币种/分类/注册商…）建库时是空的，
+   没有这个输入框的话首装第一条就填不出来 */
+.sopts { display: flex; flex-direction: column; gap: .3rem; }
+/* 现场新增是次要入口，压扁一档：一栏两个等高控件会把表单撑得比它该有的高一倍 */
+.sopts .sopt-add {
+  font-size: .8rem !important; padding: .26rem .55rem !important;
+  background: transparent !important; border: 1.5px dashed var(--line) !important;
+}
+.sopts .sopt-add:focus { background: var(--surface) !important; border-style: solid !important; }
 /* 续费台账：设置页里的只读流水，条数会长，限高自己滚 */
 .ledger-log { max-height: 13rem; overflow-y: auto; }
 .lg-row {

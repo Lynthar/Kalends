@@ -1463,6 +1463,120 @@ await sleep(1200);
 check('选回顶层就脱离父行', (await (await fetch(APP + 'api/collections/subs/items')).json())
   .find(r => r.id === orphan.id)?.parent_id == null);
 
+/* 17.8. 窄屏：压到下限还塞不进容器时，等比压缩只剩坏处——横滚照样免不了，却把每一列
+   都挤成省略号（390px 实测：九列全压到 52px，表宽仍有 573px 要滚）。这时该退回自然
+   列宽，并把首列吸附在左侧，滚到哪一列都还认得出在看哪一行。 */
+await evl(`switchTab('subs')`);
+await sleep(200);
+// 前面的拖宽段留下了手动列宽，那条路本就不压缩（存宽即下限，最右列吸残差）。
+// 这里要验的是没有手动列宽时的自动装容器，先还原到那个状态
+await evl(`(() => { views.subs.widths = {}; saveViews(); applyWidths('subs'); })()`);
+await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+await sleep(700);
+await evl(`window.dispatchEvent(new Event('resize'))`);
+await sleep(700);
+const narrowGeom = await evl(`(() => {
+  const wrap = document.querySelector('#view-subs'), table = wrap.querySelector('table');
+  const ths = [...table.querySelectorAll('thead th')].filter(t => t.style.display !== 'none');
+  const first = wrap.querySelector('#subs-body tr td');
+  return {
+    container: wrap.clientWidth,
+    fixed: table.classList.contains('fixed'),
+    dataCols: ths.filter(t => !t.classList.contains('ops')).map(t => Math.round(t.getBoundingClientRect().width)),
+    firstPos: first && getComputedStyle(first).position,
+    firstLeft: first && getComputedStyle(first).left,
+  };
+})()`);
+check('窄到压不进去时不再等比压缩', narrowGeom.fixed === false, JSON.stringify(narrowGeom));
+check('窄屏下没有一列被压到 52px 下限',
+  narrowGeom.dataCols.every(w => w > 52), JSON.stringify(narrowGeom.dataCols));
+check('首列横滚时吸附在左侧',
+  narrowGeom.firstPos === 'sticky' && narrowGeom.firstLeft === '0px',
+  `${narrowGeom.firstPos} / ${narrowGeom.firstLeft}`);
+// 吸附的格子得有不透明底，否则滚过去的内容会从它身下透出来
+check('吸附的首列有不透明底', await evl(`(() => {
+  const bg = getComputedStyle(document.querySelector('#subs-body tr td')).backgroundColor;
+  return bg !== 'transparent' && !/rgba\\(0, 0, 0, 0\\)/.test(bg);
+})()`) === true);
+await evl(`document.querySelector('#view-subs').scrollIntoView({ block: 'center' })`);
+await sleep(400);
+await shot('19-narrow-table');
+await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 2, mobile: false });
+await sleep(600);
+
+/* 17.9. 名称列不给隐藏：⤢ 详情入口与子行折叠钮都长在这一格里，撤掉它整库就没了全表单
+   入口。后端 PUT /api/fields/{id} 早就拒绝把它设成 shown=0，本机视图这条口子是漏的。 */
+await evl(`document.querySelector('#view-subs thead th[data-k="name"]').click()`);
+await sleep(250);
+check('名称列表头菜单里没有「隐藏此列」', await evl(
+  `[...document.querySelectorAll('.thmenu .mi')].every(x => !x.textContent.includes('隐藏此列'))`) === true);
+await evl(`closePop()`);
+await sleep(200);
+await evl(`document.querySelector('#view-subs thead th[data-k="notes"]').click()`);
+await sleep(250);
+check('别的列照样给隐藏（对照）', await evl(
+  `[...document.querySelectorAll('.thmenu .mi')].some(x => x.textContent.includes('隐藏此列'))`) === true);
+await evl(`closePop()`);
+await sleep(200);
+// 菜单曾经放行过，已经把 name 存进 hiddenCols 的人光靠列集迁移救不回来（列集没变），
+// 所以要无条件捞。走 rebuildHead 这条真实路径：表头按模板序重建 → initHead 结算偏好
+await evl(`(() => { views.subs.hiddenCols = ['name']; saveViews(); })()`);
+await evl(`rebuildHead('subs')`);
+await sleep(900);
+check('本机存着的隐藏名称列偏好被捞回来', await evl(
+  `!views.subs.hiddenCols.includes('name')
+   && document.querySelector('#view-subs thead th[data-k="name"]').style.display !== 'none'`) === true);
+const nameCellDiag = await evl(`JSON.stringify({
+  hidden: views.subs.hiddenCols,
+  headKeys: [...document.querySelectorAll('#view-subs thead th')].map(t => t.dataset.k),
+  cellKeys: [...([...document.querySelectorAll('#subs-body tr')][0]?.children || [])].map(td => td.dataset.k),
+  rowopenAny: !!document.querySelector('#subs-body tr .rowopen'),
+})`);
+// 隐藏是 display:none 而不是摘掉节点，所以光问「在不在」测不出来，得问「看得见吗」
+check('名称格里的 ⤢ 详情入口还看得见', await evl(`(() => {
+  const td = document.querySelector('#subs-body tr td[data-k="name"]');
+  return !!td && td.style.display !== 'none' && !!td.querySelector('.rowopen');
+})()`) === true, nameCellDiag);
+
+/* 17.10. 详情表单的开放词表（币种/分类/支付方式…）建库时是空的，而表单的 sel 是个纯
+   下拉：空库首装点「＋新建」，这几栏一个候选都没有、也没处输入，只能先存个残缺条目再
+   回表格用就地编辑器把值造出来。周期是固定档位词表，不给现场新增——放开了会有人把
+   Monthly 这样的文案写回 items.cycle，按周期推日期的库整条掉出到期时间线。 */
+await evl(`openItemDialog('subs', null)`);
+await sleep(450);
+check('开放词表的下拉旁有「新选项」输入', await evl(
+  `!!document.querySelector('#item-fields .sopts select[data-f="category"]')
+   && !!document.querySelector('#item-fields .sopts .sopt-add')`) === true);
+check('币种同样有（首装最先撞上的就是它）', await evl(
+  `!!document.querySelector('#item-fields .sopts select[data-f="currency"] + .sopt-add, #item-fields .sopts select[data-f="currency"] ~ .sopt-add')`) === true);
+check('周期是固定档位，不给现场新增', await evl(`(() => {
+  const sel = document.querySelector('#item-fields select[data-f="cycle"]');
+  return !!sel && !sel.closest('.sopts');
+})()`) === true);
+// 撤回修复做负向对照时这里会是 undefined：得让整份套件继续跑完，别崩在半路
+const soptAdd = `[...document.querySelectorAll('#item-fields .sopts')].find(x => x.querySelector('select[data-f="currency"]'))?.querySelector('.sopt-add')`;
+await evl(`${soptAdd}?.focus()`);
+await send('Input.insertText', { text: 'NZD' });
+// keyDown 带 text 才会产生「字符键」的默认行为（表单隐式提交），否则 preventDefault 测不出来
+await send('Input.dispatchKeyEvent', {
+  type: 'keyDown', key: 'Enter', code: 'Enter', text: '\r', unmodifiedText: '\r',
+  windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+});
+await send('Input.dispatchKeyEvent', {
+  type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+});
+await sleep(350);
+check('回车把新值加进下拉并选中', await evl(
+  `document.querySelector('#item-fields select[data-f="currency"]').value`) === 'NZD');
+check('回车没有顺手提交表单', await evl(`!!document.querySelector('#dlg-item')?.open`) === true);
+await evl(`document.querySelector('#item-fields [data-f="name"]').value = '首装新条目'`);
+await shot('20-form-sel-add');
+await evl(`document.querySelector('#form-item').requestSubmit()`);
+await sleep(1200);
+const freshItem = (await (await fetch(APP + 'api/collections/subs/items')).json())
+  .find(r => r.name === '首装新条目');
+check('现场加的币种一路存回了库', freshItem?.currency === 'NZD', JSON.stringify(freshItem?.currency));
+
 /* 17.11. 库的 key 曾经是 'k'||rowid 派生的，而 SQLite 不带 AUTOINCREMENT 会复用删掉的
    id；删库按设计保留台账（那张表存的是 kind 字符串，不跟外键走），于是新建的库会捡到
    旧库的 kind——一个从没付过钱的新库，台账里凭空多出别人的付款记录。实测复现过。 */
@@ -1485,6 +1599,39 @@ check('旧账仍留着当存档、库名回落成空',
 await fetch(`${APP}api/collections/${kruB.id}`, { method: 'DELETE' });
 await evl(`loadAll()`);
 await sleep(700);
+
+/* 17.12. 键盘可达性：表头属性菜单是排序/筛选/改列/删列的唯一入口，只挂 click 就等于
+   键盘用户全够不着；`.rowopen` 平时 opacity:0，不给 focus 态的话焦点环画在透明元素上。 */
+await evl(`switchTab('subs')`);
+await sleep(300);
+check('表头可聚焦且有按钮语义', await evl(`(() => {
+  const th = document.querySelector('#view-subs thead th[data-k="name"]');
+  return th.tabIndex === 0 && th.getAttribute('role') === 'button';
+})()`) === true);
+// 真键盘事件：合成的 KeyboardEvent 走不到浏览器默认行为，也测不出 preventDefault
+await evl(`document.querySelector('#view-subs thead th[data-k="status"]').focus()`);
+await send('Input.dispatchKeyEvent', {
+  type: 'keyDown', key: 'Enter', code: 'Enter', text: '\r', unmodifiedText: '\r',
+  windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+});
+await send('Input.dispatchKeyEvent', {
+  type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+});
+await sleep(350);
+check('回车能打开表头属性菜单', await evl(`!!document.querySelector('.thmenu')`) === true);
+check('菜单里能走到排序项', await evl(
+  `[...document.querySelectorAll('.thmenu .mi')].some(x => x.textContent.includes('升序排序'))`) === true);
+await evl(`closePop()`);
+await sleep(200);
+check('⤢ 入口有 focus 态才不至于隐形', await evl(`(() => {
+  const has = [...document.styleSheets].flatMap(s => { try { return [...s.cssRules]; } catch { return []; } })
+    .some(r => r.selectorText && r.selectorText.includes('.rowopen:focus-visible'));
+  return has;
+})()`) === true);
+check('表尾「＋ 新建」也能用键盘走到', await evl(`(() => {
+  const nr = document.querySelector('#view-subs .newrow');
+  return nr.tabIndex === 0 && nr.getAttribute('role') === 'button';
+})()`) === true);
 
 /* 18. 库删光也不能把界面打崩。放在最后跑——这一段会把预置库连数据一起删掉。
    预置库过去在界面上删不掉（后端一直放行、文档也写着可删），而新库的表格容器
