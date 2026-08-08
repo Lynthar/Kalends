@@ -1267,16 +1267,12 @@ function openFilterPop(tab, k, anchor) {
 }
 
 /* ── 字段属性编辑：选项管理 / 自定义列的改名删除新建 ──
-   可管理选项的列 = 自由词表的内置列（与后端 BUILTIN_OPT 白名单一致）+ 自定义单选/多选列；
-   状态/周期/币种/类别等参与语义的词表不开放。 */
-const OPT_EDITABLE = {
-  subs: ['category', 'payment_method'],
-  vps: ['purpose', 'locations', 'routes'],
-  sims: ['forms'],
-  media: [],
-};
-const optionsEditable = (tab, k) => OPT_EDITABLE[tab]?.includes(k)
-  || (!!COLS[tab][k].custom && ['sel', 'multi'].includes(COLS[tab][k].t));
+   能管选项的列 = 任何域字段或自定义列里的 sel|multi（判据与后端 resolve() 一致：builtin=0）；
+   状态/周期/类别等参与语义的词表不开放。
+   预置三库的域字段此前不算（builtin=1），只能靠一张硬编码白名单逐个点名；迁移 0014 把它们
+   收归 builtin=0 之后白名单两边一起删了。 */
+const optionsEditable = (tab, k) => !!COLS[tab][k].custom
+  && ['sel', 'multi'].includes(COLS[tab][k].t);
 
 // 字段的有效选项值 = 已存词表（{v,c} 取 v）∪ 数据里出现过的值（存续顺序：词表在前）
 function effectiveOptions(tab, k) {

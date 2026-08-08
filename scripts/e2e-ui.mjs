@@ -580,7 +580,10 @@ await sleep(150);
 check('菜单删除自定义列', await menuClick(`#view-subs th[data-k="${ckey}"]`, '删除列'));
 await sleep(800);
 check('列已从表头移除', await evl(`!document.querySelector('#view-subs th[data-k="${ckey}"]')`) === true);
-check('字段注册表已清空', (await (await fetch(APP + 'api/fields')).json()).filter(f => !f.builtin).length === 0);
+// 判据问的是"这一列没了"，别再拿 !builtin 当"自定义列"的代名词——迁移 0014 之后
+// 预置库的域字段也是 builtin=0，那个代理判据会把它们一并算进来
+check('字段注册表已清空',
+  (await (await fetch(APP + 'api/fields')).json()).every(f => f.key !== ckey));
 
 /* 12d. 订阅 logo：上传 → 名称格渲染（子行回退父 logo）→ 整行 PUT 保留 → 清除 */
 const PNG1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
@@ -904,6 +907,7 @@ await sleep(600);
 check('新建库浮层出现模板选择器', await evl(
   `!document.querySelector('#coll-tpl-row').hidden && document.querySelectorAll('#coll-tpl .chip').length === ${tpls.length}`) === true);
 check('默认选中空白模板', await evl(`document.querySelector('#coll-tpl .chip.on').textContent.trim()`) === '空白');
+await shot('23-coll-templates');
 await evl(`[...document.querySelectorAll('#coll-tpl .chip')].find(b => b.textContent.includes('域名')).click()`);
 await sleep(250);
 check('挑模板预填库名 / 图标 / 到期模型 / 动作说法', await evl(`(() => {
@@ -922,6 +926,72 @@ await sleep(150);
 check('删掉模板建的两个库',
   (await fetch(`${APP}api/collections/${dc.id}`, { method: 'DELETE' })).ok
   && (await fetch(`${APP}api/collections/${ic.id}`, { method: 'DELETE' })).ok);
+await evl(`loadAll()`);
+await sleep(800);
+await evl(`switchTab('subs')`);
+await sleep(300);
+
+/* 12h2. 订阅 / SIM / VPS 也是模板：此前它们只由迁移 0007/0008 一次性建出来，
+   删掉就再也建不回来，也建不了第二个同类库。字段集与预置库的等价性由单测钉住
+   （collections::tests），这里管的是界面与接口这一侧。 */
+check('模板清单含三个续费库', ['subs', 'sims', 'vps'].every(id => tpls.some(t => t.id === id)),
+  tpls.map(t => t.id));
+
+const sc = await post('/api/collections', { name: '第二份订阅', template: 'subs' });
+const SK = sc.key;
+check('订阅模板：到期模型与图标', sc.due_anchor === 'next' && sc.icon === '🔁', JSON.stringify(sc));
+check('订阅模板不写死动作说法（NULL 时前后端都回落成「续费」）', !sc.verb, JSON.stringify(sc));
+const scf = (await (await fetch(`${APP}api/fields`)).json()).filter(f => f.tbl === SK);
+const sfby = k => scf.find(f => f.key === k);
+check('订阅模板播了域字段', ['category', 'payment_method', 'account'].every(k => sfby(k)),
+  scf.map(f => f.key));
+check('订阅模板的域字段与自定义列同权', sfby('category').src === 'extra' && sfby('category').builtin === false);
+check('续费库用六值状态词表（比通用词表多 Deferred / Unused）',
+  sfby('status').options.map(o => o.v).join() === 'Active,Planned,Deferred,Unused,Ending,Ended',
+  sfby('status').options.map(o => o.v));
+check('开放词表不预置选项', sfby('category').options.length === 0);
+
+const vc = await post('/api/collections', { name: '第二批机器', template: 'vps' });
+const VK = vc.key;
+check('VPS 模板：产品名进日历标题、也做名称格小字',
+  vc.subtitle === 'product' && vc.subline === 'product', JSON.stringify(vc));
+const vcf = (await (await fetch(`${APP}api/fields`)).json()).filter(f => f.tbl === VK);
+const vfby = k => vcf.find(f => f.key === k);
+check('VPS 模板带得动 tpl 合成列（src=calc + config）',
+  vfby('spec').ftype === 'tpl' && vfby('spec').src === 'calc'
+  && vfby('spec').config?.tpl?.includes('{cores}'), JSON.stringify(vfby('spec')));
+check('VPS 模板把商家做成名称列', vfby('name').name === '商家');
+
+await post(`/api/collections/${VK}/items`, {
+  name: '某商家', status: 'Active', cycle: 'annual', last_renewed: day(-30),
+  extra: { product: '小鸡', cores: 2, ram_gb: 4, storage_gb: 40, storage_type: 'NVMe' },
+});
+await evl(`loadAll()`);
+await sleep(900);
+await evl(`switchTab('${VK}')`);
+await sleep(400);
+check('模板建出来的合成列真的算得出来',
+  (await evl(`document.querySelector('#${VK}-body tr td[data-k="spec"]').textContent`) || '')
+    .replace(/\s+/g, ' ').includes('2C / 4G / 40G NVMe'),
+  await evl(`document.querySelector('#${VK}-body tr td[data-k="spec"]').textContent`));
+
+// 迁移 0014：预置三库的域字段收归 builtin=0，两张硬编码白名单（前端 OPT_EDITABLE /
+// 后端 BUILTIN_OPT）随之删掉。这几条断言就是那两张表被删干净了还照样能编辑选项。
+check('预置库的域字段可编辑选项（后端不再靠白名单点名）',
+  (await put('/api/fields/options', { tbl: 'subs', key: 'category', options: [{ v: 'AI', c: 2 }] })).ok);
+check('预置库的域字段在表头菜单里也可编辑', await evl(`optionsEditable('subs','category')`) === true);
+// storage_type 是 shown=0 的域字段：它 src='extra' 所以一直可改名可删除，却因为不在
+// 白名单里而不能编辑选项——收归 builtin=0 之后这处不一致没了。界面入口要先在字段面板
+// 把它放上表（optionsEditable 只对表格列有意义），所以这里只测后端这一侧的能力。
+check('此前漏在白名单外的隐藏域字段现在也能管（vps.storage_type）',
+  (await put('/api/fields/options', { tbl: 'vps', key: 'storage_type', options: [{ v: 'NVMe' }] })).ok);
+// codeOf 定义在后面，这里用 raw（它在文件开头就定义好了）
+check('通用真列仍然不开放选项编辑（周期是语义词表）',
+  (await raw('/api/fields/options', 'PUT', { tbl: 'subs', key: 'cycle', options: [{ v: '乱来' }] })).status === 400);
+
+check('删掉这两个模板库',
+  (await fetch(`${APP}api/collections/${sc.id}`, { method: 'DELETE' })).ok
+  && (await fetch(`${APP}api/collections/${vc.id}`, { method: 'DELETE' })).ok);
 await evl(`loadAll()`);
 await sleep(800);
 await evl(`switchTab('subs')`);
@@ -1095,8 +1165,13 @@ const thMenuOf = async (tab, k) => {
   return txt;
 };
 // 预置库的域字段：builtin=1 但值在 extra 里，照样归用户管
-const seededExtra = delFs.find(f => f.tbl === 'subs' && f.builtin && f.src === 'extra' && f.shown);
-check('预置库有 builtin 的 extra 域字段（本段前提）', !!seededExtra, JSON.stringify(seededExtra));
+// 播下来的域字段（键不是 c<id>，那是用户手加的自定义列）。此前这里靠 builtin=1 认它们，
+// 迁移 0014 把预置三库的域字段一并收归 builtin=0 之后，判据要改问"键从哪来"。
+const seededExtra = delFs.find(f =>
+  f.tbl === 'subs' && f.src === 'extra' && f.shown && !/^c\d+$/.test(f.key));
+check('预置库有播下来的 extra 域字段（本段前提）', !!seededExtra, JSON.stringify(seededExtra));
+check('它与手加的自定义列同权（迁移 0014 收归 builtin=0）', seededExtra.builtin === false,
+  JSON.stringify(seededExtra));
 const mSeeded = await thMenuOf('subs', seededExtra.key);
 check(`预置域字段「${seededExtra.name}」菜单里有删除列`, mSeeded.includes('删除列'), mSeeded);
 check(`预置域字段「${seededExtra.name}」菜单里有重命名列`, mSeeded.includes('重命名列'), mSeeded);

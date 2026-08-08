@@ -30,17 +30,6 @@ fn owner(conn: &Connection, tbl: &str) -> anyhow::Result<Owner> {
         .map_err(|_| bad(format!("未知表：{tbl}")))
 }
 
-// 预置库里允许编辑选项的自由词表字段。泛化后它们的值都在 extra 里，
-// 不再需要区分 SQL 列还是 JSON 数组列——swap_extra_value 按实际值形态处理。
-const BUILTIN_OPT: &[(&str, &str, &str)] = &[
-    ("subs", "category", "sel"),
-    ("subs", "payment_method", "sel"),
-    ("vps", "purpose", "sel"),
-    ("vps", "locations", "multi"),
-    ("vps", "routes", "multi"),
-    ("sims", "forms", "multi"),
-];
-
 pub fn router() -> Router<App> {
     Router::new()
         .route("/api/fields", get(list).post(create))
@@ -296,7 +285,7 @@ async fn delete_field(State(app): State<App>, Path(id): Path<i64>) -> R {
         return Err(missing("列不存在或不可删除").into());
     };
     let (table, cond) = scope(&conn, &tbl)?;
-    let t = Target { table, cond, key: key.clone(), seed_ftype: None };
+    let t = Target { table, cond, key: key.clone() };
     // 清值与注销列绑在一起：只清了一半的话，列没了但值还挂在各行的 extra 里
     let tx = conn.unchecked_transaction()?;
     rewrite_extra(&tx, &t, |obj| obj.remove(&key).is_some())?;
@@ -305,59 +294,43 @@ async fn delete_field(State(app): State<App>, Path(id): Path<i64>) -> R {
     Ok(Json(json!({ "ok": true })))
 }
 
-// 一个可管理选项的字段：预置库的自由词表字段，或本库/本表的自定义 sel/multi 字段。
-// 泛化后两者的值都在 extra 里，所以定位结果只需要"改哪张表的哪些行、哪个键"。
+// 一个可管理选项的字段：任何 builtin=0 的 sel/multi 列——域字段与用户手加的自定义列同权
+// （迁移 0014 把预置三库的域字段一并收归 builtin=0，此前它们要靠一张硬编码白名单点名）。
+// 值一律在 extra 里，所以定位结果只需要"改哪张表的哪些行、哪个键"。
 struct Target {
     table: &'static str,
     cond: String,
     key: String,
-    /// 预置词表字段首次编辑选项时要补一行 fields 记录，这里给它的类型
-    seed_ftype: Option<&'static str>,
 }
 
 fn resolve(conn: &Connection, tbl: &str, key: &str) -> anyhow::Result<Target> {
     let (table, cond) = scope(conn, tbl)?;
-    let mk = |seed_ftype| Target {
-        table,
-        cond: cond.clone(),
-        key: key.to_string(),
-        seed_ftype,
-    };
-    if let Some((_, _, ft)) = BUILTIN_OPT.iter().find(|(t, k, _)| *t == tbl && *k == key) {
-        return Ok(mk(Some(ft)));
-    }
-    let custom: Option<String> = conn
+    let ftype: Option<String> = conn
         .query_row(
             "SELECT ftype FROM fields WHERE tbl=?1 AND key=?2 AND builtin=0",
             params![tbl, key],
             |r| r.get(0),
         )
         .ok();
-    match custom.as_deref() {
-        Some("sel") | Some("multi") => Ok(mk(None)),
+    match ftype.as_deref() {
+        Some("sel") | Some("multi") => Ok(Target { table, cond, key: key.to_string() }),
         Some(_) => Err(bad("该列类型没有选项")),
         None => Err(bad("该列不支持编辑选项")),
     }
 }
 
-// 设置字段的选项清单（内置列首次编辑时落一行 builtin=1 记录）
+// 设置字段的选项清单
 async fn set_options(State(app): State<App>, Json(b): Json<Value>) -> R {
     let tbl = s(&b, "tbl").ok_or_else(|| bad("缺少 tbl"))?;
     let key = s(&b, "key").ok_or_else(|| bad("缺少 key"))?;
     let conn = app.db.lock().unwrap();
-    let target = resolve(&conn, &tbl, &key)?;
+    // 走到这里说明 fields 里一定有这一行（resolve 是靠查它才放行的）
+    resolve(&conn, &tbl, &key)?;
     let opts = serde_json::to_string(&opts_array(&b))?;
-    match target.seed_ftype {
-        Some(ftype) => conn.execute(
-            "INSERT INTO fields(tbl,key,ftype,options,builtin) VALUES(?1,?2,?3,?4,1)
-             ON CONFLICT(tbl,key) DO UPDATE SET options=excluded.options",
-            params![tbl, key, ftype, opts],
-        )?,
-        None => conn.execute(
-            "UPDATE fields SET options=?1 WHERE tbl=?2 AND key=?3",
-            params![opts, tbl, key],
-        )?,
-    };
+    conn.execute(
+        "UPDATE fields SET options=?1 WHERE tbl=?2 AND key=?3",
+        params![opts, tbl, key],
+    )?;
     Ok(Json(json!({ "ok": true })))
 }
 
