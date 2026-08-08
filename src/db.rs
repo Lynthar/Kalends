@@ -17,7 +17,17 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0011_drop_legacy_tables.sql"),
     include_str!("../migrations/0012_manual_order.sql"),
     include_str!("../migrations/0013_merge_currency_into_price.sql"),
+    include_str!("../migrations/0014_builtin_domain_fields.sql"),
 ];
+
+/// 一个跑完全部迁移的内存库，等价于"全新安装"。只给测试用。
+#[cfg(test)]
+pub fn fresh_in_memory() -> Result<Connection> {
+    let conn = Connection::open_in_memory()?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    migrate(&conn)?;
+    Ok(conn)
+}
 
 pub fn open(data_dir: &Path) -> Result<Connection> {
     std::fs::create_dir_all(data_dir)?;

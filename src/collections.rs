@@ -36,8 +36,7 @@ pub fn router() -> Router<App> {
 
 /* ── 库 ─────────────────────────────────────────────────────────── */
 
-const COLL_COLS: &str =
-    "id,key,name,icon,due_anchor,subtitle,subline,verb,note_field,pos,builtin";
+const COLL_COLS: &str = "id,key,name,icon,due_anchor,subtitle,subline,verb,note_field,pos,builtin";
 
 fn coll_row(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -130,14 +129,16 @@ async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "INSERT INTO collections(key,name,icon,due_anchor,subtitle,subline,verb,note_field,pos,builtin)
-         VALUES(?1,?2,?3,?4,NULL,?5,?6,NULL,?7,0)",
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,0)",
         params![
             key,
             name,
             take("icon", tpl.and_then(|t| opt(t.icon))),
             anchor,
+            tpl.and_then(|t| opt(t.subtitle)),
             tpl.and_then(|t| opt(t.subline)),
             take("verb", tpl.and_then(|t| opt(t.verb))),
+            tpl.and_then(|t| opt(t.note_field)),
             pos
         ],
     )?;
@@ -156,6 +157,31 @@ async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
 
 /// 模板只决定"库刚建好时长什么样"，落表后就是普通字段——域字段与用户手加的
 /// 自定义列同权（`builtin=0`），可改名、可改选项、可删。
+/// 模板的一个域字段。默认值见 `EXTRA`，写模板时只列与默认不同的键。
+struct Field {
+    key: &'static str,
+    name: &'static str,
+    ftype: &'static str,
+    /// `extra` 值挂 items.extra JSON；`calc` 只读、由模板串或服务端算出
+    src: &'static str,
+    shown: i64,
+    /// 预置选项，逗号分隔。只给真正封闭的词表，开放词表留空让它从数据里长
+    options: &'static str,
+    /// 类型专属配置，目前只有 tpl 类型用它的 `{"tpl":"..."}`；空=无
+    config: &'static str,
+}
+
+/// 域字段的默认形态：值进 extra、只进详情表单、无预置选项。
+const EXTRA: Field = Field {
+    key: "",
+    name: "",
+    ftype: "text",
+    src: "extra",
+    shown: 0,
+    options: "",
+    config: "",
+};
+
 struct Template {
     id: &'static str,
     label: &'static str,
@@ -165,11 +191,34 @@ struct Template {
     verb: &'static str,
     /// 名称格下方小字取哪个字段（不进日历标题，那是 subtitle）
     subline: &'static str,
+    /// 拼进到期时间线与日历标题的字段（VPS 的「商家 · 产品」）
+    subtitle: &'static str,
+    /// 进日历事件描述的 extra 键
+    note_field: &'static str,
+    /// 状态词表；空=用通用的 `STATUS_VOCAB`
+    status: &'static str,
     /// 对通用字段的调整：(字段键, 显示名；空=沿用默认, 是否默认上表)
     base: &'static [(&'static str, &'static str, i64)],
-    /// 域字段，值挂 items.extra：(字段键, 显示名, 类型, 是否默认上表, 预置选项；逗号分隔)
-    extra: &'static [(&'static str, &'static str, &'static str, i64, &'static str)],
+    /// 域字段。落表后一律 builtin=0，与用户手加的自定义列同权
+    extra: &'static [Field],
 }
+
+/// 模板的默认形态：无到期动作说法、无副标题、通用状态词表、只有通用字段。
+/// 写模板时只列与默认不同的键——`verb` 留空时前后端都回落成「续费」。
+const TPL: Template = Template {
+    id: "",
+    label: "",
+    icon: "",
+    desc: "",
+    anchor: "last",
+    verb: "",
+    subline: "",
+    subtitle: "",
+    note_field: "",
+    status: "",
+    base: &[],
+    extra: &[],
+};
 
 /// 第一项必须是空白模板：前端的模板选择器默认选它。
 /// 预置选项只给真正封闭的词表；注册商、保险公司这类开放词表留空，让它从数据里长出来。
@@ -177,13 +226,182 @@ const TEMPLATES: &[Template] = &[
     Template {
         id: "blank",
         label: "空白",
-        icon: "",
         desc: "只有通用字段，列自己加",
-        anchor: "last",
-        verb: "",
-        subline: "",
-        base: &[],
-        extra: &[],
+        ..TPL
+    },
+    // 订阅 / SIM / VPS 三个预置库也在这里：它们此前只由迁移 0007/0008 一次性建出来，
+    // 删掉就再也建不回来，也没法建第二个同类库。字段集与 0008 对齐，由单测钉住不漂移。
+    Template {
+        id: "subs",
+        label: "订阅",
+        icon: "🔁",
+        desc: "会员与服务的周期续费",
+        anchor: "next",
+        status: RENEWAL_STATUS_VOCAB,
+        base: &[("price", "价格", 1), ("next_renewal", "下次续费", 1)],
+        extra: &[
+            Field {
+                key: "category",
+                name: "分类",
+                ftype: "sel",
+                shown: 1,
+                ..EXTRA
+            },
+            Field {
+                key: "payment_method",
+                name: "支付方式",
+                ftype: "sel",
+                shown: 1,
+                ..EXTRA
+            },
+            Field {
+                key: "account",
+                name: "账号",
+                ..EXTRA
+            },
+        ],
+        ..TPL
+    },
+    Template {
+        id: "sims",
+        label: "SIM 卡",
+        icon: "📱",
+        desc: "号码保号与到期",
+        verb: "保号",
+        status: RENEWAL_STATUS_VOCAB,
+        subline: "phone_number",
+        note_field: "keepalive_action",
+        // 保号周期恒为自定义天数，所以费用/周期/链接退进详情表单，不占表格列位。
+        // 预置库 sims 干脆没注册 cycle 列，那正是「SIM 每次编辑都清掉周期」的成因——
+        // 这里注册上（只是不上表），同类缺陷从根上不会再有。
+        base: &[
+            ("price", "", 0),
+            ("cycle", "", 0),
+            ("notes", "", 0),
+            ("url", "", 0),
+        ],
+        extra: &[
+            Field {
+                key: "forms",
+                name: "形式",
+                ftype: "multi",
+                shown: 1,
+                ..EXTRA
+            },
+            Field {
+                key: "keepalive_action",
+                name: "保号动作",
+                shown: 1,
+                ..EXTRA
+            },
+            Field {
+                key: "phone_number",
+                name: "号码",
+                ..EXTRA
+            },
+        ],
+        ..TPL
+    },
+    Template {
+        id: "vps",
+        label: "VPS / 云实例",
+        icon: "☁️",
+        desc: "云主机的续费与规格",
+        status: RENEWAL_STATUS_VOCAB,
+        subline: "product",
+        // 商家是条目名，产品名拼进到期时间线与日历标题
+        subtitle: "product",
+        base: &[("name", "商家", 1), ("cycle", "", 0), ("notes", "", 0)],
+        extra: &[
+            Field {
+                key: "locations",
+                name: "地点",
+                ftype: "multi",
+                shown: 1,
+                ..EXTRA
+            },
+            Field {
+                key: "purpose",
+                name: "用途",
+                ftype: "sel",
+                shown: 1,
+                ..EXTRA
+            },
+            Field {
+                key: "spec",
+                name: "规格",
+                ftype: "tpl",
+                src: "calc",
+                shown: 1,
+                config: r#"{"tpl":"{cores}C / {ram_gb}G / {storage_gb}G {storage_type}"}"#,
+                ..EXTRA
+            },
+            Field {
+                key: "routes",
+                name: "线路",
+                ftype: "multi",
+                shown: 1,
+                ..EXTRA
+            },
+            Field {
+                key: "product",
+                name: "产品",
+                ..EXTRA
+            },
+            Field {
+                key: "cores",
+                name: "核心",
+                ftype: "num",
+                ..EXTRA
+            },
+            Field {
+                key: "ram_gb",
+                name: "内存 GB",
+                ftype: "num",
+                ..EXTRA
+            },
+            Field {
+                key: "storage_gb",
+                name: "存储 GB",
+                ftype: "num",
+                ..EXTRA
+            },
+            Field {
+                key: "storage_type",
+                name: "存储类型",
+                ftype: "sel",
+                ..EXTRA
+            },
+            Field {
+                key: "extra_storage",
+                name: "附加存储",
+                ..EXTRA
+            },
+            Field {
+                key: "port_gbps",
+                name: "端口 Gbps",
+                ftype: "num",
+                ..EXTRA
+            },
+            Field {
+                key: "traffic_tb",
+                name: "流量 TB",
+                ftype: "num",
+                ..EXTRA
+            },
+            Field {
+                key: "ipv6",
+                name: "IPv6",
+                ftype: "num",
+                ..EXTRA
+            },
+            Field {
+                key: "account",
+                name: "账号",
+                ..EXTRA
+            },
+        ],
+        ..TPL
     },
     Template {
         id: "domain",
@@ -192,14 +410,37 @@ const TEMPLATES: &[Template] = &[
         desc: "域名注册与到期",
         anchor: "next",
         verb: "续费",
-        subline: "",
         base: &[("next_renewal", "到期日", 1)],
         extra: &[
-            ("registrar", "注册商", "sel", 1, ""),
-            ("auto_renew", "自动续费", "sel", 1, "开,关"),
-            ("dns", "DNS 托管", "sel", 0, ""),
-            ("usage", "用途", "sel", 0, ""),
+            Field {
+                key: "registrar",
+                name: "注册商",
+                ftype: "sel",
+                shown: 1,
+                ..EXTRA
+            },
+            Field {
+                key: "auto_renew",
+                name: "自动续费",
+                ftype: "sel",
+                shown: 1,
+                options: "开,关",
+                ..EXTRA
+            },
+            Field {
+                key: "dns",
+                name: "DNS 托管",
+                ftype: "sel",
+                ..EXTRA
+            },
+            Field {
+                key: "usage",
+                name: "用途",
+                ftype: "sel",
+                ..EXTRA
+            },
         ],
+        ..TPL
     },
     Template {
         id: "insurance",
@@ -211,12 +452,40 @@ const TEMPLATES: &[Template] = &[
         subline: "policy_no",
         base: &[("next_renewal", "保单到期", 1)],
         extra: &[
-            ("insurer", "保险公司", "sel", 1, ""),
-            ("policy_type", "险种", "sel", 1, "医疗,重疾,意外,寿险,车险,财产,旅行"),
-            ("insured", "被保险人", "text", 1, ""),
-            ("coverage", "保额", "num", 0, ""),
-            ("policy_no", "保单号", "text", 0, ""),
+            Field {
+                key: "insurer",
+                name: "保险公司",
+                ftype: "sel",
+                shown: 1,
+                ..EXTRA
+            },
+            Field {
+                key: "policy_type",
+                name: "险种",
+                ftype: "sel",
+                shown: 1,
+                options: "医疗,重疾,意外,寿险,车险,财产,旅行",
+                ..EXTRA
+            },
+            Field {
+                key: "insured",
+                name: "被保险人",
+                shown: 1,
+                ..EXTRA
+            },
+            Field {
+                key: "coverage",
+                name: "保额",
+                ftype: "num",
+                ..EXTRA
+            },
+            Field {
+                key: "policy_no",
+                name: "保单号",
+                ..EXTRA
+            },
         ],
+        ..TPL
     },
     Template {
         id: "docs",
@@ -225,7 +494,6 @@ const TEMPLATES: &[Template] = &[
         desc: "护照签证等有效期",
         anchor: "next",
         verb: "换证",
-        subline: "",
         // 证件多半没有周期费用：费用与周期退进详情表单，不占表格列位
         base: &[
             ("next_renewal", "有效期至", 1),
@@ -233,11 +501,32 @@ const TEMPLATES: &[Template] = &[
             ("cycle", "", 0),
         ],
         extra: &[
-            ("doc_type", "证件类型", "sel", 1, "护照,身份证,驾照,签证,居留许可,通行证"),
-            ("holder", "持有人", "text", 1, ""),
-            ("doc_no", "证件号码", "text", 0, ""),
-            ("issuer", "签发机关", "text", 0, ""),
+            Field {
+                key: "doc_type",
+                name: "证件类型",
+                ftype: "sel",
+                shown: 1,
+                options: "护照,身份证,驾照,签证,居留许可,通行证",
+                ..EXTRA
+            },
+            Field {
+                key: "holder",
+                name: "持有人",
+                shown: 1,
+                ..EXTRA
+            },
+            Field {
+                key: "doc_no",
+                name: "证件号码",
+                ..EXTRA
+            },
+            Field {
+                key: "issuer",
+                name: "签发机关",
+                ..EXTRA
+            },
         ],
+        ..TPL
     },
 ];
 
@@ -257,7 +546,7 @@ async fn templates() -> R {
                 "due_anchor": t.anchor,
                 "verb": t.verb,
                 // 域字段的显示名，供选择器预览；含只进详情表单（shown=0）的那些
-                "fields": t.extra.iter().map(|(_, n, ..)| *n).collect::<Vec<_>>(),
+                "fields": t.extra.iter().map(|f| f.name).collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -266,10 +555,13 @@ async fn templates() -> R {
 
 /// 新建的库要能直接用：播一套默认字段集，否则表格没有列、详情表单是空的。
 /// 到期锚点决定给"下次到期日"还是"上次续费 + 剩余天数"，模板再往上加域字段。
-const STATUS_VOCAB: &str = r#"[{"v":"Active","spend":1,"alert":1,"timeline":1},
-  {"v":"Planned","spend":0,"alert":0,"timeline":0},
-  {"v":"Ending","spend":0,"alert":0,"timeline":1},
-  {"v":"Ended","spend":0,"alert":0,"timeline":0}]"#;
+/// 词表按 SQLite `json()` 的形态写成紧凑一行：迁移 0008 播状态词表时用的就是它，
+/// 两边要逐字节一致，模板等价单测才对得上（serde_json 会按字母重排键，不能拿来压缩）。
+const STATUS_VOCAB: &str = r#"[{"v":"Active","spend":1,"alert":1,"timeline":1},{"v":"Planned","spend":0,"alert":0,"timeline":0},{"v":"Ending","spend":0,"alert":0,"timeline":1},{"v":"Ended","spend":0,"alert":0,"timeline":0}]"#;
+
+/// 三个续费库共用的六值词表：比通用词表多 Deferred（比价目录，记各档位供比较）
+/// 与 Unused（未启用），两者都不计支出、不提醒、不上时间线。
+const RENEWAL_STATUS_VOCAB: &str = r#"[{"v":"Active","spend":1,"alert":1,"timeline":1},{"v":"Planned","spend":0,"alert":0,"timeline":0},{"v":"Deferred","spend":0,"alert":0,"timeline":0},{"v":"Unused","spend":0,"alert":0,"timeline":0},{"v":"Ending","spend":0,"alert":0,"timeline":1},{"v":"Ended","spend":0,"alert":0,"timeline":0}]"#;
 
 fn seed_fields(
     conn: &Connection,
@@ -295,14 +587,20 @@ fn seed_fields(
     defs.push(("cycle_days", "周期天数", "num", "col", 0, 60));
     defs.push(("url", "链接", "text", "col", 0, 61));
     for (k, name, shown) in tpl.map_or(&[][..], |t| t.base) {
-        let Some(d) = defs.iter_mut().find(|d| d.0 == *k) else { continue };
+        let Some(d) = defs.iter_mut().find(|d| d.0 == *k) else {
+            continue;
+        };
         if !name.is_empty() {
             d.1 = name;
         }
         d.4 = *shown;
     }
     for (k, name, ftype, src, shown, pos) in defs {
-        let options = if k == "status" { STATUS_VOCAB } else { "[]" };
+        let status_vocab = match tpl.map(|t| t.status) {
+            Some(v) if !v.is_empty() => v,
+            _ => STATUS_VOCAB,
+        };
+        let options = if k == "status" { status_vocab } else { "[]" };
         conn.execute(
             "INSERT INTO fields(tbl,key,name,ftype,src,shown,pos,builtin,options)
              VALUES(?1,?2,?3,?4,?5,?6,?7,1,?8)
@@ -310,9 +608,9 @@ fn seed_fields(
             params![key, k, name, ftype, src, shown, pos, options],
         )?;
     }
-    for (n, (k, name, ftype, shown, opts)) in tpl.map_or(&[][..], |t| t.extra).iter().enumerate() {
+    for (n, f) in tpl.map_or(&[][..], |t| t.extra).iter().enumerate() {
         let options = serde_json::to_string(
-            &opts
+            &f.options
                 .split(',')
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
@@ -320,10 +618,20 @@ fn seed_fields(
                 .collect::<Vec<_>>(),
         )?;
         conn.execute(
-            "INSERT INTO fields(tbl,key,name,ftype,src,shown,pos,builtin,options)
-             VALUES(?1,?2,?3,?4,'extra',?5,?6,0,?7)
+            "INSERT INTO fields(tbl,key,name,ftype,src,shown,pos,builtin,options,config)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,0,?8,?9)
              ON CONFLICT(tbl,key) DO NOTHING",
-            params![key, k, name, ftype, shown, 10 + n as i64, options],
+            params![
+                key,
+                f.key,
+                f.name,
+                f.ftype,
+                f.src,
+                f.shown,
+                10 + n as i64,
+                options,
+                (!f.config.is_empty()).then_some(f.config)
+            ],
         )?;
     }
     Ok(())
@@ -876,8 +1184,128 @@ async fn logo_file(State(app): State<App>, Path(name): Path<String>) -> Result<R
         // SVG 可携带脚本：<img> 引用本就不执行，这里再把直接打开的场景沙箱化
         resp.headers_mut().insert(
             header::CONTENT_SECURITY_POLICY,
-            header::HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; sandbox"),
+            header::HeaderValue::from_static(
+                "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+            ),
         );
     }
     Ok(resp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 一行字段的可比形态。**故意不含 pos**：迁移 0008 自己编了一套序号，而字段顺序本就
+    /// 是用户可拖动的呈现细节（`PUT /api/fields/order` 会整份重写），钉它只会逼模板去
+    /// 复刻一段没有语义的历史编号。
+    type Row = (String, String, String, String, i64, i64, String, String);
+
+    fn fields_of(conn: &Connection, tbl: &str) -> Vec<Row> {
+        let mut st = conn
+            .prepare(
+                "SELECT key,name,ftype,src,shown,builtin,options,coalesce(config,'')
+                   FROM fields WHERE tbl=?1 ORDER BY key",
+            )
+            .unwrap();
+        st.query_map([tbl], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+            ))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+    }
+
+    /// 用模板在同一个库里播一套字段，返回它的可比形态。
+    fn seeded_by_template(conn: &Connection, id: &str) -> Vec<Row> {
+        let t = template(id).unwrap_or_else(|| panic!("模板 {id} 不存在"));
+        let tbl = format!("tpl_{id}");
+        seed_fields(conn, &tbl, t.anchor, Some(t)).unwrap();
+        fields_of(conn, &tbl)
+    }
+
+    /// 订阅 / SIM / VPS 三个预置库由迁移 0007/0008 建出来，而模板里也有一份同名的描述。
+    /// 副本删不掉（已发布的迁移不能改，全新安装照样会走 0008），但漂移可以变成测试失败：
+    /// 这条钉的就是"模板产出 ⊇ 迁移产出，且多出来的恰好是这几个说得清的字段"。
+    #[test]
+    fn builtin_collections_match_their_templates() {
+        let conn = crate::db::fresh_in_memory().unwrap();
+        // 模板多出来的字段：只有 SIM。预置库 sims 压根没注册费用/周期/链接三列，
+        // 而通用字段集恒含它们——模板把它们注册上、但不上表（base 里 shown=0）。
+        // 「sims 没注册 cycle」正是"SIM 每次界面编辑都清掉周期"那个缺陷的成因，
+        // 所以这里的差异是有意为之的修正，不是漂移。
+        let allowed_extra: &[(&str, &[&str])] = &[
+            ("subs", &[]),
+            ("sims", &["cycle", "price", "url"]),
+            ("vps", &[]),
+        ];
+
+        for (key, extra_keys) in allowed_extra {
+            let migrated = fields_of(&conn, key);
+            let templated = seeded_by_template(&conn, key);
+            assert!(!migrated.is_empty(), "{key}：全新安装后该有字段");
+
+            // 迁移产出的每一行，模板都要一字不差地复现
+            for row in &migrated {
+                assert!(
+                    templated.contains(row),
+                    "{key}：模板没有复现迁移里的字段 {row:?}\n模板产出：{templated:#?}"
+                );
+            }
+            // 模板多出来的，只能是说好的那几个
+            let mut surplus: Vec<&str> = templated
+                .iter()
+                .filter(|r| !migrated.contains(r))
+                .map(|r| r.0.as_str())
+                .collect();
+            surplus.sort_unstable();
+            assert_eq!(&surplus, extra_keys, "{key}：模板多出来的字段与预期不符");
+        }
+    }
+
+    /// 库属性也是模板的一部分：到期锚点、日历标题的副标题、名称格小字、续费动作说法、
+    /// 进日历描述的备注键——写错任何一个，到期时间线与 ICS 就跟预置库长得不一样。
+    #[test]
+    fn builtin_collection_attributes_match_their_templates() {
+        let conn = crate::db::fresh_in_memory().unwrap();
+        for id in ["subs", "sims", "vps"] {
+            let t = template(id).unwrap();
+            let got: (String, String, String, String, String) = conn
+                .query_row(
+                    "SELECT due_anchor, coalesce(subtitle,''), coalesce(subline,''),
+                            coalesce(verb,''), coalesce(note_field,'')
+                       FROM collections WHERE key=?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                got,
+                (
+                    t.anchor.to_string(),
+                    t.subtitle.to_string(),
+                    t.subline.to_string(),
+                    t.verb.to_string(),
+                    t.note_field.to_string()
+                ),
+                "{id}：库属性与模板不一致"
+            );
+        }
+    }
+
+    /// 第一项必须是空白模板——前端的模板选择器默认选它。
+    #[test]
+    fn the_first_template_is_the_blank_one() {
+        assert_eq!(TEMPLATES[0].id, "blank");
+        assert!(TEMPLATES[0].extra.is_empty());
+    }
 }
