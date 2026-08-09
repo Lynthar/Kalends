@@ -2280,6 +2280,59 @@ for (const f of [shapeFs.find(x => x.name === '官网'), shapeFs.find(x => x.nam
 await evl(`loadAll()`);
 await sleep(800);
 
+/* 17.27. 「续费起算」独立成一个轴。此前 due_anchor='last' 一个标记同时扛着两种语义：
+   SIM 保号的窗口**本来就该**从实际充值那天重新计时，而 VPS 是服务商按固定日历日出账。
+   共用一条实现的结果是 VPS 那侧错着——点一次「已续费」就把锚点拽到今天，晚付十天
+   账期便永久后移十天，逐期累积。 */
+const rfColls = await (await fetch(APP + 'api/collections')).json();
+const rfMap = Object.fromEntries(rfColls.map(c => [c.key, c.renew_from]));
+check('预置库的续费起算：订阅/VPS 按日程、SIM 从当天',
+  rfMap.subs === 'schedule' && rfMap.vps === 'schedule' && rfMap.sims === 'today', JSON.stringify(rfMap));
+
+// 日期基准取服务端的「今天」，不用本脚本的 day()：那个按 UTC 算，而服务端看 Local::now()，
+// 半夜跑的时候两者会差一天，断言就会在一个与本段无关的理由上翻
+const rfToday = (await (await fetch(APP + 'api/overview')).json()).today;
+const rfDay = n => new Date(new Date(rfToday + 'T00:00:00Z').getTime() + n * 864e5).toISOString().slice(0, 10);
+
+// 同一份数据喂给两个库：30 天一期、欠了三期多。差别只在库的续费起算方式上。
+// 用天数周期是为了不在断言里再复刻一遍日历加法——月末钳位那类边界由 cargo test 守着
+const rfSeed = { status: 'Active', cycle: 'days', cycle_days: 30, last_renewed: rfDay(-100) };
+const rfVps = await mk('vps', { name: '账单日机器', price: 9, currency: 'USD', ...rfSeed, extra: { purpose: '任务' } });
+const rfSim = await mk('sims', { name: '保号测试卡', ...rfSeed, extra: { keepalive_action: '充值' } });
+
+const rfResp = await post(`/api/items/${rfVps.id}/renew`, {});
+const rfVpsAfter = (await (await fetch(APP + 'api/collections/vps/items')).json()).find(r => r.id === rfVps.id);
+check('按日程续费：锚点落在刚付的那一期，不是今天',
+  rfVpsAfter.last_renewed === rfDay(-10), `落在 ${rfVpsAfter.last_renewed}，今天是 ${rfToday}`);
+check('按日程续费：到期日回到原本的账单日',
+  rfResp.due === rfDay(20), JSON.stringify(rfResp));
+
+await post(`/api/items/${rfSim.id}/renew`, {});
+const rfSimAfter = (await (await fetch(APP + 'api/collections/sims/items')).json()).find(r => r.id === rfSim.id);
+check('保号仍从操作当天重新计时（同样的数据，另一种语义）',
+  rfSimAfter.last_renewed === rfToday, `落在 ${rfSimAfter.last_renewed}，今天是 ${rfToday}`);
+
+await evl(`loadAll()`);
+await sleep(700);
+await evl(`switchTab('vps')`);
+await sleep(250);
+await evl(`openCollDialog(collOf('vps'))`);
+await sleep(350);
+check('库设置里有「续费起算」这一栏',
+  await evl(`document.querySelector('#dlg-coll [data-c="renew_from"]')?.value`) === 'schedule');
+await shot('24-renew-from');
+await evl(`document.querySelector('#dlg-coll [data-c="renew_from"]').value = 'today'`);
+await evl(`document.querySelector('#form-coll button[type=submit]').click()`);
+await sleep(800);
+const rfSaved = (await (await fetch(APP + 'api/collections')).json()).find(c => c.key === 'vps');
+check('界面改「续费起算」能存回去', rfSaved?.renew_from === 'today', JSON.stringify(rfSaved));
+// 收拾：改回按日程、删掉这两条，后面的段落按原样算
+await put(`/api/collections/${rfSaved.id}`, { renew_from: 'schedule' });
+for (const id of [rfVps.id, rfSim.id]) await fetch(`${APP}api/items/${id}`, { method: 'DELETE' });
+await evl(`(() => { const t = document.querySelector('#toast'); clearTimeout(t._h); t.hidden = true; })()`);
+await evl(`loadAll()`);
+await sleep(700);
+
 /* 18. 库删光也不能把界面打崩。放在最后跑——这一段会把预置库连数据一起删掉。
    预置库过去在界面上删不掉（后端一直放行、文档也写着可删），而新库的表格容器
    锚在 VPS 那张表上：VPS 一删，同一会话里再建库就是 null.after()，loadAll 断在那儿。 */

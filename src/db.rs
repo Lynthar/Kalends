@@ -20,6 +20,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0014_builtin_domain_fields.sql"),
     include_str!("../migrations/0015_phone_is_a_tel_field.sql"),
     include_str!("../migrations/0016_spec_shows_port_and_traffic.sql"),
+    include_str!("../migrations/0017_split_renew_from_due_anchor.sql"),
 ];
 
 /// 一个跑完全部迁移的内存库，等价于"全新安装"。只给测试用。

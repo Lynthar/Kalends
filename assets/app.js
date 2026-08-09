@@ -231,8 +231,9 @@ async function doRenew(key) {
   if (!confirm(`记一笔「${it?.name || ''}」的${verb}？`)) return;
   try {
     const r = await api(`/api/items/${id}/renew`, { method: 'POST', body: '{}' });
-    // 没有周期就推不动日期，别谎报"周期已推进"
-    toast(r?.next_renewal || r?.last_renewed ? '已记账，周期已推进' : '已记一笔；该条目没有周期，到期日请手动改');
+    // 报出下次到期是哪天：库设成「从操作当天重新计时」的话账单日会被拽走，说出来才看得见。
+    // 日期由后端算（engine::renew_to 那一份），前端自己再算一遍就又是两份会各说各话的实现
+    toast(r?.due ? `已记账，下次到期 ${r.due}` : '已记一笔；这条算不出到期日（没有周期或买断），到期日请手动改');
     await loadAll();
   } catch (e) { toast(e.message, true); }
 }
@@ -3268,6 +3269,10 @@ function collDialog() {
           <option value="last">上次续费 + 周期</option>
           <option value="next">直接记下次到期日</option>
         </select></label>
+        <label><span>续费起算</span><select data-c="renew_from">
+          <option value="schedule">按原定到期日（账单日不变）</option>
+          <option value="today">从操作当天重新计时</option>
+        </select></label>
         <label><span>到期动作说法</span><input data-c="verb" placeholder="续费"></label>
       </div>
       <div id="coll-fields-box" hidden>
@@ -3310,6 +3315,7 @@ function pickTpl(d, t) {
   collTpl = t;
   g('icon').value = t.icon || '';
   g('due_anchor').value = t.due_anchor;
+  g('renew_from').value = t.renew_from || 'schedule';
   g('verb').value = t.verb || '';
   $('#coll-tpl-desc').textContent = t.fields.length ? `${t.desc} · 预置字段：${t.fields.join(' · ')}` : t.desc;
   fillTplChips(d);
@@ -3401,6 +3407,7 @@ async function openCollDialog(c) {
   g('name').value = c?.name || '';
   g('icon').value = c?.icon || '';
   g('due_anchor').value = c?.due_anchor || 'last';
+  g('renew_from').value = c?.renew_from || 'schedule';
   g('verb').value = c?.verb || '';
   collTpl = null;
   fillCollFields(c);
@@ -3437,7 +3444,10 @@ document.addEventListener('submit', async e => {
   e.preventDefault();
   const d = $('#dlg-coll');
   const g = k => d.querySelector(`[data-c="${k}"]`).value.trim();
-  const body = { name: g('name'), icon: g('icon'), due_anchor: g('due_anchor'), verb: g('verb') };
+  const body = {
+    name: g('name'), icon: g('icon'), due_anchor: g('due_anchor'),
+    renew_from: g('renew_from'), verb: g('verb'),
+  };
   if (!body.name) { toast('库名不能为空', true); return; }
   try {
     if (editingColl) await api(`/api/collections/${editingColl.id}`, { method: 'PUT', body: JSON.stringify(body) });
