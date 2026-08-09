@@ -46,6 +46,13 @@ async fn main() -> anyhow::Result<()> {
     let conn = db::open(&data_dir)?;
     db::seed_defaults(&conn)?;
     tracing::info!("database ready at {}", data_dir.join("kalends.db").display());
+    // 到期日、剩余天数、摘要时刻、备份的每日边界全看本地时区。容器默认是 UTC，
+    // 与用户所在时区差几小时就意味着「今天」错位、09:00 的摘要在别的钟点发出。
+    // 启动时把解析出来的本地时间与偏移打出来，好让这件事一眼看得见（compose 里设 TZ 即可）。
+    {
+        let now = chrono::Local::now();
+        tracing::info!("local time {} (UTC{})", now.format("%Y-%m-%d %H:%M"), now.format("%:z"));
+    }
 
     // 模块开关：KALENDS_MODULES=renewals,media（默认全开）——只装其一时另一模块的接口与界面整体消失
     let modules: Vec<String> = std::env::var("KALENDS_MODULES")

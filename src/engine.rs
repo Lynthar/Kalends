@@ -9,21 +9,50 @@ pub fn today() -> NaiveDate {
     Local::now().date_naive()
 }
 
-/// 从某个到期日按周期前进一步；lifetime 或未知周期返回 None。
-pub fn advance(date: NaiveDate, cycle: &str, cycle_days: Option<i64>) -> Option<NaiveDate> {
+/// 从某个到期日按周期前进 n 期；lifetime 或未知周期返回 None。
+///
+/// **一定要一次性前进 n 期，不能循环调用 `advance` n 次。** 月加法会把日期钳到月末，
+/// 而钳过之后锚点就丢了：1/31 迭代六次得 7/28，一次性加六个月才是 7/31。补推逾期条目
+/// （`renew_item`）正是要跨多期的场景，用迭代会把用户的账单日一点点往前拽。
+pub fn advance_n(date: NaiveDate, cycle: &str, cycle_days: Option<i64>, n: u32) -> Option<NaiveDate> {
+    let months = |m: u32| date.checked_add_months(Months::new(m * n));
+    let days = |d: u64| date.checked_add_days(Days::new(d * n as u64));
     match cycle {
-        "weekly" => date.checked_add_days(Days::new(7)),
-        "monthly" => date.checked_add_months(Months::new(1)),
-        "quarterly" => date.checked_add_months(Months::new(3)),
-        "semiannual" => date.checked_add_months(Months::new(6)),
-        "annual" => date.checked_add_months(Months::new(12)),
-        "biennial" => date.checked_add_months(Months::new(24)),
-        "triennial" => date.checked_add_months(Months::new(36)),
-        "days" => cycle_days
-            .filter(|d| *d > 0)
-            .and_then(|d| date.checked_add_days(Days::new(d as u64))),
+        "weekly" => days(7),
+        "monthly" => months(1),
+        "quarterly" => months(3),
+        "semiannual" => months(6),
+        "annual" => months(12),
+        "biennial" => months(24),
+        "triennial" => months(36),
+        "days" => cycle_days.filter(|d| *d > 0).and_then(|d| days(d as u64)),
         _ => None,
     }
+}
+
+/// 从某个到期日按周期前进一步。
+pub fn advance(date: NaiveDate, cycle: &str, cycle_days: Option<i64>) -> Option<NaiveDate> {
+    advance_n(date, cycle, cycle_days, 1)
+}
+
+/// 到期日的唯一实现：库按 due_anchor 决定是直接读下次续费日，还是从上次续费推一期。
+/// 到期时间线（engine）与库列表（collections::due_of）都走这里——曾经是两份逐行等价的
+/// 拷贝，改一处忘另一处就会让表格和到期栏各说各话。
+pub fn due_from(
+    anchor: &str,
+    cycle: &str,
+    cycle_days: Option<i64>,
+    next_renewal: Option<&str>,
+    last_renewed: Option<&str>,
+) -> Option<NaiveDate> {
+    if cycle == "lifetime" {
+        return None;
+    }
+    let day = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok();
+    if anchor == "next" {
+        return next_renewal.and_then(day);
+    }
+    advance(last_renewed.and_then(day)?, cycle, cycle_days)
 }
 
 /// 折算为"每月几倍"的系数，用于分币种月支出；不可折算（买断等）返回 None。
@@ -154,15 +183,13 @@ struct Row {
 impl Row {
     /// 到期日：库按 due_anchor 决定是直接读下次续费日，还是从上次续费按周期推。
     fn due(&self) -> Option<NaiveDate> {
-        let cycle = self.cycle.as_deref().unwrap_or("");
-        if cycle == "lifetime" {
-            return None;
-        }
-        if self.due_anchor == "next" {
-            return NaiveDate::parse_from_str(self.next_renewal.as_deref()?, "%Y-%m-%d").ok();
-        }
-        let last = NaiveDate::parse_from_str(self.last_renewed.as_deref()?, "%Y-%m-%d").ok()?;
-        advance(last, cycle, self.cycle_days)
+        due_from(
+            &self.due_anchor,
+            self.cycle.as_deref().unwrap_or(""),
+            self.cycle_days,
+            self.next_renewal.as_deref(),
+            self.last_renewed.as_deref(),
+        )
     }
 
     /// 显示名：库配了副标题字段且该条目有值时拼上（VPS 的"商家 · 产品"）。
@@ -213,6 +240,35 @@ fn rows(conn: &Connection) -> Result<Vec<Row>> {
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(out)
+}
+
+/// 该上时间线、却算不出到期日的条目。
+///
+/// 这些条目状态是在管的（Active 之类），但缺 `next_renewal` 或 `last_renewed`，
+/// `due_from` 给不出日期——于是它们既不在到期时间线上、也不进 ICS、更不会提醒。
+/// 以前是直接 `continue` 掉：一个以"别忘了续费"为职责的工具，把算不出日期的条目
+/// 从列表里悄悄拿掉，比显示错误更糟。这里单独列出来交给界面点名。
+pub fn undated(conn: &Connection) -> Result<Vec<Value>> {
+    let sems = sem_map(conn)?;
+    let mut out = Vec::new();
+    for r in rows(conn)? {
+        if !sem_of(&sems, &r.key, &r.status).timeline || r.due().is_some() {
+            continue;
+        }
+        // 买断（lifetime）本就没有到期日，不算欠缺
+        if r.cycle.as_deref() == Some("lifetime") {
+            continue;
+        }
+        let anchor_field = if r.due_anchor == "next" { "下次续费日" } else { "上次续费日" };
+        out.push(json!({
+            "kind": r.key,
+            "id": r.id,
+            "name": r.title(),
+            "status": r.status,
+            "missing": anchor_field,
+        }));
+    }
     Ok(out)
 }
 
@@ -368,6 +424,43 @@ mod tests {
         // 存储键不认识时原样回显，别把它吞成空字符串
         assert_eq!(cycle_label("weird", None), "weird");
     }
+
+    /// 补推逾期条目必须一次性推 n 期。逐次调用 `advance` 会在月末被钳一次之后
+    /// 永久丢掉锚点：1/31 迭代六次得 7/28，而正确答案是 7/31。
+    #[test]
+    fn advancing_many_periods_keeps_the_month_end_anchor() {
+        let start = d("2026-01-31");
+        let mut walked = start;
+        for _ in 0..6 {
+            walked = advance(walked, "monthly", None).unwrap();
+        }
+        assert_eq!(walked, d("2026-07-28"), "逐步推进会丢锚点（这正是不能那么做的理由）");
+        assert_eq!(advance_n(start, "monthly", None, 6).unwrap(), d("2026-07-31"));
+        // 短月仍然钳位，只是不把钳过的结果当成下一次的起点
+        assert_eq!(advance_n(start, "monthly", None, 1).unwrap(), d("2026-02-28"));
+        // 天数与周是绝对的，n 期就是 n 倍
+        assert_eq!(advance_n(d("2026-01-01"), "days", Some(181), 2).unwrap(), d("2026-12-29")); // 362 天
+        assert_eq!(advance_n(d("2026-01-01"), "weekly", None, 3).unwrap(), d("2026-01-22"));
+        // 闰日按年推进：非闰年钳到 28，四年后回到 29
+        assert_eq!(advance_n(d("2028-02-29"), "annual", None, 1).unwrap(), d("2029-02-28"));
+        assert_eq!(advance_n(d("2028-02-29"), "annual", None, 4).unwrap(), d("2032-02-29"));
+        assert_eq!(advance_n(d("2026-01-01"), "lifetime", None, 2), None);
+    }
+
+    /// 到期日只有一份实现，到期时间线与库列表都走它。
+    #[test]
+    fn due_is_computed_one_way_for_both_anchors() {
+        assert_eq!(due_from("next", "annual", None, Some("2026-09-01"), None), Some(d("2026-09-01")));
+        assert_eq!(due_from("last", "days", Some(181), None, Some("2026-01-01")), Some(d("2026-07-01")));
+        // 买断没有到期日
+        assert_eq!(due_from("next", "lifetime", None, Some("2026-09-01"), None), None);
+        // 锚点字段缺了就算不出来——这些条目由 undated() 单独点名，而不是静默丢掉
+        assert_eq!(due_from("next", "annual", None, None, Some("2026-01-01")), None);
+        assert_eq!(due_from("last", "annual", None, Some("2026-09-01"), None), None);
+        // last 锚点但周期为空：同样算不出来（SIM 曾因界面清掉 cycle 整条掉出时间线）
+        assert_eq!(due_from("last", "", None, None, Some("2026-01-01")), None);
+    }
+
 }
 
 /// 分币种月/年支出：状态语义为"计支出"且周期可折算的条目。

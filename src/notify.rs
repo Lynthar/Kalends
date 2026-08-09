@@ -56,9 +56,24 @@ pub fn email_cfg(conn: &Connection) -> Option<EmailCfg> {
 /// 也没有总超时，而通知调度器是一条条顺序 await 的——一根挂死的连接能把之后所有提醒
 /// 拖到下次重启，日志里还什么都看不到。
 pub fn http_client(proxy: &str) -> Result<reqwest::Client> {
+    build_client(proxy, true)
+}
+
+/// 不自动跟重定向的客户端。取图标那条路要自己一跳一跳地跟，好在每一跳都重新校验目标——
+/// 交给 reqwest 自动跟的话，`https://正常站/x → 302 → http://10.0.0.5/` 就绕过了内网防线。
+pub fn http_client_no_redirect(proxy: &str) -> Result<reqwest::Client> {
+    build_client(proxy, false)
+}
+
+fn build_client(proxy: &str, follow: bool) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(30)); // 含响应体，海报下载也走这条
+        .timeout(std::time::Duration::from_secs(30)) // 含响应体，海报下载也走这条
+        .redirect(if follow {
+            reqwest::redirect::Policy::default()
+        } else {
+            reqwest::redirect::Policy::none()
+        });
     if !proxy.is_empty() {
         builder = builder.proxy(reqwest::Proxy::all(proxy)?);
     }

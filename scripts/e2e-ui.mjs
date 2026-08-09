@@ -2093,6 +2093,193 @@ check('关掉折算后又是分币种显示',
   await evl(`document.querySelectorAll('#totals .cur').length`) >= 1
   && await evl(`document.querySelector('#totals-note').hidden`) === true);
 
+/* 17.22. 电话号码字段类型：号码本来就不是普通文本，写入口规范化、表格里可点拨号。 */
+const simFs = (await (await fetch(`${APP}api/fields`)).json()).filter(f => f.tbl === 'sims');
+check('SIM 的号码是 tel 类型', simFs.find(f => f.key === 'phone_number')?.ftype === 'tel',
+  simFs.map(f => `${f.key}:${f.ftype}`));
+check('tel 在新建列的类型白名单里',
+  (await post('/api/fields', { tbl: 'sims', name: '备用号码', ftype: 'tel' })).ftype === 'tel');
+
+const simRow0 = (await (await fetch(`${APP}api/collections/sims/items`)).json())[0];
+const simBody = e => ({ ...simRow0, extra: { ...(simRow0.extra || {}), phone_number: e } });
+check('写入口折叠多余空白', (await (async () => {
+  await put(`/api/items/${simRow0.id}`, simBody('  +81  90   1234 5678 '));
+  const r = (await (await fetch(`${APP}api/collections/sims/items`)).json()).find(x => x.id === simRow0.id);
+  return r.extra.phone_number;
+})()) === '+81 90 1234 5678');
+check('一个数字都没有的值被拦下',
+  (await raw(`/api/items/${simRow0.id}`, 'PUT', simBody('打客服'))).status === 400);
+check('混进不该有的字符也被拦下',
+  (await raw(`/api/items/${simRow0.id}`, 'PUT', simBody('+81 90ab'))).status === 400);
+// 位数偏少是既有数据里就有的（只填了国家码），放行但标出来——在写入口 400 掉
+// 等于让人打不开自己的旧条目
+check('位数偏少放行，不当错误', (await raw(`/api/items/${simRow0.id}`, 'PUT', simBody('+44'))).ok);
+
+await evl(`loadAll()`);
+await sleep(900);
+await evl(`switchTab('sims')`);
+await sleep(500);
+// 号码默认不占列位（shown=0），只作为名称格小字露面——tel 渲染在两处都要有
+check('名称格小字里的号码也是可点拨号的链接',
+  await evl(`(() => {
+    const a = document.querySelector('#sims-body tr .muted a.tel');
+    return a ? a.getAttribute('href') : null;
+  })()`) === 'tel:+44');
+check('位数偏少的号码挂了提醒标',
+  await evl(`!!document.querySelector('#sims-body tr .muted .tel-warn')`) === true);
+// 把它放上表，列里同样是拨号链接
+const pnField = (await (await fetch(`${APP}api/fields`)).json()).find(f => f.tbl === 'sims' && f.key === 'phone_number');
+await put(`/api/fields/${pnField.id}`, { name: pnField.name, shown: true });
+await evl(`loadAll()`);
+await sleep(900);
+check('号码列渲染成拨号链接，href 滤掉空格横杠',
+  await evl(`(() => {
+    const a = document.querySelector('#sims-body tr td[data-k="phone_number"] a.tel');
+    return a ? a.getAttribute('href') : null;
+  })()`) === 'tel:+44');
+await put(`/api/fields/${pnField.id}`, { name: pnField.name, shown: false });
+await put(`/api/items/${simRow0.id}`, simBody(simRow0.extra?.phone_number || ''));
+
+/* 17.23. 规格格就地编辑：值分散在几个真字段里，模板串同时声明"显示哪几项、编辑哪几项"。 */
+const vpsSpec = (await (await fetch(`${APP}api/fields`)).json()).find(f => f.tbl === 'vps' && f.key === 'spec');
+check('规格模板串已含端口与流量',
+  ['{cores}', '{ram_gb}', '{storage_gb}', '{port_gbps}', '{traffic_tb}'].every(k => vpsSpec.config?.tpl?.includes(k)),
+  vpsSpec.config);
+const vpsRow = (await (await fetch(`${APP}api/collections/vps/items`)).json())[0];
+await put(`/api/items/${vpsRow.id}`, { ...vpsRow, extra: {
+  ...(vpsRow.extra || {}), cores: 2, ram_gb: 4, storage_gb: 40, storage_type: 'NVMe', port_gbps: 1, traffic_tb: 2,
+} });
+await evl(`loadAll()`);
+await sleep(900);
+await evl(`switchTab('vps')`);
+await sleep(500);
+check('规格格把六项一起显示出来',
+  (await evl(`document.querySelector('#vps-body tr[data-id="${vpsRow.id}"] td[data-k="spec"]')?.textContent || ''`))
+    .replace(/\s+/g, ' ').includes('2C / 4G / 40G NVMe / 1Gbps / 2TB'),
+  await evl(`document.querySelector('#vps-body tr[data-id="${vpsRow.id}"] td[data-k="spec"]')?.textContent`));
+
+await evl(`document.querySelector('#vps-body tr[data-id="${vpsRow.id}"] td[data-k="spec"]').click()`);
+await sleep(400);
+check('点规格格开的是复合编辑器，不是详情表单',
+  await evl(`!!document.querySelector('.cellpop [data-f="cores"]')`) === true
+  && await evl(`document.querySelector('#dlg-item')?.open !== true`) === true);
+check('编辑器按模板串列出六个部分，标签取自字段注册表',
+  await evl(`[...document.querySelectorAll('.cellpop [data-f]')].map(e => e.dataset.f).join()`)
+    === 'cores,ram_gb,storage_gb,storage_type,port_gbps,traffic_tb');
+check('存储类型是下拉而不是文本框',
+  await evl(`document.querySelector('.cellpop [data-f="storage_type"]').tagName`) === 'SELECT');
+await evl(`(() => {
+  const i = document.querySelector('.cellpop [data-f="ram_gb"]'); i.value = '8';
+  document.querySelector('.cellpop .cp-foot button').click();
+})()`);
+await sleep(900);
+check('就地改内存存回了底层字段，不必开详情表单',
+  (await (await fetch(`${APP}api/collections/vps/items`)).json()).find(r => r.id === vpsRow.id).extra.ram_gb === 8);
+check('规格格随之刷新',
+  (await evl(`document.querySelector('#vps-body tr[data-id="${vpsRow.id}"] td[data-k="spec"]')?.textContent || ''`)).includes('8G'));
+
+/* 17.24. 算不出到期日的条目要被点名，而不是从时间线上静默消失。 */
+const undRow = (await (await fetch(`${APP}api/collections/subs/items`)).json())
+  .find(r => r.status === 'Active' && r.next_renewal);
+await put(`/api/items/${undRow.id}`, { ...undRow, next_renewal: '' });
+await evl(`loadAll()`);
+await sleep(900);
+const undOv = await (await fetch(APP + 'api/overview')).json();
+check('接口把它列进 undated 而不是丢掉',
+  undOv.undated.some(x => x.id === undRow.id && x.missing === '下次续费日'), JSON.stringify(undOv.undated));
+check('它确实不在到期时间线上（所以才必须点名）',
+  !undOv.upcoming.some(x => x.kind === 'subs' && x.id === undRow.id));
+check('首页点名了它',
+  await evl(`!document.querySelector('#up-undated').hidden`) === true
+  && (await evl(`document.querySelector('#up-undated').textContent`)).includes(undRow.name));
+await put(`/api/items/${undRow.id}`, undRow);
+await evl(`loadAll()`);
+await sleep(900);
+check('日期填回去之后提示消失',
+  await evl(`document.querySelector('#up-undated').hidden`) === true);
+
+/* 17.25. 网址与邮箱类型：同样是"有形状的文本"，写入口规范化、格子里给可点的链接。 */
+check('url / email 在新建列的类型白名单里',
+  (await post('/api/fields', { tbl: 'subs', name: '官网', ftype: 'url' })).ftype === 'url'
+  && (await post('/api/fields', { tbl: 'subs', name: '账户邮箱', ftype: 'email' })).ftype === 'email');
+const shapeFs = (await (await fetch(`${APP}api/fields`)).json()).filter(f => f.tbl === 'subs');
+const urlKey = shapeFs.find(f => f.name === '官网').key;
+const mailKey = shapeFs.find(f => f.name === '账户邮箱').key;
+
+const shapeRow = (await (await fetch(`${APP}api/collections/subs/items`)).json())[0];
+const shapeBody = ex => ({ ...shapeRow, extra: { ...(shapeRow.extra || {}), ...ex } });
+check('网址没写协议时补 https://', (await (async () => {
+  await put(`/api/items/${shapeRow.id}`, shapeBody({ [urlKey]: 'netflix.com' }));
+  const r = (await (await fetch(`${APP}api/collections/subs/items`)).json()).find(x => x.id === shapeRow.id);
+  return r.extra[urlKey];
+})()) === 'https://netflix.com');
+check('邮箱域名统一小写、用户名原样', (await (async () => {
+  await put(`/api/items/${shapeRow.id}`, shapeBody({ [mailKey]: ' Me.You+tag@Example.COM ' }));
+  const r = (await (await fetch(`${APP}api/collections/subs/items`)).json()).find(x => x.id === shapeRow.id);
+  return r.extra[mailKey];
+})()) === 'Me.You+tag@example.com');
+check('形状不对的网址被拦下',
+  (await raw(`/api/items/${shapeRow.id}`, 'PUT', shapeBody({ [urlKey]: 'ftp://a.com' }))).status === 400);
+check('形状不对的邮箱被拦下',
+  (await raw(`/api/items/${shapeRow.id}`, 'PUT', shapeBody({ [mailKey]: 'a@b' }))).status === 400);
+
+await put(`/api/items/${shapeRow.id}`, shapeBody({ [urlKey]: 'https://www.netflix.com/browse?x=1', [mailKey]: 'me@example.com' }));
+await evl(`loadAll()`);
+await sleep(900);
+await evl(`switchTab('subs')`);
+await sleep(500);
+check('网址格只显示域名（原串常带一长串参数，铺开会把整列撑爆）',
+  (await evl(`document.querySelector('#subs-body tr[data-id="${shapeRow.id}"] td[data-k="${urlKey}"]')?.textContent || ''`)).trim().startsWith('netflix.com'),
+  await evl(`document.querySelector('#subs-body tr[data-id="${shapeRow.id}"] td[data-k="${urlKey}"]')?.textContent`));
+check('网址是可点的外链',
+  await evl(`document.querySelector('#subs-body tr[data-id="${shapeRow.id}"] td[data-k="${urlKey}"] a')?.getAttribute('href')`)
+    === 'https://www.netflix.com/browse?x=1');
+check('邮箱渲染成 mailto',
+  await evl(`document.querySelector('#subs-body tr[data-id="${shapeRow.id}"] td[data-k="${mailKey}"] a')?.getAttribute('href')`)
+    === 'mailto:me@example.com');
+
+/* 17.26. 从网站取图标：本项目第二条默认关着的出网，且只连条目自己那个站。
+   **内网一律拦下**——不拦的话这颗按钮就成了替人探测内网的工具。 */
+check('没有网址时说清楚，而不是默默失败',
+  (await raw(`/api/items/${shapeRow.id}/logo/fetch`, 'POST', { url: '' })).status === 400);
+for (const host of ['http://127.0.0.1/', 'http://10.0.0.5/', 'http://192.168.1.1/', 'http://169.254.169.254/']) {
+  const r = await raw(`/api/items/${shapeRow.id}/logo/fetch`, 'POST', { url: host });
+  check(`拦下内网地址 ${host}`, r.status === 400 && (await r.json()).error?.includes('公网'));
+}
+// localhost 更早一步就被 url 形状检查拦了（域名里没有点），同样进不去出网那一段
+// localhost 与 IPv6 字面量更早一步就被 url 形状检查拦了（域名里没有点），
+// 同样进不去出网那一段——两道防线叠着，哪道先挡下都行
+for (const h of ['http://localhost/', 'http://[::1]/']) {
+  check(`拦下 ${h}（由形状检查先挡）`,
+    (await raw(`/api/items/${shapeRow.id}/logo/fetch`, 'POST', { url: h })).status === 400);
+}
+check('形状不对的网址在取图标时也拦下',
+  (await raw(`/api/items/${shapeRow.id}/logo/fetch`, 'POST', { url: 'ftp://a.com' })).status === 400);
+
+// 详情表单里的「从网站取」按钮：填了网址才出现（没网址时点了必然失败，不如不给）
+await evl(`openItemDialog('subs', state.subs.find(r => r.id === ${shapeRow.id}))`);
+await sleep(600);
+// 值在自建的网址列里（不是内置 url 真列）——按钮认的是「url 类型」而不是某个固定键
+check('自建网址列也能触发「从网站取」按钮',
+  await evl(`!document.querySelector('[data-logo-grab]')?.hidden`) === true);
+await evl(`(() => {
+  for (const i of document.querySelectorAll('#item-fields [data-f="url"], #item-fields [data-urlfield]')) {
+    i.value = ''; i.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+})()`);
+await sleep(200);
+check('所有网址列都清空后按钮才收起来',
+  await evl(`document.querySelector('[data-logo-grab]')?.hidden`) === true);
+await evl(`document.querySelector('#dlg-item').close()`);
+await sleep(200);
+
+// 收拾：删掉这两列，后面的段落按原样算
+for (const f of [shapeFs.find(x => x.name === '官网'), shapeFs.find(x => x.name === '账户邮箱')]) {
+  await fetch(`${APP}api/fields/${f.id}`, { method: 'DELETE' });
+}
+await evl(`loadAll()`);
+await sleep(800);
+
 /* 18. 库删光也不能把界面打崩。放在最后跑——这一段会把预置库连数据一起删掉。
    预置库过去在界面上删不掉（后端一直放行、文档也写着可删），而新库的表格容器
    锚在 VPS 那张表上：VPS 一删，同一会话里再建库就是 null.after()，loadAll 断在那儿。 */

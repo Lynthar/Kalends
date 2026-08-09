@@ -111,7 +111,7 @@ async function loadAll() {
   const hasM = MODULES.includes('media');
   // 先取概览（里面带库清单）与设置，之后才知道有哪些库要拉条目
   [state.overview, state.settings, state.media, state.fx] = await Promise.all([
-    hasR ? api('/api/overview') : { today: '', upcoming: [], totals: [], collections: [] },
+    hasR ? api('/api/overview') : { today: '', upcoming: [], undated: [], totals: [], collections: [] },
     api('/api/settings'),
     hasM ? api('/api/media') : [],
     api('/api/fx'), // 汇率表整份下发，折算在呈现层做
@@ -173,6 +173,16 @@ function renderUpcoming() {
     ol.appendChild(li);
   });
   ol.querySelectorAll('[data-renew]').forEach(b => b.onclick = () => doRenew(b.dataset.renew));
+
+  // 该上时间线却算不出到期日的条目。不点名的话它们既不在这张表上、也不进日历、
+  // 更不会提醒——你以为在管，其实它从界面上消失了
+  const und = state.overview.undated || [];
+  const un = $('#up-undated');
+  un.hidden = !und.length;
+  if (und.length) {
+    const names = und.map(x => `${x.name}（缺${x.missing}）`).join('、');
+    un.textContent = `⚠ 另有 ${und.length} 项算不出到期日，不会提醒也不进日历：${names}`;
+  }
 
   $('#up-panel').classList.toggle('folded', state.upFolded);
   $('#up-toggle').setAttribute('aria-expanded', String(!state.upFolded));
@@ -297,8 +307,15 @@ const stPill = v => v ? `<span class="st${ST_CLASS[v] ? ' ' + ST_CLASS[v] : ''}"
 
 /* 字段类型（Notion 式）：每列必属其一，驱动表头图标、排序、筛选操作符与单元格造型。
    勾选列表型（sel/multi/status/star）筛选存已选值数组；操作符型（text/num/date）存 {op, q}。 */
-const TYPE_LABEL = { text: '文本', num: '数字', sel: '单选', multi: '多选', status: '状态', date: '日期', star: '星级' };
+const TYPE_LABEL = { text: '文本', num: '数字', sel: '单选', multi: '多选', status: '状态', date: '日期', star: '星级', tel: '电话', url: '网址', email: '邮箱' };
 const LIST_TYPES = ['sel', 'multi', 'status', 'star'];
+// 拨号链接只留 + 与数字：href 里带空格/横杠时部分客户端会拨错
+const telHref = v => 'tel:' + String(v).replace(/[^\d+]/g, '');
+// 位数太少多半是只填了国家码这类残缺值。这里只标不拦——存量数据里就有，
+// 在写入口 400 掉等于让人打不开自己的旧条目（后端同理，见 normalize_tel）
+const telSuspect = v => (String(v).match(/\d/g) || []).length < 5;
+// 网址在格子里只显示域名：原始串常是带一长串查询参数的登录页，铺开会把整列撑爆
+const urlHost = v => String(v).replace(/^[a-z]+:\/\//i, '').split(/[/?#]/)[0].replace(/^www\./, '');
 const CONV_TYPES = ['text', 'sel', 'multi']; // 纯文本值列可在这三种呈现间切换
 const colType = (tab, k) => views[tab].types?.[k] || COLS[tab][k].t;
 
@@ -548,6 +565,9 @@ const TYPE_ICON = {
   multi: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5.5 4h8M5.5 8h8M5.5 12h8"/><circle cx="2.4" cy="4" r=".95" fill="currentColor" stroke="none"/><circle cx="2.4" cy="8" r=".95" fill="currentColor" stroke="none"/><circle cx="2.4" cy="12" r=".95" fill="currentColor" stroke="none"/></svg>',
   date: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="3.5" width="11" height="10" rx="1.6"/><path d="M2.5 6.8h11M5.6 2v2.6M10.4 2v2.6"/></svg>',
   star: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.8l1.9 3.9 4.3.6-3.1 3 .7 4.2L8 11.5l-3.8 2 .7-4.2-3.1-3 4.3-.6z"/></svg>',
+  tel: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M5.2 2.4 6.6 5 5.3 6.6c.8 1.7 2.4 3.3 4.1 4.1L11 9.4l2.6 1.4v2.4c0 .5-.4.9-.9.8C7.2 13.5 2.5 8.8 1.8 3.3c-.1-.5.3-.9.8-.9z"/></svg>',
+  url: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M6.6 9.4a2.6 2.6 0 0 0 3.7 0l2.1-2.1a2.6 2.6 0 0 0-3.7-3.7l-.9.9"/><path d="M9.4 6.6a2.6 2.6 0 0 0-3.7 0L3.6 8.7a2.6 2.6 0 0 0 3.7 3.7l.9-.9"/></svg>',
+  email: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><rect x="2" y="3.6" width="12" height="8.8" rx="1.4"/><path d="m2.6 4.4 5.4 4 5.4-4"/></svg>',
 };
 
 // 各表列键的模板序快照（tbody 渲染恒为模板序，td 定位靠它；列序重排只动 thead/td 的 DOM 序）
@@ -1482,7 +1502,7 @@ function openNewColPop(tab, anchor) {
   popEl.innerHTML = `<div class="fp-head"><b>新建列</b></div>
     <div class="fp-form"><input class="fp-q" data-name placeholder="列名"></div>
     <div class="fp-form"><select class="mini-select fp-op" data-type>
-      ${['text', 'num', 'sel', 'multi', 'date', 'star'].map(t => `<option value="${t}">${TYPE_LABEL[t]}</option>`).join('')}
+      ${['text', 'num', 'sel', 'multi', 'date', 'star', 'tel', 'url', 'email'].map(t => `<option value="${t}">${TYPE_LABEL[t]}</option>`).join('')}
     </select><button type="button" class="btn primary mini" data-go>创建</button></div>`;
   const go = async () => {
     const name = popEl.querySelector('[data-name]').value.trim();
@@ -1964,6 +1984,51 @@ function priceEditor(tab, it, td) {
   amt.focus();
 }
 
+// 模板列（VPS 规格）的就地编辑：值本身分散在几个真字段里，这里把它们凑成一个格子编辑。
+// 每个部分的标签、类型、选项都来自字段注册表——模板串只声明"要哪几项、怎么排版"。
+function tplEditor(tab, it, td, f) {
+  const parts = tplKeys(f).map(k => fieldOf(tab, k)).filter(Boolean);
+  if (!parts.length) return openItemDialog(tab, it); // 模板串指向的字段都没了，退回详情表单
+  const box = cellPopShell(td, f.name || f.key);
+  for (const p of parts) {
+    const cur = (it.extra || {})[p.key] ?? '';
+    const wrap = document.createElement('label');
+    wrap.className = 'cp-field';
+    if (p.ftype === 'sel') {
+      const opts = fieldOptions(tab, p);
+      if (cur !== '' && !opts.includes(String(cur))) opts.unshift(String(cur));
+      wrap.innerHTML = `${esc(p.name || p.key)}<select class="mini-select" data-f="${esc(p.key)}">`
+        + `<option value=""></option>`
+        + opts.map(o => `<option${String(o) === String(cur) ? ' selected' : ''}>${esc(o)}</option>`).join('')
+        + `</select>`;
+    } else {
+      const type = p.ftype === 'num' ? 'number' : p.ftype === 'tel' ? 'tel' : 'text';
+      wrap.innerHTML = `${esc(p.name || p.key)}<input class="fp-q" type="${type}"`
+        + `${type === 'number' ? ' step="any"' : ''} data-f="${esc(p.key)}">`;
+      wrap.querySelector('input').value = cur;
+    }
+    box.appendChild(wrap);
+  }
+  const foot = document.createElement('div');
+  foot.className = 'cp-foot';
+  foot.innerHTML = '<button type="button" class="btn primary mini">保存</button>';
+  box.appendChild(foot);
+  const commit = () => {
+    const ex = { ...(it.extra || {}) };
+    for (const el of box.querySelectorAll('[data-f]')) {
+      const v = el.type === 'number' ? (el.value === '' ? '' : +el.value) : el.value;
+      if (v === '' || v == null) delete ex[el.dataset.f];
+      else ex[el.dataset.f] = v;
+    }
+    closePop();
+    patchRow(tab, it, { extra: ex });
+  };
+  foot.querySelector('button').onclick = commit;
+  box.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') commit(); });
+  placePop(box, td);
+  box.querySelector('input,select')?.focus();
+}
+
 function openCellPop(tab, it, k, td) {
   const id = `cell:${tab}:${it.id}:${k}`;
   if (popKey === id) { closePop(); return; }
@@ -1974,7 +2039,11 @@ function openCellPop(tab, it, k, td) {
   const spec = CELL_SPEC[tab]?.[k] || {};
   const t = colType(tab, k);
   const toExtra = inExtra(col);
-  // 算出来的列（剩余天数 / 模板列）不能就地编辑，点它开详情表单去改源字段
+  // 模板列（VPS 规格）虽然是算出来的，但它的每一部分都是可写的真字段——
+  // 点它就地把整套改完，不必为了改个内存开一次详情表单
+  const fdef = fieldOf(tab, k);
+  if (fdef?.ftype === 'tpl') return tplEditor(tab, it, td, fdef);
+  // 其余算出来的列（剩余天数）没有可写的源，点它开详情表单
   if (col.src === 'calc') return openItemDialog(tab, it);
   // 周期是复合格：周期枚举 + 自定义天数
   if (k === 'cycle') return cycleEditor(tab, it, td);
@@ -1992,7 +2061,7 @@ function openCellPop(tab, it, k, td) {
     });
   }
   const f = spec.f || k;
-  const type = t === 'num' ? 'number' : t === 'date' ? 'date' : 'text';
+  const type = t === 'num' ? 'number' : t === 'date' ? 'date' : t === 'tel' ? 'tel' : t === 'url' ? 'url' : t === 'email' ? 'email' : 'text';
   return inputsEditor(tab, it, td, [[f, colLabel(tab, k), type]], patch => {
     if (toExtra) return patchRow(tab, it, extraPatch(it, k, patch[f] ?? ''));
     return patchRow(tab, it, patch);
@@ -2594,6 +2663,10 @@ function fieldVal(f, r) {
   return fieldRaw(f, r);
 }
 
+// 模板串里出现的字段键，按出现顺序。显示与就地编辑共用这一份声明——
+// 想让规格格多显示一项、就多编辑一项，改模板串即可，不必两处同步。
+const tplKeys = f => [...String(f.config?.tpl || '').matchAll(/\{(\w+)\}/g)].map(m => m[1]);
+
 // 模板列：按 ' / ' 分段，段首占位字段为空则整段不出现（复刻 VPS「规格」的既有观感）
 function tplText(f, r) {
   const tpl = f.config?.tpl || '';
@@ -2795,13 +2868,16 @@ function renderColl(key) {
     const parent = it.parent_id ? byId[it.parent_id] : null;
     const hasKids = kids.has(it.id);
     const sub = c.subline ? ((it.extra || {})[c.subline] ?? it[c.subline]) : '';
+    // 小字是号码时也给拨号链接：SIM 的号码默认只作为名称格小字露面（不占列位），
+    // 只在表格列上做 tel 渲染的话，这个类型最有用的地方恰好看不见
+    const subTel = sub && fieldOf(key, c.subline)?.ftype === 'tel';
     const tr = document.createElement('tr');
     tr.dataset.id = it.id;
     if (depth) tr.classList.add('subrow');
     const tds = fields.map(f => {
       const v = fieldVal(f, it);
       if (f.key === 'name') {
-        return `<td>${hasKids ? `<button class="tgl" data-tgl type="button" title="折叠 / 展开子行">${collapsed.has(it.id) ? '▸' : '▾'}</button>` : ''}${(!depth && parent) ? `<span class="sub-parent">${esc(parent.name)} ↳ </span>` : ''}${logoOf(it) ? `<img class="slogo" src="/logos/${esc(logoOf(it))}" alt="" loading="lazy">` : ''}${nameCell(it.name)}${safeUrl(it.url) ? ` <a class="btn link" href="${esc(safeUrl(it.url))}" target="_blank" rel="noreferrer">↗</a>` : ''}<button class="rowopen" data-open type="button" title="打开详情">⤢</button>${sub ? `<div class="muted" style="font-size:.75rem">${esc(sub)}</div>` : ''}</td>`;
+        return `<td>${hasKids ? `<button class="tgl" data-tgl type="button" title="折叠 / 展开子行">${collapsed.has(it.id) ? '▸' : '▾'}</button>` : ''}${(!depth && parent) ? `<span class="sub-parent">${esc(parent.name)} ↳ </span>` : ''}${logoOf(it) ? `<img class="slogo" src="/logos/${esc(logoOf(it))}" alt="" loading="lazy">` : ''}${nameCell(it.name)}${safeUrl(it.url) ? ` <a class="btn link" href="${esc(safeUrl(it.url))}" target="_blank" rel="noreferrer">↗</a>` : ''}<button class="rowopen" data-open type="button" title="打开详情">⤢</button>${sub ? `<div class="muted" style="font-size:.75rem">${subTel ? `<a class="tel" href="${esc(telHref(sub))}">${esc(sub)}</a>${telSuspect(sub) ? '<span class="tel-warn" title="位数偏少，可能只填了国家码">?</span>' : ''}` : esc(sub)}</div>` : ''}</td>`;
       }
       if (f.key === 'status') return `<td>${stPill(it.status)}</td>`;
       if (f.key === 'left') return `<td class="wide">${leftBar(it)}</td>`;
@@ -2811,6 +2887,16 @@ function renderColl(key) {
         const { main, sub } = moneyView(it.currency, it.price);
         const note = [sub, cyc].filter(Boolean).join(' · ');
         return `<td class="amt">${esc(main)}${note ? `<div class="muted" style="font-size:.72rem">${esc(note)}</div>` : ''}</td>`;
+      }
+      if (f.ftype === 'url') {
+        const href = safeUrl(v);
+        return `<td class="clip">${href ? `<a href="${esc(href)}" target="_blank" rel="noreferrer">${esc(urlHost(v))} ↗</a>` : esc(v || '')}</td>`;
+      }
+      if (f.ftype === 'email') {
+        return `<td class="clip">${v ? `<a href="mailto:${esc(v)}">${esc(v)}</a>` : ''}</td>`;
+      }
+      if (f.ftype === 'tel') {
+        return `<td class="cdate">${v ? `<a class="tel" href="${esc(telHref(v))}">${esc(v)}</a>${telSuspect(v) ? '<span class="tel-warn" title="位数偏少，可能只填了国家码">?</span>' : ''}` : ''}</td>`;
       }
       if (f.ftype === 'date') return `<td class="cdate">${esc(v || '')}</td>`;
       if (f.ftype === 'tpl') return `<td class="cdate">${esc(v || '')}</td>`;
@@ -2994,8 +3080,10 @@ function fieldControl(key, f, it) {
         currencyOptions(key, cur).map(c => `<option value="${esc(c)}"${c === cur ? ' selected' : ''}>${esc(c)}</option>`).join('')
       }</select></span>`;
   } else {
-    const type = f.ftype === 'num' ? 'number' : f.ftype === 'date' ? 'date' : 'text';
-    lab.innerHTML = `<span>${esc(f.name || f.key)}</span><input type="${type}"${type === 'number' ? ' step="any"' : ''} data-f="${esc(f.key)}" value="${esc(val)}">`;
+    const type = f.ftype === 'num' ? 'number' : f.ftype === 'date' ? 'date' : f.ftype === 'tel' ? 'tel' : f.ftype === 'url' ? 'url' : f.ftype === 'email' ? 'email' : 'text';
+    // 标出网址输入框：「从网站取图标」认这个标记，所以自建的网址列同样能用
+    const mark = f.ftype === 'url' ? ' data-urlfield' : '';
+    lab.innerHTML = `<span>${esc(f.name || f.key)}</span><input type="${type}"${type === 'number' ? ' step="any"' : ''} data-f="${esc(f.key)}"${mark} value="${esc(val)}">`;
   }
   return lab;
 }
@@ -3027,11 +3115,22 @@ function logoRow(it) {
     <span class="logo-row">
       <span class="logo-prev"></span>
       <button type="button" class="btn ghost mini" data-logo-pick>选择图片</button>
+      <button type="button" class="btn ghost mini" data-logo-grab hidden>从网站取</button>
       <button type="button" class="btn ghost mini" data-logo-clear hidden>清除</button>
       <input type="file" accept=".png,.jpg,.jpeg,.webp,.svg,.gif,.ico" data-logo hidden>
     </span>`;
   const prev = lab.querySelector('.logo-prev');
   const clear = lab.querySelector('[data-logo-clear]');
+  // 「从网站取」只在这个条目填了网址时出现：没网址时按钮点了必然失败，不如不给
+  const grab = lab.querySelector('[data-logo-grab]');
+  const urlOf = () => {
+    const own = document.querySelector('#item-fields [data-f="url"]')?.value?.trim();
+    if (own) return own;
+    for (const el of document.querySelectorAll('#item-fields [data-urlfield]')) {
+      if (el.value.trim()) return el.value.trim();
+    }
+    return (it.url || '').trim();
+  };
   const paint = name => {
     editingItem.row = { ...editingItem.row, logo: name || null };
     prev.innerHTML = name
@@ -3040,6 +3139,25 @@ function logoRow(it) {
     clear.hidden = !name;
   };
   paint(it.logo);
+  const syncGrab = () => { grab.hidden = !urlOf(); };
+  syncGrab();
+  // 网址是在同一张表单里填的，填完立刻就该能取图标，不必先保存再重开
+  document.querySelector('#item-fields')?.addEventListener('input', e => {
+    if (e.target.matches('[data-f="url"], [data-urlfield]')) syncGrab();
+  });
+  grab.onclick = async () => {
+    grab.disabled = true;
+    const was = grab.textContent;
+    grab.textContent = '取图标…';
+    try {
+      const r = await api(`/api/items/${it.id}/logo/fetch`,
+        { method: 'POST', body: JSON.stringify({ url: urlOf() }) });
+      paint(r.logo);
+      toast('已从 ' + urlHost(r.from) + ' 取到图标');
+    } catch (err) { toast(err.message, true); }
+    grab.disabled = false;
+    grab.textContent = was;
+  };
   // 原生文件选择框在这套外壳里太扎眼：藏起来，用统一样式的按钮触发
   const pick = lab.querySelector('[data-logo]');
   lab.querySelector('[data-logo-pick]').onclick = () => pick.click();

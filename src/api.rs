@@ -136,6 +136,8 @@ async fn overview(State(app): State<App>) -> R {
     Ok(Json(json!({
         "today": engine::today().to_string(),
         "upcoming": engine::upcoming(&conn)?,
+        // 该上时间线却算不出到期日的：不点名的话它们会从界面上静默消失
+        "undated": engine::undated(&conn)?,
         "totals": engine::totals(&conn)?,
         // 到期时间线里的 kind 是库键，前端要靠这份清单显示库名与到期动作说法
         "collections": crate::collections::collections(&conn)?,

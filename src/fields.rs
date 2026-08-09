@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use crate::api::{bad, missing, s, R};
 use crate::App;
 
-const FTYPES: &[&str] = &["text", "num", "sel", "multi", "date", "star"];
+const FTYPES: &[&str] = &["text", "num", "sel", "multi", "date", "star", "tel", "url", "email"];
 
 /// 字段所属的数据源：库（值在 items.extra，按 collection_id 圈定）或独立表（媒体库）。
 enum Owner {

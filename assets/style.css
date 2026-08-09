@@ -828,3 +828,15 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
 .pricebox { display: flex; gap: .4rem; }
 .pricebox input { flex: 1 1 auto; min-width: 0; }
 .pricebox select { flex: 0 0 6.5rem; }
+
+/* 电话号码：可点拨号；位数偏少的挂个问号，只提醒不拦（存量数据里就有残缺值） */
+.grid a.tel { color: inherit; text-decoration: none; border-bottom: 1px dashed var(--line); }
+.grid a.tel:hover { color: var(--aqua); border-bottom-color: currentColor; }
+.tel-warn {
+  margin-left: .3rem; font-size: .68rem; font-weight: 700; color: var(--coral);
+  border: 1px solid currentColor; border-radius: 50%; width: 1.1em; height: 1.1em;
+  display: inline-flex; align-items: center; justify-content: center; cursor: help;
+}
+
+/* 算不出到期日的条目：它们不在时间线上，得在这里点名，否则等于从界面上消失 */
+.undated { color: var(--coral); margin-top: .4rem; }

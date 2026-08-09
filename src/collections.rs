@@ -31,6 +31,7 @@ pub fn router() -> Router<App> {
         .route("/api/items/{id}", put(items_update).delete(items_delete))
         .route("/api/items/{id}/renew", post(items_renew))
         .route("/api/items/{id}/logo", post(logo_set).delete(logo_clear))
+        .route("/api/items/{id}/logo/fetch", post(logo_fetch))
         .route("/logos/{name}", get(logo_file))
 }
 
@@ -297,6 +298,7 @@ const TEMPLATES: &[Template] = &[
             Field {
                 key: "phone_number",
                 name: "号码",
+                ftype: "tel",
                 ..EXTRA
             },
         ],
@@ -333,7 +335,7 @@ const TEMPLATES: &[Template] = &[
                 ftype: "tpl",
                 src: "calc",
                 shown: 1,
-                config: r#"{"tpl":"{cores}C / {ram_gb}G / {storage_gb}G {storage_type}"}"#,
+                config: r#"{"tpl":"{cores}C / {ram_gb}G / {storage_gb}G {storage_type} / {port_gbps}Gbps / {traffic_tb}TB"}"#,
                 ..EXTRA
             },
             Field {
@@ -780,15 +782,13 @@ pub fn items_of(conn: &Connection, key: &str) -> anyhow::Result<Vec<Value>> {
 
 /// 到期日：due_anchor='next' 直接读下次续费日，否则从上次续费按周期推一步。
 pub fn due_of(r: &Value, anchor: &str) -> Option<NaiveDate> {
-    let cycle = r["cycle"].as_str().unwrap_or("");
-    if cycle == "lifetime" {
-        return None;
-    }
-    if anchor == "next" {
-        return NaiveDate::parse_from_str(r["next_renewal"].as_str()?, "%Y-%m-%d").ok();
-    }
-    let last = NaiveDate::parse_from_str(r["last_renewed"].as_str()?, "%Y-%m-%d").ok()?;
-    engine::advance(last, cycle, r["cycle_days"].as_i64())
+    engine::due_from(
+        anchor,
+        r["cycle"].as_str().unwrap_or(""),
+        r["cycle_days"].as_i64(),
+        r["next_renewal"].as_str(),
+        r["last_renewed"].as_str(),
+    )
 }
 
 async fn items_list(State(app): State<App>, Path(key): Path<String>) -> R {
@@ -797,6 +797,100 @@ async fn items_list(State(app): State<App>, Path(key): Path<String>) -> R {
 }
 
 /// 写入用的字段集：整行 PUT 语义是全量替换，没传的键一律置空。
+/// 电话号码的规范化：折叠多余空白，只保留号码里合法的字符。
+///
+/// **只拦真正的垃圾（一个数字都没有），不拦"位数偏少"**——`+44` 这种残缺值是既有数据，
+/// 在写入口 400 掉等于让用户打不开自己的旧条目；位数少由界面标出来提醒，交给人判断。
+/// 有形状的文本类型（tel / url / email）的规范化。
+///
+/// 共同的分寸：**只拦一眼可辨的垃圾，不拦"不够完整"**。存量数据里就有 `+44` 这种只填了
+/// 国家码的值，在写入口 400 掉等于让人打不开自己的旧条目；可疑但可能是真的，交给界面标出来。
+pub fn normalize_shaped(ftype: &str, raw: &str) -> anyhow::Result<String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(String::new());
+    }
+    match ftype {
+        "tel" => {
+            if let Some(c) = t.chars().find(|c| !(c.is_ascii_digit() || " +-()".contains(*c))) {
+                return Err(bad(format!("电话号码里不该出现「{c}」")));
+            }
+            if !t.chars().any(|c| c.is_ascii_digit()) {
+                return Err(bad("电话号码至少要有一位数字"));
+            }
+            // 连续空白折叠成一个空格：从别处粘过来的号码常带全角空格或多空格
+            Ok(t.split_whitespace().collect::<Vec<_>>().join(" "))
+        }
+        "email" => {
+            if t.split_whitespace().count() > 1 {
+                return Err(bad("邮箱里不该有空格"));
+            }
+            // 只认最基本的形状：有且只有一个 @，两侧都不空，域名里得有点。
+            // 再严就会误伤合法但少见的地址——RFC 5322 允许的东西比多数人以为的多得多。
+            let (user, host) = t.split_once('@').ok_or_else(|| bad("邮箱要有一个 @"))?;
+            if user.is_empty() || host.is_empty() || host.contains('@') {
+                return Err(bad("邮箱的形状不对"));
+            }
+            if !host.contains('.') || host.starts_with('.') || host.ends_with('.') {
+                return Err(bad("邮箱的域名部分不对"));
+            }
+            // 域名大小写不敏感，统一小写；用户名部分按规范是敏感的，原样保留
+            Ok(format!("{user}@{}", host.to_lowercase()))
+        }
+        "url" => {
+            if t.split_whitespace().count() > 1 {
+                return Err(bad("网址里不该有空格"));
+            }
+            // 没写协议就补 https://：多数人直接粘 `netflix.com`，而没有协议的串
+            // 在 <a href> 里会被当成相对路径，点了跳到本站自己的一个不存在页面
+            let full = if t.contains("://") { t.to_string() } else { format!("https://{t}") };
+            let rest = full.split_once("://").map(|x| x.1).unwrap_or("");
+            if !full.starts_with("http://") && !full.starts_with("https://") {
+                return Err(bad("网址只支持 http / https"));
+            }
+            let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+            if host.is_empty() || !host.contains('.') {
+                return Err(bad("网址里看不出域名"));
+            }
+            Ok(full)
+        }
+        _ => Ok(t.to_string()),
+    }
+}
+
+/// 域名部分：url 值渲染与取图标都用它（`https://a.com/x?y` → `a.com`）。
+pub fn url_host(raw: &str) -> Option<String> {
+    let rest = raw.split_once("://").map(|x| x.1).unwrap_or(raw);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.split('@').next_back().unwrap_or(host); // 去掉 user:pass@
+    (!host.is_empty() && host.contains('.')).then(|| host.to_lowercase())
+}
+
+/// 把这个库里有形状的字段就地规范化。字段类型是数据（存在 fields 表里），
+/// 所以写入口要现查一次——没有这类列的库，这条查询返回空集。
+fn normalize_shaped_fields(conn: &Connection, coll: i64, b: &mut Value) -> anyhow::Result<()> {
+    let key: String = conn.query_row("SELECT key FROM collections WHERE id=?1", [coll], |r| {
+        r.get(0)
+    })?;
+    let mut stmt =
+        conn.prepare("SELECT key, ftype FROM fields WHERE tbl=?1 AND ftype IN ('tel','url','email')")?;
+    let cols: Vec<(String, String)> = stmt
+        .query_map([&key], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (k, ftype) in cols {
+        // url 既可能是 items 的真列，也可能是 extra 里的域字段
+        if let Some(v) = b.get(&k).and_then(|v| v.as_str()) {
+            let fixed = normalize_shaped(&ftype, v)?;
+            b[&k] = json!(fixed);
+        }
+        if let Some(v) = b.get("extra").and_then(|e| e.get(&k)).and_then(|v| v.as_str()) {
+            let fixed = normalize_shaped(&ftype, v)?;
+            b["extra"][&k] = json!(fixed);
+        }
+    }
+    Ok(())
+}
+
 fn item_values(b: &Value) -> anyhow::Result<Vec<rusqlite::types::Value>> {
     use rusqlite::types::Value as V;
     // 空名是允许的：表尾「＋ 新建」直接插一行空行、就地填（Notion 同款），拦下它这条路就没了。
@@ -854,6 +948,9 @@ fn check_parent(conn: &Connection, coll: i64, id: Option<i64>, parent: Option<i6
 
 pub fn insert_item(conn: &Connection, coll: i64, b: &Value) -> anyhow::Result<i64> {
     check_parent(conn, coll, None, i(b, "parent_id"))?;
+    let mut b = b.clone();
+    normalize_shaped_fields(conn, coll, &mut b)?;
+    let b = &b;
     let mut vals = item_values(b)?;
     vals.insert(0, rusqlite::types::Value::from(coll));
     // 新行落在手动序末尾。pos 不在 WRITE_COLS 里，只在这里和 /items/order 两处写。
@@ -878,6 +975,9 @@ pub fn update_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<()> 
         .query_row("SELECT collection_id FROM items WHERE id=?1", [id], |r| r.get(0))
         .map_err(|_| missing("条目不存在"))?;
     check_parent(conn, coll, Some(id), i(b, "parent_id"))?;
+    let mut b = b.clone();
+    normalize_shaped_fields(conn, coll, &mut b)?;
+    let b = &b;
     let mut vals = item_values(b)?;
     let sets = WRITE_COLS
         .split(',')
@@ -1023,14 +1123,16 @@ pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value
         let mut new_next: Option<String> = None;
         if let (Some(cy), Some(nx)) = (cycle.as_deref(), next.as_deref()) {
             if let Ok(start) = NaiveDate::parse_from_str(nx, "%Y-%m-%d") {
-                if let Some(mut d) = engine::advance(start, cy, cycle_days) {
-                    while d <= today {
-                        match engine::advance(d, cy, cycle_days) {
-                            Some(n) => d = n,
-                            None => break,
-                        }
+                // 逾期多期时要一路推到今天之后。**每一步都从原始日期算第 n 期**，不能
+                // 拿上一步的结果再推一期：月加法会钳到月末，钳过之后锚点就永久丢了
+                // （1/31 迭代六次得 7/28，正确答案是 7/31）。
+                let mut n = 1;
+                while let Some(d) = engine::advance_n(start, cy, cycle_days, n) {
+                    if d > today {
+                        new_next = Some(d.to_string());
+                        break;
                     }
-                    new_next = Some(d.to_string());
+                    n += 1;
                 }
             }
         }
@@ -1130,6 +1232,296 @@ async fn logo_set(
     let conn = app.db.lock().unwrap();
     let name = set_logo(&app2, &conn, id, &ext, &body)?;
     Ok(Json(json!({ "logo": name })))
+}
+
+/// 取图标只连**条目自己那个站**，且只走这几条常规路径。
+///
+/// 这是本项目第二条默认关着的出网（第一条是汇率），由用户在详情表单里点一下才发生：
+/// 你已经是这个站的客户，向它要一张 favicon 不多泄露任何东西——而经第三方 favicon 服务
+/// 取，等于把整份订阅域名清单告诉别人，与「数据主权」的初衷相左。
+const FAVICON_PATHS: &[&str] = &["/favicon.ico", "/favicon.png", "/apple-touch-icon.png"];
+
+/// 服务端替用户发请求前必须挡住内网：这台机器往往和别的服务同处一个局域网，
+/// 不挡的话「取图标」就成了一个替人探测内网的按钮（`image_path_ok` 是同一种防线）。
+/// 一个 IP 是否算"公网"。纯函数，好穷举测试。
+fn public_ip_ok(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+                // 100.64.0.0/10 运营商级 NAT，Tailscale 也用这一段
+                || (v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1])))
+        }
+        std::net::IpAddr::V6(v6) => {
+            let seg = v6.segments();
+            let unique_local = (seg[0] & 0xfe00) == 0xfc00; // fc00::/7
+            let link_local = (seg[0] & 0xffc0) == 0xfe80; // fe80::/10
+            // ::ffff:a.b.c.d 形式的 IPv4 映射地址要按里面那个 v4 判，否则 ::ffff:127.0.0.1 会漏过
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return public_ip_ok(&std::net::IpAddr::V4(v4));
+            }
+            !(v6.is_loopback() || v6.is_unspecified() || unique_local || link_local)
+        }
+    }
+}
+
+/// 解析出来的地址全都得是公网。空解析结果按拒绝算。
+fn resolved_ips_ok(ips: &[std::net::IpAddr]) -> bool {
+    !ips.is_empty() && ips.iter().all(public_ip_ok)
+}
+
+/// 主机名去掉端口与 IPv6 方括号。
+fn bare_host(host: &str) -> &str {
+    match host.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(""),
+        None => host.split(':').next().unwrap_or(host),
+    }
+}
+
+/// 字面形状这一关：明显的本机名与字面内网地址直接拒。
+///
+/// **这只是第一道。** 光看字面拦不住「公共域名的 A 记录指向 127.0.0.1」这种——
+/// `localtest.me` 就是现成的例子，根本不需要 DNS 重绑定。所以真正发请求前还要过
+/// `host_is_public` 把解析结果也验一遍。
+fn public_host_ok(host: &str) -> bool {
+    let bare = bare_host(host);
+    if bare.is_empty()
+        || bare.eq_ignore_ascii_case("localhost")
+        || bare.ends_with(".localhost")
+        || bare.ends_with(".local")
+    {
+        return false;
+    }
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        return public_ip_ok(&ip);
+    }
+    bare.contains('.')
+}
+
+/// 字面形状 + 解析结果双重校验。**每一跳重定向都要重新过这里。**
+///
+/// 注意：配了 `meta.proxy` 时域名由代理解析，这里的预解析只是尽力而为——
+/// 那种部署下真正的出口管控在代理那一侧。
+async fn host_is_public(host: &str) -> bool {
+    if !public_host_ok(host) {
+        return false;
+    }
+    let bare = bare_host(host);
+    if bare.parse::<std::net::IpAddr>().is_ok() {
+        return true; // 字面 IP 已经在上面验过，不必再解析
+    }
+    match tokio::net::lookup_host((bare, 443u16)).await {
+        Ok(addrs) => resolved_ips_ok(&addrs.map(|a| a.ip()).collect::<Vec<_>>()),
+        Err(_) => false,
+    }
+}
+
+/// 从首页的 `<link rel="icon">` 里找图标地址。找不到就返回空，调用方退回常规路径。
+///
+/// 只做一次 GET 与一段正则——为这点事引 HTML 解析器不值当，而 `rel` 里含 icon 的
+/// link 标签形状足够固定。取不到、超时、页面过大都当作"没发现"，不算失败。
+async fn discover_icon_paths(client: &reqwest::Client, ua: &str, host: &str) -> Vec<String> {
+    let Ok(resp) = get_public(client, &format!("https://{host}/"), ua).await else {
+        return Vec::new();
+    };
+    if !resp.status().is_success() {
+        return Vec::new();
+    }
+    let Ok(body) = resp.text().await else {
+        return Vec::new();
+    };
+    icon_links_in(&body, host)
+}
+
+/// 发一个 GET，自己跟重定向，**每一跳都重新校验目标主机**。
+///
+/// 不能交给 reqwest 自动跟：它默认跟 10 跳且不会回头问我们目标合不合法，于是
+/// `https://正常站/x → 302 → http://10.0.0.5/` 一路直达内网，前面那道防线形同虚设。
+async fn get_public(client: &reqwest::Client, url: &str, ua: &str) -> Result<reqwest::Response, String> {
+    let mut current = url.to_string();
+    for _ in 0..4 {
+        let parsed = reqwest::Url::parse(&current).map_err(|_| format!("网址不对：{current}"))?;
+        let host = parsed.host_str().unwrap_or("").to_string();
+        if !host_is_public(&host).await {
+            return Err(format!("{host} 指向内网或本机，不去连它"));
+        }
+        let resp = client
+            .get(&current)
+            .header("User-Agent", ua)
+            .send()
+            .await
+            .map_err(|e| format!("连不上 {host}：{e}"))?;
+        if !resp.status().is_redirection() {
+            return Ok(resp);
+        }
+        let Some(loc) = resp.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok())
+        else {
+            return Ok(resp); // 3xx 但没给 Location，当普通响应交给调用方判
+        };
+        // 相对跳转要按当前地址解析，否则 `Location: /favicon.ico` 会解析失败
+        current = parsed
+            .join(loc)
+            .map_err(|_| format!("跟不动这个跳转：{loc}"))?
+            .to_string();
+    }
+    Err("重定向太多".into())
+}
+
+/// 从 HTML 里挑出图标地址。纯函数，好上单测——真去连站点的那层只负责取回页面。
+///
+/// **一律按字符切，不能按字节。** 页面里随便一个多字节字符（实测 Netflix 的 HTML 里有个
+/// `𝔽`）就会让 `&body[..n]` 落在字符中间直接 panic，把整个请求处理线程带走；
+/// 与 `ics::fold` 当年踩的是同一个坑。只做正则式的粗解析——为这点事引 HTML 解析器不值当。
+fn icon_links_in(body: &str, host: &str) -> Vec<String> {
+    let head: String = body.chars().take(200_000).collect();
+    let mut out = Vec::new();
+    for tag in head
+        .split('<')
+        .filter(|t| t.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("link")))
+    {
+        // rel 得**真的**是图标：只看 rel 属性自己的值。曾经图省事扫 rel 后面 40 个字符，
+        // 于是 `<link rel="stylesheet" href="/icon-theme.css">` 也被当成图标捡了进来
+        if !attr_value(tag, "rel").is_some_and(|v| v.to_lowercase().contains("icon")) {
+            continue;
+        }
+        let Some(href) = attr_value(tag, "href").map(str::trim) else {
+            continue;
+        };
+        if href.is_empty() || href.starts_with("data:") {
+            continue;
+        }
+        let abs = if href.starts_with("//") {
+            format!("https:{href}")
+        } else {
+            href.to_string()
+        };
+        // 只跟到同一个站：href 可能指向别的域名，那就超出"只连你订阅的那个站"了
+        if abs.starts_with("http") && url_host(&abs).as_deref() != Some(host) {
+            continue;
+        }
+        out.push(abs);
+    }
+    out.truncate(4);
+    out
+}
+
+/// 取标签里某个属性的引号值，属性名按 ASCII 大小写不敏感匹配。
+///
+/// 直接在原串上按字节扫：属性名、`=`、引号全是 ASCII，落点必是字符边界，
+/// 既不必造一份小写副本来定位（`to_lowercase` 可能改变字节长度，索引就对不上了），
+/// 也不会把网址里的大小写抹掉。
+fn attr_value<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let b = tag.as_bytes();
+    let n = name.as_bytes();
+    let mut i = 0usize;
+    while i + n.len() <= b.len() {
+        if !b[i..i + n.len()].eq_ignore_ascii_case(n) {
+            i += 1;
+            continue;
+        }
+        // 名字前面得是分界，否则 `rel` 会命中 `hreflang` 这类属性里的子串
+        let boundary = i == 0 || b[i - 1].is_ascii_whitespace();
+        let mut j = i + n.len();
+        while j < b.len() && b[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if !boundary || j >= b.len() || b[j] != b'=' {
+            i += 1;
+            continue;
+        }
+        j += 1;
+        while j < b.len() && b[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if j >= b.len() || (b[j] != b'"' && b[j] != b'\'') {
+            return None;
+        }
+        let quote = b[j];
+        let start = j + 1;
+        let end = start + b[start..].iter().position(|c| *c == quote)?;
+        return tag.get(start..end);
+    }
+    None
+}
+
+/// 从条目的网址取 favicon 存成它的图标。
+async fn logo_fetch(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value>) -> R {
+    let (raw, proxy) = {
+        let conn = app.db.lock().unwrap();
+        let stored: Option<Option<String>> = conn
+            .query_row("SELECT url FROM items WHERE id=?1", [id], |r| r.get(0))
+            .ok();
+        let Some(stored) = stored else {
+            return Err(missing("条目不存在").into());
+        };
+        let raw = s(&b, "url").or(stored).unwrap_or_default();
+        (raw, crate::db::get_setting(&conn, "meta.proxy").unwrap_or_default())
+    };
+    if raw.trim().is_empty() {
+        return Err(bad("这个条目还没有网址").into());
+    }
+    let full = normalize_shaped("url", &raw)?;
+    let host = url_host(&full).ok_or_else(|| bad("网址里看不出域名"))?;
+    if !public_host_ok(&host) {
+        return Err(bad("只能从公网站点取图标").into());
+    }
+    let client = crate::notify::http_client_no_redirect(&proxy)?;
+    // 不带 UA 会被一部分站点特判成爬虫直接 403（实测 Stack Overflow 就是），
+    // 与 scripts/update-fx-baseline.py 踩过的是同一个坑
+    const UA: &str = "kalends-icon-fetch";
+    let mut last = String::from("没找到图标");
+    // 先问网页自己：多数站点的图标不在 /favicon.ico，而是 <link rel="icon"> 指到别处
+    // （实测 Cloudflare 三条常规路径全 404）。取不到就退回常规路径挨个试。
+    let mut paths: Vec<String> = discover_icon_paths(&client, UA, &host).await;
+    paths.extend(FAVICON_PATHS.iter().map(|p| (*p).to_string()));
+    for path in paths {
+        let target = if path.starts_with("http") {
+            path.clone()
+        } else {
+            format!("https://{host}{}", if path.starts_with('/') { path.clone() } else { format!("/{path}") })
+        };
+        let resp = match get_public(&client, &target, UA).await {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) => {
+                last = format!("{host} 返回 {}", r.status());
+                continue;
+            }
+            Err(e) => {
+                last = e;
+                continue;
+            }
+        };
+        let bytes = match resp.bytes().await {
+            Ok(x) => x,
+            Err(e) => {
+                last = format!("读取失败：{e}");
+                continue;
+            }
+        };
+        let ext = target
+            .split(['?', '#'])
+            .next()
+            .unwrap_or("")
+            .rsplit('.')
+            .next()
+            .unwrap_or("ico")
+            .to_lowercase();
+        let ext = if ext.len() > 4 { "ico".to_string() } else { ext };
+        // 格式与魔数校验、体积上限、旧文件清理都由 set_logo 兜着
+        let conn = app.db.lock().unwrap();
+        match set_logo(&app, &conn, id, &ext, &bytes) {
+            Ok(name) => return Ok(Json(json!({ "logo": name, "from": target }))),
+            Err(e) => last = format!("{target} 取到的不是可用图片（{e}）"),
+        }
+    }
+    // 取不到就说清楚下一步：有些站（尤其 Cloudflare 前置的）会按 TLS 指纹挡掉非浏览器
+    // 客户端，那不是能靠改请求头绕过去的东西——冒充浏览器指纹要引重依赖且性质上是欺骗，
+    // 不如老实告诉用户手动传一张
+    Err(bad(format!("{last}；这个站可能不给自动抓取，可以手动选一张图片")).into())
 }
 
 pub fn clear_logo(app: &App, conn: &Connection, id: i64) -> anyhow::Result<()> {
@@ -1308,4 +1700,110 @@ mod tests {
         assert_eq!(TEMPLATES[0].id, "blank");
         assert!(TEMPLATES[0].extra.is_empty());
     }
+
+    /// 电话号码只拦真正的垃圾，不拦"位数偏少"——`+44` 这类残缺值是既有数据，
+    /// 在写入口 400 掉等于让人打不开自己的旧条目；位数少由界面标出来提醒。
+    #[test]
+    fn tel_is_normalised_but_short_numbers_still_get_through() {
+        assert_eq!(normalize_shaped("tel", "  +1 424   4329266 ").unwrap(), "+1 424 4329266");
+        assert_eq!(normalize_shaped("tel", "+61 0425 418 250").unwrap(), "+61 0425 418 250");
+        // 存量里就有的残缺值：放行，不是错误
+        assert_eq!(normalize_shaped("tel", "+44").unwrap(), "+44");
+        assert_eq!(normalize_shaped("tel", "").unwrap(), "");
+        assert_eq!(normalize_shaped("tel", "(020) 7946-0958").unwrap(), "(020) 7946-0958");
+        // 一个数字都没有 / 混进不该有的字符：拦下
+        assert!(normalize_shaped("tel", "打客服").is_err());
+        assert!(normalize_shaped("tel", "+++").is_err());
+        assert!(normalize_shaped("tel", "+44 12ab").is_err());
+    }
+
+
+    #[test]
+    fn url_and_email_shapes_are_normalised() {
+        let n = |t, v| normalize_shaped(t, v);
+        // 没写协议就补 https://：没有协议的串在 <a href> 里会被当成相对路径
+        assert_eq!(n("url", "netflix.com").unwrap(), "https://netflix.com");
+        assert_eq!(n("url", " http://a.example.com/x?y=1 ").unwrap(), "http://a.example.com/x?y=1");
+        assert!(n("url", "ftp://a.com").is_err());
+        assert!(n("url", "没有域名").is_err());
+        assert!(n("url", "https://a.com b.com").is_err());
+        // 域名大小写不敏感统一小写；用户名部分按规范敏感，原样保留
+        assert_eq!(n("email", " Me.You+tag@Example.COM ").unwrap(), "Me.You+tag@example.com");
+        assert!(n("email", "no-at-sign").is_err());
+        assert!(n("email", "a@b").is_err());          // 域名里没有点
+        assert!(n("email", "a@@b.com").is_err());
+        assert!(n("email", "a b@c.com").is_err());
+        assert_eq!(n("email", "").unwrap(), "");
+        // 域名提取：显示与取图标都用它
+        assert_eq!(url_host("https://WWW.Example.com/a?b").as_deref(), Some("www.example.com"));
+        assert_eq!(url_host("no-dot"), None);
+    }
+
+    /// 服务端替用户发请求前必须挡住内网：这台机器往往和别的服务同处一个局域网，
+    /// 不挡的话「从网站取图标」就成了一个替人探测内网的按钮。
+    /// 解析结果这一关：**光看字面拦不住"公共域名指向 127.0.0.1"**（`localtest.me`
+    /// 就是现成例子，不需要 DNS 重绑定）。真正发请求前要把解析出来的地址也验一遍。
+    #[test]
+    fn resolved_addresses_are_checked_too() {
+        use std::net::IpAddr;
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        // 一个公共域名解析到回环 —— 字面那关它是过的，这关必须拦下
+        assert!(!resolved_ips_ok(&[ip("127.0.0.1")]));
+        // 多条 A 记录里只要有一条指向内网就整体拒（DNS 轮询可以让你只中一次）
+        assert!(!resolved_ips_ok(&[ip("1.1.1.1"), ip("10.0.0.5")]));
+        // 解析不出地址同样按拒绝算，别让空结果一路放行
+        assert!(!resolved_ips_ok(&[]));
+        assert!(resolved_ips_ok(&[ip("1.1.1.1"), ip("8.8.4.4")]));
+        // IPv4 映射的 IPv6：::ffff:127.0.0.1 得按里面那个 v4 判，否则整段漏过
+        assert!(!public_ip_ok(&ip("::ffff:127.0.0.1")));
+        assert!(!public_ip_ok(&ip("::ffff:10.0.0.1")));
+        assert!(public_ip_ok(&ip("::ffff:1.1.1.1")));
+        // 运营商级 NAT / Tailscale 那一段
+        assert!(!public_ip_ok(&ip("100.64.0.1")));
+        assert!(!public_ip_ok(&ip("100.127.255.255")));
+        assert!(public_ip_ok(&ip("100.63.255.255")));
+        assert!(public_ip_ok(&ip("100.128.0.1")));
+    }
+
+    #[test]
+    fn fetching_icons_refuses_to_touch_the_local_network() {
+        for bad in [
+            "127.0.0.1", "localhost", "10.0.0.5", "192.168.1.1", "172.16.0.5",
+            "169.254.169.254", "0.0.0.0", "[::1]", "[fe80::1]", "[fd00::1]", "nas.local", "box.localhost",
+        ] {
+            assert!(!public_host_ok(bad), "本该拦下 {bad}");
+        }
+        for ok in ["netflix.com", "www.example.co.uk", "1.1.1.1", "8.8.8.8", "[2606:4700:4700::1111]"] {
+            assert!(public_host_ok(ok), "本该放行 {ok}");
+        }
+    }
+
+
+    /// 页面里随便一个多字节字符都会让按字节切片的解析当场 panic，把请求线程带走。
+    /// 实测 Netflix 的首页里就有个 `𝔽`（四字节），当时整个连接直接断掉。
+    #[test]
+    fn icon_discovery_survives_multibyte_pages() {
+        let html = "𝔽 数学粗体夹在最前面 <link rel=\"icon\" href=\"/a.png\">";
+        assert_eq!(icon_links_in(html, "x.com"), vec!["/a.png".to_string()]);
+        // 截断也按字符：200k 个汉字之后才出现的标签取不到，但绝不能 panic
+        let long = "汉".repeat(300_000) + "<link rel=\"icon\" href=\"/late.png\">";
+        assert!(icon_links_in(&long, "x.com").is_empty());
+    }
+
+    #[test]
+    fn icon_discovery_picks_only_real_icon_links() {
+        let h = |s: &str| icon_links_in(s, "x.com");
+        assert_eq!(h(r#"<link rel="shortcut icon" href="/f.ico">"#), vec!["/f.ico"]);
+        assert_eq!(h(r#"<link rel='apple-touch-icon' href='/t.png'>"#), vec!["/t.png"]);
+        assert_eq!(h(r#"<link rel="icon" href="//x.com/cdn.png">"#), vec!["https://x.com/cdn.png"]);
+        // rel 不是图标的不要，哪怕 href 里带 icon 字样
+        assert!(h(r#"<link rel="stylesheet" href="/icon-theme.css">"#).is_empty());
+        // 内联图与跨站图标不要：跨站就超出了"只连你订阅的那个站"
+        assert!(h(r#"<link rel="icon" href="data:image/png;base64,AAA">"#).is_empty());
+        assert!(h(r#"<link rel="icon" href="https://cdn.other.com/f.png">"#).is_empty());
+        // 同站绝对地址可以
+        assert_eq!(h(r#"<link rel="icon" href="https://x.com/f.png">"#), vec!["https://x.com/f.png"]);
+        assert!(h("<p>没有 link 标签</p>").is_empty());
+    }
+
 }
