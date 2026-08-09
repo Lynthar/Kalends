@@ -1274,6 +1274,14 @@ fn logo_bytes_ok(ext: &str, b: &[u8]) -> bool {
     }
 }
 
+/// 按字节认出图片格式。放行的集合与 `logo_bytes_ok` 完全一致（就是拿它逐个试），
+/// svg 排最后——它是唯一一条看文本前缀的启发式判据，最松。
+fn sniff_image_ext(b: &[u8]) -> Option<&'static str> {
+    ["png", "jpg", "gif", "webp", "ico", "svg"]
+        .into_iter()
+        .find(|ext| logo_bytes_ok(ext, b))
+}
+
 pub fn remove_logo_file(app: &App, name: Option<String>) {
     if let Some(n) = name.filter(|n| safe_name(n)) {
         let _ = std::fs::remove_file(app.data_dir.join("logos").join(n));
@@ -1420,21 +1428,58 @@ async fn resolve_public(host: &str, port: u16) -> Option<std::net::SocketAddr> {
     resolved_ips_ok(&ips).then(|| addrs[0])
 }
 
+/// 响应体上限。**reqwest 没有默认上限**，唯一的边界是那 30s 总超时——也就是
+/// 「带宽 × 30s」：条目的网址指向被劫持的站（或跳到一个大文件），千兆链路下最坏是数 GB
+/// 进到这个单二进制进程的内存里，而容器内存配额常只有几百 MB，OOM kill 会把通知调度
+/// 一起带走。SSRF 那几道防线管的是「连到哪」，不管「读多少」，是正交的缺口。
+const ICON_MAX: usize = 2 << 20; // 图标：2 MB（set_logo 还会按 1 MB 再卡一道）
+const PAGE_MAX: usize = 512 << 10; // 发现页：512 KB
+
+/// 只读前 `limit` 字节就收手。发现页只看 `<head>` 里的 link 标签，后面再多也没用；
+/// 半个多字节字符被截断由 `from_utf8_lossy` 兜着（`icon_links_in` 本就按字符切）。
+async fn body_head(resp: reqwest::Response, limit: usize) -> Vec<u8> {
+    let mut resp = resp;
+    let mut out = Vec::new();
+    while out.len() < limit {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => out.extend_from_slice(&chunk),
+            _ => break,
+        }
+    }
+    out.truncate(limit);
+    out
+}
+
+/// 整段读进来，累计超限就断开并报错（图标不该有这么大，读完再判等于白读）。
+async fn body_capped(resp: reqwest::Response, limit: usize) -> Result<Vec<u8>, String> {
+    let too_big = || format!("响应体超过 {} KB", limit >> 10);
+    if resp.content_length().is_some_and(|n| n > limit as u64) {
+        return Err(too_big());
+    }
+    let mut resp = resp;
+    let mut out = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("读取失败：{e}"))? {
+        if out.len() + chunk.len() > limit {
+            return Err(too_big());
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
 /// 从首页的 `<link rel="icon">` 里找图标地址。找不到就返回空，调用方退回常规路径。
 ///
 /// 只做一次 GET 与一段正则——为这点事引 HTML 解析器不值当，而 `rel` 里含 icon 的
 /// link 标签形状足够固定。取不到、超时、页面过大都当作"没发现"，不算失败。
-async fn discover_icon_paths(proxy: &str, ua: &str, host: &str) -> Vec<String> {
-    let Ok(resp) = get_public(proxy, &format!("https://{host}/"), ua).await else {
+async fn discover_icon_paths(proxy: &str, ua: &str, scheme: &str, host: &str) -> Vec<String> {
+    let Ok(resp) = get_public(proxy, &format!("{scheme}://{host}/"), ua).await else {
         return Vec::new();
     };
     if !resp.status().is_success() {
         return Vec::new();
     }
-    let Ok(body) = resp.text().await else {
-        return Vec::new();
-    };
-    icon_links_in(&body, host)
+    let body = body_head(resp, PAGE_MAX).await;
+    icon_links_in(&String::from_utf8_lossy(&body), scheme, host)
 }
 
 /// 发一个 GET，自己跟重定向，**每一跳都重新校验目标主机**。
@@ -1480,7 +1525,7 @@ async fn get_public(proxy: &str, url: &str, ua: &str) -> Result<reqwest::Respons
 /// **一律按字符切，不能按字节。** 页面里随便一个多字节字符（实测 Netflix 的 HTML 里有个
 /// `𝔽`）就会让 `&body[..n]` 落在字符中间直接 panic，把整个请求处理线程带走；
 /// 与 `ics::fold` 当年踩的是同一个坑。只做正则式的粗解析——为这点事引 HTML 解析器不值当。
-fn icon_links_in(body: &str, host: &str) -> Vec<String> {
+fn icon_links_in(body: &str, scheme: &str, host: &str) -> Vec<String> {
     let head: String = body.chars().take(200_000).collect();
     let mut out = Vec::new();
     for tag in head
@@ -1498,8 +1543,9 @@ fn icon_links_in(body: &str, host: &str) -> Vec<String> {
         if href.is_empty() || href.starts_with("data:") {
             continue;
         }
+        // 协议相对地址跟着条目自己那个网址的协议走，别一律拼 https
         let abs = if href.starts_with("//") {
-            format!("https:{href}")
+            format!("{scheme}:{href}")
         } else {
             href.to_string()
         };
@@ -1573,19 +1619,31 @@ async fn logo_fetch(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<V
     if !public_host_ok(&host) {
         return Err(bad("只能从公网站点取图标").into());
     }
+    // 协议沿用条目自己那个网址：恒拼 https 的话，明写 http:// 的站点每条路径都在做
+    // TLS 握手，全数"连不上"，最后报出来的却是"这个站可能不给自动抓取"——方向全错
+    let scheme = full.split_once("://").map(|x| x.0).unwrap_or("https").to_string();
     // 不带 UA 会被一部分站点特判成爬虫直接 403（实测 Stack Overflow 就是），
     // 与 scripts/update-fx-baseline.py 踩过的是同一个坑
     const UA: &str = "kalends-icon-fetch";
+    // 整轮总截止：候选最多 1 + 4 + 3 = 8 条、串行试、每条各有 30s 上限，对着一个
+    // 黑洞式丢包的目标能让按钮在"取图标…"上停约四分钟。常见失败（拒绝/404/TLS 被挡）
+    // 都在秒级，这道闸只砍掉最坏那条尾巴
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
+    let started = std::time::Instant::now();
     let mut last = String::from("没找到图标");
     // 先问网页自己：多数站点的图标不在 /favicon.ico，而是 <link rel="icon"> 指到别处
     // （实测 Cloudflare 三条常规路径全 404）。取不到就退回常规路径挨个试。
-    let mut paths: Vec<String> = discover_icon_paths(&proxy, UA, &host).await;
+    let mut paths: Vec<String> = discover_icon_paths(&proxy, UA, &scheme, &host).await;
     paths.extend(FAVICON_PATHS.iter().map(|p| (*p).to_string()));
     for path in paths {
+        if started.elapsed() > DEADLINE {
+            last = format!("{last}；试了 {}s 还没结果，先收手", started.elapsed().as_secs());
+            break;
+        }
         let target = if path.starts_with("http") {
             path.clone()
         } else {
-            format!("https://{host}{}", if path.starts_with('/') { path.clone() } else { format!("/{path}") })
+            format!("{scheme}://{host}{}", if path.starts_with('/') { path.clone() } else { format!("/{path}") })
         };
         let resp = match get_public(&proxy, &target, UA).await {
             Ok(r) if r.status().is_success() => r,
@@ -1598,25 +1656,25 @@ async fn logo_fetch(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<V
                 continue;
             }
         };
-        let bytes = match resp.bytes().await {
+        let bytes = match body_capped(resp, ICON_MAX).await {
             Ok(x) => x,
             Err(e) => {
-                last = format!("读取失败：{e}");
+                last = e;
                 continue;
             }
         };
-        let ext = target
-            .split(['?', '#'])
-            .next()
-            .unwrap_or("")
-            .rsplit('.')
-            .next()
-            .unwrap_or("ico")
-            .to_lowercase();
-        let ext = if ext.len() > 4 { "ico".to_string() } else { ext };
-        // 格式与魔数校验、体积上限、旧文件清理都由 set_logo 兜着
+        // 格式按**字节**认，不从 URL 后缀猜：`/favicon.ico` 实际返回 PNG 字节是极常见的
+        // 部署，而现代站点的 `<link rel="icon" href="/icon">` 干脆没有扩展名（旧写法
+        // rsplit('.') 会猜出 "com/icon"，>4 字符再回落 "ico"）——两类都会被魔数校验
+        // 误拒，用户看到的却是"这个站可能不给自动抓取"。放行的格式集合一点没放宽，
+        // 只是把"声明"从猜测换成事实，校验反而更诚实
+        let Some(ext) = sniff_image_ext(&bytes) else {
+            last = format!("{target} 取到的不是可用图片");
+            continue;
+        };
+        // 体积上限与旧文件清理仍由 set_logo 兜着
         let conn = app.db.lock().unwrap();
-        match set_logo(&app, &conn, id, &ext, &bytes) {
+        match set_logo(&app, &conn, id, ext, &bytes) {
             Ok(name) => return Ok(Json(json!({ "logo": name, "from": target }))),
             Err(e) => last = format!("{target} 取到的不是可用图片（{e}）"),
         }
@@ -1916,23 +1974,44 @@ mod tests {
     }
 
 
+    /// 取图标那条路按字节认格式，不从 URL 后缀猜：`/favicon.ico` 实际返回 PNG 字节
+    /// 是极常见的部署，按后缀猜会让一张完整可用的图标过不了魔数校验被丢掉。
+    #[test]
+    fn image_format_is_sniffed_from_the_bytes() {
+        assert_eq!(sniff_image_ext(b"\x89PNG\r\n\x1a\n rest"), Some("png"));
+        assert_eq!(sniff_image_ext(&[0xFF, 0xD8, 0xFF, 0xE0, 0x00]), Some("jpg"));
+        assert_eq!(sniff_image_ext(b"GIF89a...."), Some("gif"));
+        assert_eq!(sniff_image_ext(b"RIFF\0\0\0\0WEBPVP8 "), Some("webp"));
+        assert_eq!(sniff_image_ext(&[0x00, 0x00, 0x01, 0x00, 0x01]), Some("ico"));
+        assert_eq!(sniff_image_ext(b"<svg xmlns='...'></svg>"), Some("svg"));
+        // 放行的集合一点没放宽：不是图片就是不是
+        assert_eq!(sniff_image_ext(b"<!DOCTYPE html><html>"), None);
+        assert_eq!(sniff_image_ext(b""), None);
+        assert_eq!(sniff_image_ext(b"MZ\x90\0"), None);
+    }
+
     /// 页面里随便一个多字节字符都会让按字节切片的解析当场 panic，把请求线程带走。
     /// 实测 Netflix 的首页里就有个 `𝔽`（四字节），当时整个连接直接断掉。
     #[test]
     fn icon_discovery_survives_multibyte_pages() {
         let html = "𝔽 数学粗体夹在最前面 <link rel=\"icon\" href=\"/a.png\">";
-        assert_eq!(icon_links_in(html, "x.com"), vec!["/a.png".to_string()]);
+        assert_eq!(icon_links_in(html, "https", "x.com"), vec!["/a.png".to_string()]);
         // 截断也按字符：200k 个汉字之后才出现的标签取不到，但绝不能 panic
         let long = "汉".repeat(300_000) + "<link rel=\"icon\" href=\"/late.png\">";
-        assert!(icon_links_in(&long, "x.com").is_empty());
+        assert!(icon_links_in(&long, "https", "x.com").is_empty());
     }
 
     #[test]
     fn icon_discovery_picks_only_real_icon_links() {
-        let h = |s: &str| icon_links_in(s, "x.com");
+        let h = |s: &str| icon_links_in(s, "https", "x.com");
         assert_eq!(h(r#"<link rel="shortcut icon" href="/f.ico">"#), vec!["/f.ico"]);
         assert_eq!(h(r#"<link rel='apple-touch-icon' href='/t.png'>"#), vec!["/t.png"]);
         assert_eq!(h(r#"<link rel="icon" href="//x.com/cdn.png">"#), vec!["https://x.com/cdn.png"]);
+        // 协议相对地址跟条目自己那个网址的协议走，不一律拼 https
+        assert_eq!(
+            icon_links_in(r#"<link rel="icon" href="//x.com/c.png">"#, "http", "x.com"),
+            vec!["http://x.com/c.png"]
+        );
         // rel 不是图标的不要，哪怕 href 里带 icon 字样
         assert!(h(r#"<link rel="stylesheet" href="/icon-theme.css">"#).is_empty());
         // 内联图与跨站图标不要：跨站就超出了"只连你订阅的那个站"
