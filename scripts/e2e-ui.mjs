@@ -2333,6 +2333,144 @@ await evl(`(() => { const t = document.querySelector('#toast'); clearTimeout(t._
 await evl(`loadAll()`);
 await sleep(700);
 
+/* 17.28. 「类型 × 场所」的叉积。本轮评审里 18 条发现有 6 条落在这上头，共同的形状是
+   一个新字段类型只接了一半管线：渲染接了、筛选没接；库那侧接了、媒体那侧没接。
+   按功能加断言的习惯抓不到这类缺口，得按「类型 × 场所」补。 */
+await evl(`document.querySelector('.nav-tab[data-page="renewals"]').click()`);
+await evl(`switchTab('subs')`);
+await sleep(400);
+// 上一段收拾掉了自己建的那两列，这里重新建一套自己的（三种类型各一）
+const xUrlF = await post('/api/fields', { tbl: 'subs', name: '站点', ftype: 'url' });
+const xMailF = await post('/api/fields', { tbl: 'subs', name: '联系邮箱', ftype: 'email' });
+const xTel = await post('/api/fields', { tbl: 'subs', name: '客服电话', ftype: 'tel' });
+const [xUrl, xMail] = [xUrlF.key, xMailF.key];
+const xRow = (await (await fetch(`${APP}api/collections/subs/items`)).json())[0];
+await put(`/api/items/${xRow.id}`, { ...xRow, extra: { ...(xRow.extra || {}),
+  [xUrl]: 'https://www.netflix.com/browse?x=1', [xMail]: 'me@example.com', [xTel.key]: '+81 90 1234 5678' } });
+await evl(`loadAll()`);
+await sleep(900);
+
+// 筛选浮层要认全部非列表型类型。OP_MENU 只有 text/num/date 三键时，OP_MENU['url'][0][0]
+// 对 undefined 取下标当场 TypeError：浮层不出现、无任何提示，而排序照常——
+// 「所有列都可排序可筛选」这条不变量就对新类型静默失守了。
+for (const [label, k] of [['网址', xUrl], ['邮箱', xMail], ['电话', xTel.key]]) {
+  const opened = await evl(`(() => {
+    try {
+      const th = document.querySelector('.tablewrap[data-tab="subs"] thead th[data-k="${k}"]');
+      if (!th) return 'no-th';
+      openFilterPop('subs', '${k}', th);
+      return !!document.querySelector('.filterpop select.fp-op');
+    } catch (e) { return 'ERR: ' + e.message; }
+  })()`);
+  check(`${label}列的筛选浮层打得开`, opened === true, String(opened));
+  await evl(`closePop()`);
+  await sleep(120);
+}
+// 谓词那侧一直是兜底走文本分支的，顺手连它一起钉住
+// 取节点一律 ?.：撤回修复做负向对照时这里本就抛，别让整份套件断在半路
+await evl(`(() => {
+  try {
+    const th = document.querySelector('.tablewrap[data-tab="subs"] thead th[data-k="${xUrl}"]');
+    openFilterPop('subs', '${xUrl}', th);
+    const q = document.querySelector('.filterpop .fp-q');
+    q.value = 'netflix';
+    q.dispatchEvent(new Event('input'));
+  } catch (e) { /* negative control */ }
+})()`);
+await sleep(400);
+check('网址列筛出来的行数真的变了',
+  await evl(`document.querySelectorAll('#subs-body tr').length`) === 1,
+  await evl(`document.querySelectorAll('#subs-body tr').length`));
+await evl(`setFilter('subs', '${xUrl}', null); closePop();`);
+await sleep(300);
+for (const f of [xUrlF, xMailF, xTel]) await fetch(`${APP}api/fields/${f.id}`, { method: 'DELETE' });
+await evl(`loadAll()`);
+await sleep(700);
+
+// 媒体表两头都要接：建列的类型下拉对媒体一视同仁地供应这三种类型，
+// 而写入口不规范化、格子里不给链接的话，同名同类型的列在两张表上表现就不一样。
+const xMField = await post('/api/fields', { tbl: 'media', name: '播放页', ftype: 'url' });
+const xMRow = (await (await fetch(APP + 'api/media')).json())[0];
+await put(`/api/media/${xMRow.id}`, { ...xMRow, extra: { ...(xMRow.extra || {}), [xMField.key]: 'netflix.com/title/1' } });
+const xMSaved = (await (await fetch(APP + 'api/media')).json()).find(m => m.id === xMRow.id);
+check('媒体的 url 列同样过写入口规范化（没有协议的裸串会被当成站内相对路径）',
+  xMSaved?.extra?.[xMField.key] === 'https://netflix.com/title/1', JSON.stringify(xMSaved?.extra));
+await evl(`loadAll()`);
+await sleep(900);
+await evl(`document.querySelector('.nav-tab[data-page="media"]').click()`);
+await sleep(400);
+check('媒体表里也渲染成可点链接（此前是灰色纯文本）',
+  await evl(`document.querySelector('#m-body tr[data-id="${xMRow.id}"] td[data-k="${xMField.key}"] a')?.getAttribute('href')`)
+    === 'https://netflix.com/title/1');
+await fetch(`${APP}api/fields/${xMField.id}`, { method: 'DELETE' });
+await evl(`document.querySelector('.nav-tab[data-page="renewals"]').click()`);
+await evl(`loadAll()`);
+await sleep(700);
+
+/* 17.29. 换库的到期模型：另一侧的日期字段此前从未注册过，切过去 due_from 就改读一个
+   界面上根本造不出来的字段（字段面板只能建 extra 自定义列），整库到期日静默消失——
+   表格里旧的那列还显示着值，看着一切正常，时间线却空了。 */
+const acColl = await post('/api/collections', { name: '锚点切换', due_anchor: 'last' });
+const acItem = await mk(acColl.key, { name: '按上次续费算', status: 'Active', cycle: 'monthly', last_renewed: rfDay(-5) });
+const acKeys = async () => (await (await fetch(`${APP}api/fields`)).json())
+  .filter(f => f.tbl === acColl.key).map(f => f.key);
+const k0 = await acKeys();
+check('last 锚点的库只播了上次续费日', k0.includes('last_renewed') && !k0.includes('next_renewal'), JSON.stringify(k0));
+check('切换前算得出到期日',
+  (await (await fetch(APP + 'api/overview')).json()).upcoming.some(u => u.kind === acColl.key && u.id === acItem.id));
+
+await put(`/api/collections/${acColl.id}`, { due_anchor: 'next' });
+const k1 = await acKeys();
+check('切成 next 之后下次到期日被补进字段注册表', k1.includes('next_renewal'), JSON.stringify(k1));
+const acOv = await (await fetch(APP + 'api/overview')).json();
+check('日期还没填时条目被点名，而不是从时间线上静默消失',
+  acOv.undated.some(x => x.kind === acColl.key && x.id === acItem.id && x.missing === '下次续费日'),
+  JSON.stringify(acOv.undated));
+await evl(`loadAll()`);
+await sleep(800);
+check('新字段在详情表单里真的有一格可填', await evl(`(() => {
+  const r = (state['${acColl.key}'] || []).find(x => x.id === ${acItem.id});
+  if (!r) return 'no-row';
+  openItemDialog('${acColl.key}', r);
+  const has = !!document.querySelector('#item-fields [data-f="next_renewal"]');
+  document.querySelector('#dlg-item').close();
+  return has;
+})()`) === true);
+const acRow = (await (await fetch(`${APP}api/collections/${acColl.key}/items`)).json()).find(r => r.id === acItem.id);
+await put(`/api/items/${acItem.id}`, { ...acRow, next_renewal: rfDay(9) });
+check('填上之后到期日就回来了',
+  (await (await fetch(APP + 'api/overview')).json()).upcoming
+    .some(u => u.kind === acColl.key && u.id === acItem.id && u.due === rfDay(9)));
+
+// 算不出到期日时点名的必须是真正缺的那一项：last 锚点有两半成因（缺日期 / 缺周期），
+// 一律报「缺上次续费日」的话，用户打开条目看见日期填着，按提示无从下手
+await put(`/api/collections/${acColl.id}`, { due_anchor: 'last' });
+const acRow2 = (await (await fetch(`${APP}api/collections/${acColl.key}/items`)).json()).find(r => r.id === acItem.id);
+await put(`/api/items/${acItem.id}`, { ...acRow2, cycle: '', last_renewed: rfDay(-5) });
+check('日期填着、周期空着时点名的是「周期」',
+  (await (await fetch(APP + 'api/overview')).json()).undated
+    .find(x => x.kind === acColl.key && x.id === acItem.id)?.missing === '周期');
+
+// 提前续费（按日程续费会产生「未来的 last_renewed」，0017 之前不可能出现的合法状态）：
+// 本期还没开始，照旧画进度条就是「剩 35 天 / 30」配一根空槽，看着像算错了
+await put(`/api/items/${acItem.id}`, { ...acRow2, cycle: 'days', cycle_days: 30, last_renewed: rfDay(5) });
+await evl(`loadAll()`);
+await sleep(800);
+await evl(`switchTab('${acColl.key}')`);
+await sleep(400);
+const acLeft = (await evl(
+  `document.querySelector('#${acColl.key}-body tr[data-id="${acItem.id}"] td[data-k="left"]')?.textContent || ''`))
+  .replace(/\s+/g, ' ');
+check('本期还没开始时不画进度条，改说清本期哪天起算',
+  acLeft.includes('剩 35 天') && acLeft.includes(rfDay(5)) && !acLeft.includes('/ 30'), acLeft);
+// 拍在该看的状态下：表格在页面下半，不滚过去截出来的是首页那一屏
+await evl(`document.querySelector('#${acColl.key}-body tr[data-id="${acItem.id}"]')?.scrollIntoView({ block: 'center' })`);
+await sleep(400);
+await shot('25-early-renew-left');
+await fetch(`${APP}api/collections/${acColl.id}`, { method: 'DELETE' });
+await evl(`loadAll()`);
+await sleep(700);
+
 /* 18. 库删光也不能把界面打崩。放在最后跑——这一段会把预置库连数据一起删掉。
    预置库过去在界面上删不掉（后端一直放行、文档也写着可删），而新库的表格容器
    锚在 VPS 那张表上：VPS 一删，同一会话里再建库就是 null.after()，loadAll 断在那儿。 */

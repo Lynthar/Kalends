@@ -198,12 +198,16 @@ async fn set_order(State(app): State<App>, Json(b): Json<Value>) -> R {
     }
     let conn = app.db.lock().unwrap();
     owner(&conn, &tbl)?;
+    // 整份序是一件事，半途断掉留下的是交错的 pos（同形的 collections::set_order
+    // 与 items_order 都包了事务，唯独这里曾经裸奔）
+    let tx = conn.unchecked_transaction()?;
     for (n, k) in keys.iter().enumerate() {
-        conn.execute(
+        tx.execute(
             "UPDATE fields SET pos=?1 WHERE tbl=?2 AND key=?3",
             params![n as i64 + 1, tbl, k],
         )?;
     }
+    tx.commit()?;
     Ok(Json(json!({ "ok": true })))
 }
 

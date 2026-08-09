@@ -34,7 +34,7 @@ pub fn router() -> Router<App> {
         .route("/covers/{name}", get(cover_file))
 }
 
-fn normalized(mut b: Value) -> Result<Value, ApiError> {
+fn normalized(conn: &Connection, mut b: Value) -> Result<Value, ApiError> {
     // 空标题是允许的：表尾「＋ 新建」直接插一行空行、就地填（与库那侧同款）。
     // title 有 NOT NULL 约束，所以 values_of 会把它写成空串而不是 NULL。
     // 评分越界会一路渲染到界面上（99 星把整行撑爆）；不填＝没评分，那是允许的
@@ -49,6 +49,10 @@ fn normalized(mut b: Value) -> Result<Value, ApiError> {
     if s(&b, "status").is_none() {
         b["status"] = json!("想看");
     }
+    // 有形状的字段（tel/url/email）与库那侧同一套规范化：媒体的自定义列也能选这三种
+    // 类型（"新建列"的类型下拉对两侧一视同仁），写入口不过一遍的话「网址」列存进去的
+    // 就是没有协议的裸串，渲染成链接时会被当成站内相对路径
+    crate::collections::normalize_shaped_in(conn, "media", &mut b)?;
     Ok(b)
 }
 
@@ -160,15 +164,15 @@ async fn list(State(app): State<App>, Query(q): Query<HashMap<String, String>>) 
 }
 
 async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
-    let b = normalized(b)?;
     let conn = app.db.lock().unwrap();
+    let b = normalized(&conn, b)?;
     let id = insert(&conn, &b)?;
     Ok(Json(json!({ "id": id })))
 }
 
 async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value>) -> R {
-    let b = normalized(b)?;
     let conn = app.db.lock().unwrap();
+    let b = normalized(&conn, b)?;
     let (cols, mut vals) = values_of(&b);
     let sets: Vec<String> = cols
         .iter()
@@ -241,7 +245,7 @@ async fn import(State(app): State<App>, Json(b): Json<Value>) -> R {
     let conn = app.db.lock().unwrap();
     let (mut added, mut skipped, mut failed) = (0, 0, 0);
     for raw in items {
-        let Ok(item) = normalized(raw.clone()) else {
+        let Ok(item) = normalized(&conn, raw.clone()) else {
             failed += 1;
             continue;
         };
@@ -333,7 +337,7 @@ async fn from_tmdb(State(app): State<App>, Json(b): Json<Value>) -> R {
     fields["status"] = json!(s(&b, "status").unwrap_or_else(|| "想看".into()));
     let id = {
         let conn = app.db.lock().unwrap();
-        insert(&conn, &normalized(fields)?)?
+        insert(&conn, &normalized(&conn, fields)?)?
     };
     if let Some(p) = poster {
         match client.poster(&p).await {

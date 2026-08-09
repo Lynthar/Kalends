@@ -232,8 +232,13 @@ async function doRenew(key) {
   try {
     const r = await api(`/api/items/${id}/renew`, { method: 'POST', body: '{}' });
     // 报出下次到期是哪天：库设成「从操作当天重新计时」的话账单日会被拽走，说出来才看得见。
-    // 日期由后端算（engine::renew_to 那一份），前端自己再算一遍就又是两份会各说各话的实现
-    toast(r?.due ? `已记账，下次到期 ${r.due}` : '已记一笔；这条算不出到期日（没有周期或买断），到期日请手动改');
+    // 日期由后端算（engine::renew_to 那一份），前端自己再算一遍就又是两份会各说各话的实现。
+    // 算不出到期日时后端仍然会把「上次续费日」记成今天（这正是该动作的语义，也是给缺日期的
+    // 条目补日期的既定路径）——旧日期被覆盖这件事得说出来，不然只看见"算不出"三个字
+    const stamped = r?.last_renewed;
+    toast(r?.due ? `已记账，下次到期 ${r.due}`
+      : stamped ? `已记账，上次${verb}日记作 ${stamped}；这条算不出到期日（没有周期或买断），到期日请手动改`
+      : '已记一笔；这条算不出到期日（没有周期或买断），到期日请手动改');
     await loadAll();
   } catch (e) { toast(e.message, true); }
 }
@@ -313,7 +318,7 @@ const LIST_TYPES = ['sel', 'multi', 'status', 'star'];
 // 拨号链接只留 + 与数字：href 里带空格/横杠时部分客户端会拨错
 const telHref = v => 'tel:' + String(v).replace(/[^\d+]/g, '');
 // 位数太少多半是只填了国家码这类残缺值。这里只标不拦——存量数据里就有，
-// 在写入口 400 掉等于让人打不开自己的旧条目（后端同理，见 normalize_tel）
+// 在写入口 400 掉等于让人打不开自己的旧条目（后端同理，见 normalize_shaped）
 const telSuspect = v => (String(v).match(/\d/g) || []).length < 5;
 // 网址在格子里只显示域名：原始串常是带一长串查询参数的登录页，铺开会把整列撑爆
 const urlHost = v => String(v).replace(/^[a-z]+:\/\//i, '').split(/[/?#]/)[0].replace(/^www\./, '');
@@ -358,13 +363,26 @@ function sanitizeFilters(tab) {
   }
 }
 
-// 单元格值按有效类型呈现：文本原样 / 单选一枚标签 / 多选拆标签 / 星级星串（conv 列与自定义列共用）
+/* 单元格值按有效类型呈现：文本原样 / 单选一枚标签 / 多选拆标签 / 星级星串 /
+   有形状的三类渲染成可点链接（conv 列、库的列与媒体的自定义列共用这一份）。
+   **tel/url/email 的渲染必须写在这里而不是各渲染器里**：库那侧 renderColl 走它，
+   媒体的自定义列走 customTds → cellVal，两处写两份就会出现"同名同类型的列在媒体表
+   是灰色纯文本、在续费库是可点链接"这种类型承诺只兑现一半的事。 */
 function cellVal(tab, k, v) {
   if (v == null || v === '') return '';
   const t = colType(tab, k);
   if (t === 'multi') return tagsFor(tab, k, Array.isArray(v) ? v : splitVals(v));
   if (t === 'sel') return tagFor(tab, k, v);
   if (t === 'star') return starRow(+v);
+  if (t === 'url') {
+    const href = safeUrl(v);
+    return href ? `<a href="${esc(href)}" target="_blank" rel="noreferrer">${esc(urlHost(v))} ↗</a>` : esc(String(v));
+  }
+  if (t === 'email') return `<a href="mailto:${esc(v)}">${esc(v)}</a>`;
+  if (t === 'tel') {
+    return `<a class="tel" href="${esc(telHref(v))}">${esc(v)}</a>`
+      + (telSuspect(v) ? '<span class="tel-warn" title="位数偏少，可能只填了国家码">?</span>' : '');
+  }
   return esc(String(v));
 }
 
@@ -1202,12 +1220,18 @@ function setFilter(tab, k, f) {
   RENDER[tab]();
 }
 
-// 操作符型筛选（text/num/date）：操作符下拉 + 值输入
+// 操作符型筛选（非列表型的一切）：操作符下拉 + 值输入
 const OP_MENU = {
   text: [['has', '包含'], ['not', '不包含'], ['empty', '为空'], ['nonempty', '非空']],
   num: [['eq', '='], ['ne', '≠'], ['ge', '≥'], ['le', '≤'], ['gt', '>'], ['lt', '<'], ['empty', '为空'], ['nonempty', '非空']],
   date: [['is', '等于'], ['before', '早于'], ['after', '晚于'], ['empty', '为空'], ['nonempty', '非空']],
 };
+/* 字段类型 → 操作符组。**这张表要认全部非列表型类型，别只列 OP_MENU 的三个键**：
+   tel/url/email 的值就是文本，共用 text 那套；漏接的类型会让 OP_MENU[t] 是 undefined，
+   `OP_MENU[t][0][0]` 当场 TypeError——浮层不出现、无任何提示，而排序还照常，
+   于是「所有列都可排序可筛选」这条不变量对新类型静默失守。filterPred 那侧一直是兜底
+   走文本分支的，所以只差这一层映射。 */
+const opKind = t => (t === 'num' || t === 'date' ? t : 'text');
 
 function opFilterBody(tab, k, t) {
   const cur = views[tab].filters[k];
@@ -1279,7 +1303,7 @@ function openFilterPop(tab, k, anchor) {
   popEl = document.createElement('div');
   popEl.className = 'filterpop';
   popEl.innerHTML = `<div class="fp-head"><b>${esc(colLabel(tab, k))}</b><button type="button" class="btn link" data-clear>清除</button></div>`;
-  popEl.appendChild(LIST_TYPES.includes(t) ? listFilterBody(tab, k, t) : opFilterBody(tab, k, t));
+  popEl.appendChild(LIST_TYPES.includes(t) ? listFilterBody(tab, k, t) : opFilterBody(tab, k, opKind(t)));
   popEl.querySelector('[data-clear]').onclick = () => {
     setFilter(tab, k, null);
     closePop();
@@ -1992,20 +2016,24 @@ function tplEditor(tab, it, td, f) {
   if (!parts.length) return openItemDialog(tab, it); // 模板串指向的字段都没了，退回详情表单
   const box = cellPopShell(td, f.name || f.key);
   for (const p of parts) {
-    const cur = (it.extra || {})[p.key] ?? '';
+    // 值按注册表的 src 取：模板串引用真列键是允许的定制（CLAUDE.md 明说"改模板串即可"），
+    // 恒读写 extra 的话保存一次就在 extra 里生出一个同名键，把真列**遮蔽**掉——
+    // 规格格从此显示 extra 的那份，而费用列与 engine 读的仍是真列，两格各说各话
+    const cur = fieldRaw(p, it) ?? '';
     const wrap = document.createElement('label');
     wrap.className = 'cp-field';
+    const attrs = `data-f="${esc(p.key)}" data-src="${esc(p.src || 'extra')}"`;
     if (p.ftype === 'sel') {
       const opts = fieldOptions(tab, p);
       if (cur !== '' && !opts.includes(String(cur))) opts.unshift(String(cur));
-      wrap.innerHTML = `${esc(p.name || p.key)}<select class="mini-select" data-f="${esc(p.key)}">`
+      wrap.innerHTML = `${esc(p.name || p.key)}<select class="mini-select" ${attrs}>`
         + `<option value=""></option>`
         + opts.map(o => `<option${String(o) === String(cur) ? ' selected' : ''}>${esc(o)}</option>`).join('')
         + `</select>`;
     } else {
       const type = p.ftype === 'num' ? 'number' : p.ftype === 'tel' ? 'tel' : 'text';
       wrap.innerHTML = `${esc(p.name || p.key)}<input class="fp-q" type="${type}"`
-        + `${type === 'number' ? ' step="any"' : ''} data-f="${esc(p.key)}">`;
+        + `${type === 'number' ? ' step="any"' : ''} ${attrs}>`;
       wrap.querySelector('input').value = cur;
     }
     box.appendChild(wrap);
@@ -2016,13 +2044,16 @@ function tplEditor(tab, it, td, f) {
   box.appendChild(foot);
   const commit = () => {
     const ex = { ...(it.extra || {}) };
+    const cols = {};
     for (const el of box.querySelectorAll('[data-f]')) {
       const v = el.type === 'number' ? (el.value === '' ? '' : +el.value) : el.value;
-      if (v === '' || v == null) delete ex[el.dataset.f];
-      else ex[el.dataset.f] = v;
+      const k = el.dataset.f;
+      if (el.dataset.src === 'col') { cols[k] = v === '' ? null : v; continue; }
+      if (v === '' || v == null) delete ex[k];
+      else ex[k] = v;
     }
     closePop();
-    patchRow(tab, it, { extra: ex });
+    patchRow(tab, it, { ...cols, extra: ex });
   };
   foot.querySelector('button').onclick = commit;
   box.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') commit(); });
@@ -2830,6 +2861,11 @@ function leftBar(it) {
   const left = it.days_left;
   if (it.last_renewed && it.due) {
     const total = dayDiff(new Date(it.due + 'T00:00:00'), new Date(it.last_renewed + 'T00:00:00'));
+    // left > total ⟺ last_renewed 在今天之后 ＝ 本期还没开始。这是提前续费 + 账单日不变
+    // （renew_from='schedule'）产生的合法状态，0017 之前根本不可能出现；照旧画进度条就是
+    // 「剩 37 天 / 31」配一根空槽，看着像算错了。数字都对，错的是拿"进度"去讲一段还没
+    // 开始的周期——直接说清本期哪天起算
+    if (total > 0 && left > total) return esc(`剩 ${left} 天（本期 ${it.last_renewed} 起）`);
     if (total > 0) {
       const pct = Math.min(100, Math.max(0, (total - left) / total * 100));
       const lbl = left < 0 ? `已超期 ${-left} 天` : `剩 ${left} 天 / ${total}`;
@@ -2889,16 +2925,9 @@ function renderColl(key) {
         const note = [sub, cyc].filter(Boolean).join(' · ');
         return `<td class="amt">${esc(main)}${note ? `<div class="muted" style="font-size:.72rem">${esc(note)}</div>` : ''}</td>`;
       }
-      if (f.ftype === 'url') {
-        const href = safeUrl(v);
-        return `<td class="clip">${href ? `<a href="${esc(href)}" target="_blank" rel="noreferrer">${esc(urlHost(v))} ↗</a>` : esc(v || '')}</td>`;
-      }
-      if (f.ftype === 'email') {
-        return `<td class="clip">${v ? `<a href="mailto:${esc(v)}">${esc(v)}</a>` : ''}</td>`;
-      }
-      if (f.ftype === 'tel') {
-        return `<td class="cdate">${v ? `<a class="tel" href="${esc(telHref(v))}">${esc(v)}</a>${telSuspect(v) ? '<span class="tel-warn" title="位数偏少，可能只填了国家码">?</span>' : ''}` : ''}</td>`;
-      }
+      // 有形状的三类的渲染在 cellVal 里（媒体的自定义列共用同一份，别在这儿另写一遍）
+      if (f.ftype === 'url' || f.ftype === 'email') return `<td class="clip">${cellVal(key, f.key, v)}</td>`;
+      if (f.ftype === 'tel') return `<td class="cdate">${cellVal(key, f.key, v)}</td>`;
       if (f.ftype === 'date') return `<td class="cdate">${esc(v || '')}</td>`;
       if (f.ftype === 'tpl') return `<td class="cdate">${esc(v || '')}</td>`;
       if (f.ftype === 'text') return `<td class="muted clip" title="${esc(v ?? '')}">${cellVal(key, f.key, v)}</td>`;
@@ -2947,6 +2976,13 @@ function itemDialog() {
     </form>`;
   document.body.appendChild(d);
   d.querySelector('[data-close]').onclick = () => d.close();
+  // 网址是在同一张表单里填的，填完立刻就该能取图标，不必先保存再重开。
+  // **这个监听器只能绑一次**：#item-fields 是常驻节点（对话框只建一次），而 logoRow
+  // 每开一次详情表单就跑一遍——绑在那里等于每开一次叠一个，闭包还攥着上一次那颗
+  // 已经脱离 DOM 的按钮。所以在这里绑，回调里现查当前那颗。
+  d.querySelector('#item-fields').addEventListener('input', e => {
+    if (e.target.matches('[data-f="url"], [data-urlfield]')) syncGrabBtn();
+  });
   return d;
 }
 
@@ -3109,6 +3145,23 @@ function parentRow(key, it) {
 /* 条目图标：上传/清除各走自己的端点，与表单的整行 PUT 不是一回事。
    **上传后必须同步 editingItem.row.logo**——整行 PUT 的体由那份行数据拼，
    不同步的话紧接着按「保存」会把刚传的图标清掉（itemBodyFromRow 没有 logo 就置空）。 */
+/* 表单里"当前那个网址"：优先本表单正在填的 url 控件，其次任何 url 类型字段，
+   最后回落到行数据。读 editingItem.row 而不是闭包里的 it——paint() 会换掉那个对象。 */
+function formUrl() {
+  const own = document.querySelector('#item-fields [data-f="url"]')?.value?.trim();
+  if (own) return own;
+  for (const el of document.querySelectorAll('#item-fields [data-urlfield]')) {
+    if (el.value.trim()) return el.value.trim();
+  }
+  return (editingItem?.row?.url || '').trim();
+}
+
+// 「从网站取」只在这个条目填了网址时出现：没网址时按钮点了必然失败，不如不给
+function syncGrabBtn() {
+  const g = document.querySelector('#item-fields [data-logo-grab]');
+  if (g) g.hidden = !formUrl();
+}
+
 function logoRow(it) {
   const lab = document.createElement('label');
   lab.className = 'span2';
@@ -3122,16 +3175,7 @@ function logoRow(it) {
     </span>`;
   const prev = lab.querySelector('.logo-prev');
   const clear = lab.querySelector('[data-logo-clear]');
-  // 「从网站取」只在这个条目填了网址时出现：没网址时按钮点了必然失败，不如不给
   const grab = lab.querySelector('[data-logo-grab]');
-  const urlOf = () => {
-    const own = document.querySelector('#item-fields [data-f="url"]')?.value?.trim();
-    if (own) return own;
-    for (const el of document.querySelectorAll('#item-fields [data-urlfield]')) {
-      if (el.value.trim()) return el.value.trim();
-    }
-    return (it.url || '').trim();
-  };
   const paint = name => {
     editingItem.row = { ...editingItem.row, logo: name || null };
     prev.innerHTML = name
@@ -3140,19 +3184,15 @@ function logoRow(it) {
     clear.hidden = !name;
   };
   paint(it.logo);
-  const syncGrab = () => { grab.hidden = !urlOf(); };
-  syncGrab();
-  // 网址是在同一张表单里填的，填完立刻就该能取图标，不必先保存再重开
-  document.querySelector('#item-fields')?.addEventListener('input', e => {
-    if (e.target.matches('[data-f="url"], [data-urlfield]')) syncGrab();
-  });
+  // 这一颗还没挂进 DOM，先就地定它的显隐；之后跟着输入走的那次在 itemDialog 里（绑一次）
+  grab.hidden = !formUrl();
   grab.onclick = async () => {
     grab.disabled = true;
     const was = grab.textContent;
     grab.textContent = '取图标…';
     try {
       const r = await api(`/api/items/${it.id}/logo/fetch`,
-        { method: 'POST', body: JSON.stringify({ url: urlOf() }) });
+        { method: 'POST', body: JSON.stringify({ url: formUrl() }) });
       paint(r.logo);
       toast('已从 ' + urlHost(r.from) + ' 取到图标');
     } catch (err) { toast(err.message, true); }
@@ -3449,6 +3489,12 @@ document.addEventListener('submit', async e => {
     renew_from: g('renew_from'), verb: g('verb'),
   };
   if (!body.name) { toast('库名不能为空', true); return; }
+  // 换到期模型是有后果的：新锚点那一侧的日期字段是空的，已有条目在填上之前都算不出到期日
+  //（后端会把该字段补进注册表，所以填得上；首页「算不出到期日」那栏会点名它们）
+  if (editingColl && body.due_anchor !== editingColl.due_anchor) {
+    const to = body.due_anchor === 'next' ? '直接记下次到期日' : '上次续费 + 周期';
+    if (!confirm(`把「${editingColl.name}」的到期模型改成「${to}」？\n\n新模型读的是另一个日期字段，已有条目在把它填上之前算不出到期日（会列在首页「算不出到期日」里）。改回来即可恢复。`)) return;
+  }
   try {
     if (editingColl) await api(`/api/collections/${editingColl.id}`, { method: 'PUT', body: JSON.stringify(body) });
     else {

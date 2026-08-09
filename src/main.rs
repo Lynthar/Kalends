@@ -124,7 +124,7 @@ async fn pin_gate(State(app): State<App>, req: Request, next: Next) -> Response 
         .headers()
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
-        .map_or(false, |c| {
+        .is_some_and(|c| {
             c.split(';')
                 .any(|kv| kv.trim() == format!("kalends_pin={required}"))
         });

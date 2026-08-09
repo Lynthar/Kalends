@@ -258,6 +258,29 @@ impl Row {
         )
     }
 
+    /// 算不出到期日时，到底缺的是哪一项。
+    ///
+    /// **不能只按锚点二选一**：`last` 锚点算不出来有两半成因——缺上次续费日，或缺周期
+    /// （cycle 空 / `days` 却没填天数）。后者只报"缺上次续费日"的话，用户打开条目看见
+    /// 日期明明填着，按提示无从下手，真正缺的那一项反倒没被点名。
+    /// `next` 锚点则只有一种成因（`due_from` 对它只读 next_renewal），照报即可。
+    fn missing_for_due(&self) -> &'static str {
+        let dated = |s: &Option<String>| {
+            s.as_deref()
+                .is_some_and(|x| NaiveDate::parse_from_str(x, "%Y-%m-%d").is_ok())
+        };
+        if self.due_anchor == "next" {
+            "下次续费日"
+        } else if !dated(&self.last_renewed) {
+            "上次续费日"
+        } else if self.cycle.as_deref() == Some("days") {
+            // 日期在、周期是"自定义天数"却推不动，只能是天数没填或不是正数
+            "周期天数"
+        } else {
+            "周期"
+        }
+    }
+
     /// 显示名：库配了副标题字段且该条目有值时拼上（VPS 的"商家 · 产品"）。
     fn title(&self) -> String {
         let sub = self
@@ -326,13 +349,12 @@ pub fn undated(conn: &Connection) -> Result<Vec<Value>> {
         if r.cycle.as_deref() == Some("lifetime") {
             continue;
         }
-        let anchor_field = if r.due_anchor == "next" { "下次续费日" } else { "上次续费日" };
         out.push(json!({
             "kind": r.key,
             "id": r.id,
             "name": r.title(),
             "status": r.status,
-            "missing": anchor_field,
+            "missing": r.missing_for_due(),
         }));
     }
     Ok(out)
@@ -403,6 +425,35 @@ mod tests {
             due_anchor: "next".into(),
             extra,
         }
+    }
+
+    /// 算不出到期日时点名的必须是真正缺的那一项。`last` 锚点有两半成因（缺日期 / 缺周期），
+    /// 一律报"缺上次续费日"的话，用户打开条目看见日期填着，按提示无从下手。
+    #[test]
+    fn undated_points_at_the_field_that_is_actually_missing() {
+        let mut r = row("x", None, json!({}));
+        r.due_anchor = "next".into();
+        assert_eq!(r.missing_for_due(), "下次续费日");
+
+        r.due_anchor = "last".into();
+        assert_eq!(r.missing_for_due(), "上次续费日");
+        r.last_renewed = Some("不是日期".into());
+        assert_eq!(r.missing_for_due(), "上次续费日");
+
+        // 日期填着、周期空着：缺的是周期
+        r.last_renewed = Some("2026-05-01".into());
+        assert_eq!(r.missing_for_due(), "周期");
+        r.cycle = Some("".into());
+        assert_eq!(r.missing_for_due(), "周期");
+
+        // 自定义天数却没填天数（或填了 0）：缺的是天数，不是周期本身
+        r.cycle = Some("days".into());
+        assert_eq!(r.missing_for_due(), "周期天数");
+        r.cycle_days = Some(0);
+        assert_eq!(r.missing_for_due(), "周期天数");
+        // 天数补上就算得出来了，压根不该进这张清单
+        r.cycle_days = Some(30);
+        assert_eq!(r.due(), Some(d("2026-05-31")));
     }
 
     /// `renew_to` 的两个轴要真的正交：同一个 `last` 锚点，`schedule` 保住账单日、

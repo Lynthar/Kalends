@@ -4,7 +4,7 @@
 -- 值得在写入口规范化、在表格里渲染成可点拨号的链接。此前它是 text，界面对它一无所知，
 -- 于是既有数据里混进了 `+44` 这种只有国家码、拨不出去的残缺值。
 --
--- 只改类型，不动任何行数据：规范化在写入口做（见 collections::normalize_tel），
+-- 只改类型，不动任何行数据：规范化在写入口做（见 collections::normalize_shaped），
 -- 存量值原样保留，位数偏少的由界面标出来提醒，交给人判断——在这里批量改写别人的
 -- 号码，或者把打不开的旧条目拦在 400 上，都比留着残缺值更糟。
 UPDATE fields SET ftype = 'tel' WHERE tbl = 'sims' AND key = 'phone_number';

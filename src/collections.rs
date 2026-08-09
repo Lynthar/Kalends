@@ -585,26 +585,41 @@ const STATUS_VOCAB: &str = r#"[{"v":"Active","spend":1,"alert":1,"timeline":1},{
 /// 与 Unused（未启用），两者都不计支出、不提醒、不上时间线。
 const RENEWAL_STATUS_VOCAB: &str = r#"[{"v":"Active","spend":1,"alert":1,"timeline":1},{"v":"Planned","spend":0,"alert":0,"timeline":0},{"v":"Deferred","spend":0,"alert":0,"timeline":0},{"v":"Unused","spend":0,"alert":0,"timeline":0},{"v":"Ending","spend":0,"alert":0,"timeline":1},{"v":"Ended","spend":0,"alert":0,"timeline":0}]"#;
 
+/// (键, 显示名, 类型, 数据源, 默认上表, 序)
+type FieldDef = (&'static str, &'static str, &'static str, &'static str, i64, i64);
+
+/// 到期模型决定注册哪一侧的日期字段：`next` 记下次到期日，`last` 记上次续费日 + 剩余天数。
+///
+/// 建库播种与**事后切换到期模型**共用这一份。切换那条路非补不可：库建成 `last` 时
+/// `fields` 里从来没有 `next_renewal`，切成 `next` 之后 `due_from` 改读一个界面上
+/// 根本造不出来的字段（字段面板只能建 `src='extra'` 的自定义列），整库到期日就此
+/// 静默消失——表格里旧的"上次续费"列还显示着值，看着一切正常，时间线却空了。
+fn anchor_fields(anchor: &str) -> &'static [FieldDef] {
+    if anchor == "next" {
+        &[("next_renewal", "下次到期", "date", "col", 1, 40)]
+    } else {
+        &[
+            ("last_renewed", "上次续费", "date", "col", 1, 40),
+            ("left", "剩余天数", "num", "calc", 1, 41),
+        ]
+    }
+}
+
 fn seed_fields(
     conn: &Connection,
     key: &str,
     anchor: &str,
     tpl: Option<&Template>,
 ) -> anyhow::Result<()> {
-    // (键, 显示名, 类型, 数据源, 默认上表, 序)；序号留了空档，模板的域字段插在 10 段
-    let mut defs: Vec<(&str, &str, &str, &str, i64, i64)> = vec![
+    // 序号留了空档，模板的域字段插在 10 段
+    let mut defs: Vec<FieldDef> = vec![
         ("name", "名称", "text", "col", 1, 1),
         ("status", "状态", "status", "col", 1, 2),
         // 币种不再是自己一列：它并进费用格里，跟着金额一起填（见 fx.rs / 迁移 0013）
         ("price", "费用", "num", "col", 1, 30),
         ("cycle", "周期", "sel", "col", 1, 32),
     ];
-    if anchor == "next" {
-        defs.push(("next_renewal", "下次到期", "date", "col", 1, 40));
-    } else {
-        defs.push(("last_renewed", "上次续费", "date", "col", 1, 40));
-        defs.push(("left", "剩余天数", "num", "calc", 1, 41));
-    }
+    defs.extend_from_slice(anchor_fields(anchor));
     defs.push(("notes", "备注", "text", "col", 1, 50));
     defs.push(("cycle_days", "周期天数", "num", "col", 0, 60));
     defs.push(("url", "链接", "text", "col", 0, 61));
@@ -691,7 +706,8 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
         }
     };
     let pos = i(&b, "pos").unwrap_or_else(|| cur["pos"].as_i64().unwrap());
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "UPDATE collections SET name=?1,icon=?2,due_anchor=?3,subtitle=?4,subline=?5,
          verb=?6,note_field=?7,pos=?8,renew_from=?9 WHERE id=?10",
         params![
@@ -707,6 +723,22 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
             id
         ],
     )?;
+    // 换到期模型就把新锚点那一侧的日期字段补进注册表：没有它，due_from 改读的那个字段
+    // 在界面上既不在表格也不在详情表单，而字段面板只能建 extra 自定义列——用户没有任何
+    // 途径把它造出来，整库到期日从此静默消失（切回去能恢复，但那要先猜到原因）。
+    // ON CONFLICT DO NOTHING：已注册过就保持用户改过的显示名与上表设置，幂等。
+    if anchor != cur["due_anchor"].as_str().unwrap_or_default() {
+        let key = cur["key"].as_str().unwrap_or_default();
+        for (k, fname, ftype, src, shown, fpos) in anchor_fields(&anchor) {
+            tx.execute(
+                "INSERT INTO fields(tbl,key,name,ftype,src,shown,pos,builtin,options)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,1,'[]')
+                 ON CONFLICT(tbl,key) DO NOTHING",
+                params![key, k, fname, ftype, src, shown, fpos],
+            )?;
+        }
+    }
+    tx.commit()?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -822,15 +854,11 @@ async fn items_list(State(app): State<App>, Path(key): Path<String>) -> R {
     Ok(Json(json!(items_of(&conn, &key)?)))
 }
 
-/// 写入用的字段集：整行 PUT 语义是全量替换，没传的键一律置空。
-/// 电话号码的规范化：折叠多余空白，只保留号码里合法的字符。
-///
-/// **只拦真正的垃圾（一个数字都没有），不拦"位数偏少"**——`+44` 这种残缺值是既有数据，
-/// 在写入口 400 掉等于让用户打不开自己的旧条目；位数少由界面标出来提醒，交给人判断。
 /// 有形状的文本类型（tel / url / email）的规范化。
 ///
 /// 共同的分寸：**只拦一眼可辨的垃圾，不拦"不够完整"**。存量数据里就有 `+44` 这种只填了
-/// 国家码的值，在写入口 400 掉等于让人打不开自己的旧条目；可疑但可能是真的，交给界面标出来。
+/// 国家码的值，在写入口 400 掉等于让人打不开自己的旧条目；可疑但可能是真的，交给界面标出来
+/// （电话号码的位数偏少由前端挂个问号提示，见 `telSuspect`）。
 pub fn normalize_shaped(ftype: &str, raw: &str) -> anyhow::Result<String> {
     let t = raw.trim();
     if t.is_empty() {
@@ -838,14 +866,21 @@ pub fn normalize_shaped(ftype: &str, raw: &str) -> anyhow::Result<String> {
     }
     match ftype {
         "tel" => {
-            if let Some(c) = t.chars().find(|c| !(c.is_ascii_digit() || " +-()".contains(*c))) {
+            // **折叠必须先于校验。** 连续空白折叠成一个空格本就是为"从别处粘来的号码"
+            // 准备的，而那种号码带的往往是全角空格（U+3000）——下面白名单里的空格是
+            // ASCII 的，次序反过来就等于一边声明要折叠、一边把该折叠的输入 400 掉，
+            // 报错还是「不该出现「　」」，那个字符渲染出来近似空白，几乎读不出所以然。
+            let folded = t.split_whitespace().collect::<Vec<_>>().join(" ");
+            if let Some(c) = folded
+                .chars()
+                .find(|c| !(c.is_ascii_digit() || " +-()".contains(*c)))
+            {
                 return Err(bad(format!("电话号码里不该出现「{c}」")));
             }
-            if !t.chars().any(|c| c.is_ascii_digit()) {
+            if !folded.chars().any(|c| c.is_ascii_digit()) {
                 return Err(bad("电话号码至少要有一位数字"));
             }
-            // 连续空白折叠成一个空格：从别处粘过来的号码常带全角空格或多空格
-            Ok(t.split_whitespace().collect::<Vec<_>>().join(" "))
+            Ok(folded)
         }
         "email" => {
             if t.split_whitespace().count() > 1 {
@@ -868,10 +903,15 @@ pub fn normalize_shaped(ftype: &str, raw: &str) -> anyhow::Result<String> {
                 return Err(bad("网址里不该有空格"));
             }
             // 没写协议就补 https://：多数人直接粘 `netflix.com`，而没有协议的串
-            // 在 <a href> 里会被当成相对路径，点了跳到本站自己的一个不存在页面
-            let full = if t.contains("://") { t.to_string() } else { format!("https://{t}") };
-            let rest = full.split_once("://").map(|x| x.1).unwrap_or("");
-            if !full.starts_with("http://") && !full.starts_with("https://") {
+            // 在 <a href> 里会被当成相对路径，点了跳到本站自己的一个不存在页面。
+            // 协议按 RFC 3986 不分大小写：`HTTPS://…`（粘自旧文档，或输入法把首字母
+            // 大写了）在浏览器里能开，这里也得认，顺手统一成小写存下来。
+            let full = match t.split_once("://") {
+                Some((scheme, rest)) => format!("{}://{rest}", scheme.to_lowercase()),
+                None => format!("https://{t}"),
+            };
+            let (scheme, rest) = full.split_once("://").unwrap_or(("", ""));
+            if scheme != "http" && scheme != "https" {
                 return Err(bad("网址只支持 http / https"));
             }
             let host = rest.split(['/', '?', '#']).next().unwrap_or("");
@@ -892,19 +932,19 @@ pub fn url_host(raw: &str) -> Option<String> {
     (!host.is_empty() && host.contains('.')).then(|| host.to_lowercase())
 }
 
-/// 把这个库里有形状的字段就地规范化。字段类型是数据（存在 fields 表里），
-/// 所以写入口要现查一次——没有这类列的库，这条查询返回空集。
-fn normalize_shaped_fields(conn: &Connection, coll: i64, b: &mut Value) -> anyhow::Result<()> {
-    let key: String = conn.query_row("SELECT key FROM collections WHERE id=?1", [coll], |r| {
-        r.get(0)
-    })?;
+/// 把某张表里有形状的字段就地规范化。字段类型是数据（存在 `fields` 表里），
+/// 所以写入口要现查一次——没有这类列的表，这条查询返回空集。
+///
+/// `tbl` 就是字段注册表里的表名：库用库键，媒体用 `media`。**媒体那侧同样要过**，
+/// 它的自定义列也能选 tel/url/email（"新建列"的类型下拉对两侧一视同仁）。
+pub fn normalize_shaped_in(conn: &Connection, tbl: &str, b: &mut Value) -> anyhow::Result<()> {
     let mut stmt =
         conn.prepare("SELECT key, ftype FROM fields WHERE tbl=?1 AND ftype IN ('tel','url','email')")?;
     let cols: Vec<(String, String)> = stmt
-        .query_map([&key], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map([tbl], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     for (k, ftype) in cols {
-        // url 既可能是 items 的真列，也可能是 extra 里的域字段
+        // url 既可能是真列，也可能是 extra 里的域字段/自定义列
         if let Some(v) = b.get(&k).and_then(|v| v.as_str()) {
             let fixed = normalize_shaped(&ftype, v)?;
             b[&k] = json!(fixed);
@@ -915,6 +955,13 @@ fn normalize_shaped_fields(conn: &Connection, coll: i64, b: &mut Value) -> anyho
         }
     }
     Ok(())
+}
+
+fn normalize_shaped_fields(conn: &Connection, coll: i64, b: &mut Value) -> anyhow::Result<()> {
+    let key: String = conn.query_row("SELECT key FROM collections WHERE id=?1", [coll], |r| {
+        r.get(0)
+    })?;
+    normalize_shaped_in(conn, &key, b)
 }
 
 fn item_values(b: &Value) -> anyhow::Result<Vec<rusqlite::types::Value>> {
@@ -1794,6 +1841,14 @@ mod tests {
         assert!(normalize_shaped("tel", "打客服").is_err());
         assert!(normalize_shaped("tel", "+++").is_err());
         assert!(normalize_shaped("tel", "+44 12ab").is_err());
+        // 折叠先于白名单：从聊天工具/备忘录粘来的号码常带全角空格，白名单里的空格
+        // 是 ASCII 的，次序反了就会把「该折叠的输入」400 掉（报错还几乎读不出来）
+        assert_eq!(
+            normalize_shaped("tel", "+81　90　1234　5678").unwrap(),
+            "+81 90 1234 5678"
+        );
+        assert_eq!(normalize_shaped("tel", "\u{3000}+44\u{3000}").unwrap(), "+44");
+        assert_eq!(normalize_shaped("tel", "+1\t424\n4329266").unwrap(), "+1 424 4329266");
     }
 
 
@@ -1806,6 +1861,9 @@ mod tests {
         assert!(n("url", "ftp://a.com").is_err());
         assert!(n("url", "没有域名").is_err());
         assert!(n("url", "https://a.com b.com").is_err());
+        // 协议按 RFC 3986 不分大小写：粘自旧文档的 HTTPS:// 在浏览器里能开，这里也得认
+        assert_eq!(n("url", "HTTPS://Example.com/A").unwrap(), "https://Example.com/A");
+        assert_eq!(n("url", "Http://a.com").unwrap(), "http://a.com");
         // 域名大小写不敏感统一小写；用户名部分按规范敏感，原样保留
         assert_eq!(n("email", " Me.You+tag@Example.COM ").unwrap(), "Me.You+tag@example.com");
         assert!(n("email", "no-at-sign").is_err());
