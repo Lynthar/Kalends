@@ -56,16 +56,25 @@ pub fn email_cfg(conn: &Connection) -> Option<EmailCfg> {
 /// 也没有总超时，而通知调度器是一条条顺序 await 的——一根挂死的连接能把之后所有提醒
 /// 拖到下次重启，日志里还什么都看不到。
 pub fn http_client(proxy: &str) -> Result<reqwest::Client> {
-    build_client(proxy, true)
+    build_client(proxy, true, None)
 }
 
-/// 不自动跟重定向的客户端。取图标那条路要自己一跳一跳地跟，好在每一跳都重新校验目标——
-/// 交给 reqwest 自动跟的话，`https://正常站/x → 302 → http://10.0.0.5/` 就绕过了内网防线。
-pub fn http_client_no_redirect(proxy: &str) -> Result<reqwest::Client> {
-    build_client(proxy, false)
+/// 不跟重定向、且把目标主机钉死在一个已校验地址上的客户端。
+///
+/// 取图标那条路要自己一跳一跳地跟（交给 reqwest 自动跟的话，
+/// `https://正常站/x → 302 → http://10.0.0.5/` 就绕过了内网防线），
+/// **并且每跳都得钉地址**：先解析校验、再让 reqwest 自己去解析一次的话，
+/// 两次之间 DNS 可以翻脸（DNS rebinding / TOCTOU），校验过的和真正连上的就不是同一台机器。
+/// `resolve` 只改地址，TLS 的 SNI 与证书校验仍按原主机名走。
+pub fn http_client_pinned(proxy: &str, host: &str, addr: std::net::SocketAddr) -> Result<reqwest::Client> {
+    build_client(proxy, false, Some((host, addr)))
 }
 
-fn build_client(proxy: &str, follow: bool) -> Result<reqwest::Client> {
+fn build_client(
+    proxy: &str,
+    follow: bool,
+    pin: Option<(&str, std::net::SocketAddr)>,
+) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(30)) // 含响应体，海报下载也走这条
@@ -74,7 +83,11 @@ fn build_client(proxy: &str, follow: bool) -> Result<reqwest::Client> {
         } else {
             reqwest::redirect::Policy::none()
         });
+    if let Some((host, addr)) = pin {
+        builder = builder.resolve(host, addr);
+    }
     if !proxy.is_empty() {
+        // 配了代理时域名由代理解析，钉地址不生效——那种部署的出口管控在代理侧
         builder = builder.proxy(reqwest::Proxy::all(proxy)?);
     }
     Ok(builder.build()?)

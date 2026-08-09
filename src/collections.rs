@@ -1302,30 +1302,34 @@ fn public_host_ok(host: &str) -> bool {
     bare.contains('.')
 }
 
-/// 字面形状 + 解析结果双重校验。**每一跳重定向都要重新过这里。**
+/// 字面形状 + 解析结果双重校验，**并把校验过的地址交回去钉死**。
+/// 返回 None＝不许连。**每一跳重定向都要重新过这里。**
 ///
-/// 注意：配了 `meta.proxy` 时域名由代理解析，这里的预解析只是尽力而为——
+/// 为什么要把地址交回去：只校验不钉的话，reqwest 连接时会**再解析一次**，
+/// 两次之间 DNS 可以翻脸（DNS rebinding / TOCTOU）——校验过的和真正连上的不是同一台机器。
+///
+/// 注意：配了 `meta.proxy` 时域名由代理解析，预解析与钉地址都不生效——
 /// 那种部署下真正的出口管控在代理那一侧。
-async fn host_is_public(host: &str) -> bool {
+async fn resolve_public(host: &str, port: u16) -> Option<std::net::SocketAddr> {
     if !public_host_ok(host) {
-        return false;
+        return None;
     }
     let bare = bare_host(host);
-    if bare.parse::<std::net::IpAddr>().is_ok() {
-        return true; // 字面 IP 已经在上面验过，不必再解析
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        return Some(std::net::SocketAddr::new(ip, port)); // 字面 IP 上面已验过
     }
-    match tokio::net::lookup_host((bare, 443u16)).await {
-        Ok(addrs) => resolved_ips_ok(&addrs.map(|a| a.ip()).collect::<Vec<_>>()),
-        Err(_) => false,
-    }
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((bare, port)).await.ok()?.collect();
+    let ips: Vec<std::net::IpAddr> = addrs.iter().map(|a| a.ip()).collect();
+    // 有一条落内网就整体拒；否则钉住第一条——钉的必须是刚校验过的那一批里的
+    resolved_ips_ok(&ips).then(|| addrs[0])
 }
 
 /// 从首页的 `<link rel="icon">` 里找图标地址。找不到就返回空，调用方退回常规路径。
 ///
 /// 只做一次 GET 与一段正则——为这点事引 HTML 解析器不值当，而 `rel` 里含 icon 的
 /// link 标签形状足够固定。取不到、超时、页面过大都当作"没发现"，不算失败。
-async fn discover_icon_paths(client: &reqwest::Client, ua: &str, host: &str) -> Vec<String> {
-    let Ok(resp) = get_public(client, &format!("https://{host}/"), ua).await else {
+async fn discover_icon_paths(proxy: &str, ua: &str, host: &str) -> Vec<String> {
+    let Ok(resp) = get_public(proxy, &format!("https://{host}/"), ua).await else {
         return Vec::new();
     };
     if !resp.status().is_success() {
@@ -1341,14 +1345,18 @@ async fn discover_icon_paths(client: &reqwest::Client, ua: &str, host: &str) -> 
 ///
 /// 不能交给 reqwest 自动跟：它默认跟 10 跳且不会回头问我们目标合不合法，于是
 /// `https://正常站/x → 302 → http://10.0.0.5/` 一路直达内网，前面那道防线形同虚设。
-async fn get_public(client: &reqwest::Client, url: &str, ua: &str) -> Result<reqwest::Response, String> {
+async fn get_public(proxy: &str, url: &str, ua: &str) -> Result<reqwest::Response, String> {
     let mut current = url.to_string();
     for _ in 0..4 {
         let parsed = reqwest::Url::parse(&current).map_err(|_| format!("网址不对：{current}"))?;
         let host = parsed.host_str().unwrap_or("").to_string();
-        if !host_is_public(&host).await {
+        let port = parsed.port_or_known_default().unwrap_or(443);
+        let Some(addr) = resolve_public(&host, port).await else {
             return Err(format!("{host} 指向内网或本机，不去连它"));
-        }
+        };
+        // 每跳一个钉死地址的客户端：钉的就是刚校验过的那个地址，reqwest 不会再解析一次
+        let client = crate::notify::http_client_pinned(proxy, &host, addr)
+            .map_err(|e| format!("建连接失败：{e}"))?;
         let resp = client
             .get(&current)
             .header("User-Agent", ua)
@@ -1469,14 +1477,13 @@ async fn logo_fetch(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<V
     if !public_host_ok(&host) {
         return Err(bad("只能从公网站点取图标").into());
     }
-    let client = crate::notify::http_client_no_redirect(&proxy)?;
     // 不带 UA 会被一部分站点特判成爬虫直接 403（实测 Stack Overflow 就是），
     // 与 scripts/update-fx-baseline.py 踩过的是同一个坑
     const UA: &str = "kalends-icon-fetch";
     let mut last = String::from("没找到图标");
     // 先问网页自己：多数站点的图标不在 /favicon.ico，而是 <link rel="icon"> 指到别处
     // （实测 Cloudflare 三条常规路径全 404）。取不到就退回常规路径挨个试。
-    let mut paths: Vec<String> = discover_icon_paths(&client, UA, &host).await;
+    let mut paths: Vec<String> = discover_icon_paths(&proxy, UA, &host).await;
     paths.extend(FAVICON_PATHS.iter().map(|p| (*p).to_string()));
     for path in paths {
         let target = if path.starts_with("http") {
@@ -1484,7 +1491,7 @@ async fn logo_fetch(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<V
         } else {
             format!("https://{host}{}", if path.starts_with('/') { path.clone() } else { format!("/{path}") })
         };
-        let resp = match get_public(&client, &target, UA).await {
+        let resp = match get_public(&proxy, &target, UA).await {
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
                 last = format!("{host} 返回 {}", r.status());
