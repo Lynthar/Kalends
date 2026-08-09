@@ -1,5 +1,82 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="92" fill="#b5341f"/>
-  <rect x="26" y="26" width="460" height="460" rx="72" fill="none" stroke="#f4efe6" stroke-opacity=".35" stroke-width="6"/>
-  <text x="252" y="352" font-family="Palatino, 'Palatino Linotype', Georgia, serif" font-size="292" font-weight="700" text-anchor="middle" fill="#f4efe6">K·</text>
+  <!-- 苏打朔月：薄荷朔月悬在苏打水色砖上，液态玻璃气泡沿月亮圆周把暗面轮廓补成整圆——账期一天天数满，朔日收账。末端一颗蜂蜜柠檬泡是全图唯一暖色。 -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2=".85" y2="1">
+      <stop offset="0" stop-color="#1cc7b2"/>
+      <stop offset=".48" stop-color="#0db09f"/>
+      <stop offset="1" stop-color="#067f72"/>
+    </linearGradient>
+    <radialGradient id="bloom-mint" gradientUnits="userSpaceOnUse" cx="368" cy="120" r="300">
+      <stop offset="0" stop-color="#f4fffc" stop-opacity=".32"/>
+      <stop offset="1" stop-color="#f4fffc" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="bloom-lemon" gradientUnits="userSpaceOnUse" cx="92" cy="460" r="280">
+      <stop offset="0" stop-color="#ffe27a" stop-opacity=".22"/>
+      <stop offset="1" stop-color="#ffe27a" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="halo" gradientUnits="userSpaceOnUse" cx="330" cy="180" r="210">
+      <stop offset="0" stop-color="#f4fffc" stop-opacity=".28"/>
+      <stop offset="1" stop-color="#f4fffc" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="moonlit" gradientUnits="userSpaceOnUse" x1="440" y1="60" x2="120" y2="400">
+      <stop offset="0" stop-color="#f6fffd"/>
+      <stop offset="1" stop-color="#8ef0df"/>
+    </linearGradient>
+    <mask id="cres">
+      <circle cx="284" cy="226" r="166" fill="#fff"/>
+      <circle cx="222" cy="278" r="150" fill="#000"/>
+    </mask>
+    <clipPath id="tileclip"><rect width="512" height="512" rx="118"/></clipPath>
+    <!-- 液态玻璃气泡：近透明玻璃体 + 受光渐变圆环 + 上缘弧形高光 + 下缘内反射微光 -->
+    <radialGradient id="glass-mint" cx=".38" cy=".3" r=".8">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".08"/>
+      <stop offset=".68" stop-color="#ffffff" stop-opacity=".11"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity=".44"/>
+    </radialGradient>
+    <linearGradient id="rim-mint" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".95"/>
+      <stop offset=".55" stop-color="#dffcf4" stop-opacity=".38"/>
+      <stop offset="1" stop-color="#bff2e6" stop-opacity=".18"/>
+    </linearGradient>
+    <radialGradient id="glass-lemon" cx=".38" cy=".3" r=".8">
+      <stop offset="0" stop-color="#ffe27a" stop-opacity=".35"/>
+      <stop offset=".62" stop-color="#ffd75e" stop-opacity=".5"/>
+      <stop offset="1" stop-color="#ffc531" stop-opacity=".85"/>
+    </radialGradient>
+    <linearGradient id="rim-lemon" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fffbe8" stop-opacity="1"/>
+      <stop offset=".55" stop-color="#ffdb64" stop-opacity=".8"/>
+      <stop offset="1" stop-color="#eda412" stop-opacity=".55"/>
+    </linearGradient>
+    <radialGradient id="lemon-glow">
+      <stop offset="0" stop-color="#ffe27a" stop-opacity=".4"/>
+      <stop offset="1" stop-color="#ffe27a" stop-opacity="0"/>
+    </radialGradient>
+    <g id="bub-mint">
+      <circle r="20" fill="url(#glass-mint)"/>
+      <circle r="20" fill="none" stroke="url(#rim-mint)" stroke-width="3.4"/>
+      <path d="M 2.3 -12.8 A 13 13 0 0 1 12.2 -4.4" fill="none" stroke="#ffffff" stroke-width="4.2" stroke-linecap="round" opacity=".9"/>
+      <path d="M -5.3 14.6 A 15.5 15.5 0 0 1 -14.6 5.3" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" opacity=".3"/>
+    </g>
+    <g id="bub-lemon">
+      <circle r="30" fill="url(#lemon-glow)"/>
+      <circle r="20" fill="url(#glass-lemon)"/>
+      <circle r="12" fill="#ffe27a" opacity=".45"/>
+      <circle r="20" fill="none" stroke="url(#rim-lemon)" stroke-width="3.6"/>
+      <path d="M 2.3 -12.8 A 13 13 0 0 1 12.2 -4.4" fill="none" stroke="#ffffff" stroke-width="4.2" stroke-linecap="round" opacity=".95"/>
+      <path d="M -5.3 14.6 A 15.5 15.5 0 0 1 -14.6 5.3" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" opacity=".35"/>
+    </g>
+  </defs>
+  <rect width="512" height="512" rx="118" fill="url(#tile)"/>
+  <g clip-path="url(#tileclip)">
+    <rect width="512" height="512" fill="url(#bloom-mint)"/>
+    <rect width="512" height="512" fill="url(#bloom-lemon)"/>
+    <circle cx="330" cy="180" r="210" fill="url(#halo)"/>
+    <!-- 补圆点：气泡圆心都落在月亮自己的圆周（r166）上，沿暗面轮廓渐大 -->
+    <use href="#bub-mint" transform="translate(270,391) scale(.65)" opacity=".68"/>
+    <use href="#bub-mint" transform="translate(189,362) scale(.85)" opacity=".8"/>
+    <use href="#bub-mint" transform="translate(134,296) scale(1.08)" opacity=".92"/>
+    <use href="#bub-lemon" transform="translate(119,212) scale(1.32)"/>
+    <circle cx="284" cy="226" r="166" fill="url(#moonlit)" mask="url(#cres)"/>
+  </g>
 </svg>

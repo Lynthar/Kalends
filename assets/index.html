@@ -15,7 +15,22 @@
 
 <header class="masthead">
   <div class="brand">
-    <span class="brand-moon" aria-hidden="true"></span>
+    <svg class="brand-moon" viewBox="0 0 512 512" aria-hidden="true">
+      <defs>
+        <linearGradient id="bm-grad" x1="1" y1="0" x2="0" y2="1">
+          <stop class="bm1" offset="0"/><stop class="bm2" offset="1"/>
+        </linearGradient>
+        <radialGradient id="bm-halo">
+          <stop class="bmh1" offset="0"/><stop class="bmh2" offset="1"/>
+        </radialGradient>
+        <mask id="bm-cres">
+          <circle cx="256" cy="256" r="216" fill="#fff"/>
+          <circle cx="174" cy="323" r="201" fill="#000"/>
+        </mask>
+      </defs>
+      <circle cx="256" cy="256" r="252" fill="url(#bm-halo)"/>
+      <circle cx="256" cy="256" r="216" fill="url(#bm-grad)" mask="url(#bm-cres)"/>
+    </svg>
     <div class="brand-text">
       <h1>Kalends</h1>
       <span class="brand-sub">朔日台账</span>

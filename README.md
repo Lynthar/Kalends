@@ -1,10 +1,13 @@
-# Kalends
+<div align="center">
+  <img src="assets/icon.svg" alt="" width="112">
+  <h1>Kalends</h1>
+  <p><b>朔日台账</b> — the new-moon ledger</p>
+  <p><b>English</b> · <a href="#中文说明">中文</a></p>
+</div>
 
 > Self-hosted tracker for everything that renews — subscriptions, SIM keep-alives, VPS boxes, and whatever else you care to define — plus a media library for films, series, anime and games. One Rust binary, one SQLite file, no account anywhere.
 
-Named after the Roman *Kalendae*: the first day of the month, when debts came due. It is where the word "calendar" comes from.
-
-**English** · [中文](#中文说明)
+Named after the Roman *Kalendae*: the first day of the month, when debts came due. It is where the word "calendar" comes from — and the new moon that opened each Roman month is the crescent in the icon, filling up bubble by bubble until the account falls due.
 
 ## What it does
 
@@ -58,7 +61,7 @@ Keep the SQLite file on local disk. Locking over SMB or NFS is not reliable enou
 
 自托管的个人台账：**续费中心**（预置订阅 / SIM 卡保号 / VPS，也能自己建库）加**媒体库**（影视 / 剧集 / 动画 / 游戏）。单个 Rust 二进制、单个 SQLite 文件，数据全程在自己盘上。
 
-名字取自罗马历的朔日 *Kalendae*——每月初一收账还债之日，也是 calendar 的词源。
+名字取自罗马历的朔日 *Kalendae*——每月初一收账还债之日，也是 calendar 的词源。图标里那弯被气泡一颗颗补圆的薄荷朔月，就是它：账期数满成圆，朔日收账。
 
 ### 它做什么
 

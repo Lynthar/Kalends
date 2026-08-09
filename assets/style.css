@@ -98,14 +98,18 @@ main, header, footer { position: relative; z-index: 1; }
 }
 .brand { display: flex; align-items: center; gap: .7rem; }
 .brand-moon {
-  width: 18px; height: 18px; border-radius: 50%;
-  background: radial-gradient(circle at 32% 28%, #8ef0df, var(--aqua) 55%, var(--aqua-deep));
-  box-shadow: 0 0 0 4px var(--ring), 0 4px 12px -2px rgba(13, 176, 159, .5);
+  width: 24px; height: 24px; flex: none;
+  filter: drop-shadow(0 3px 9px rgba(13, 176, 159, .5));
   animation: moonbreath 6s ease-in-out infinite;
 }
+/* 月牙与光环的渐变停靠点写在 CSS 里，跟着深浅主题的 --aqua 走 */
+.brand-moon .bm1 { stop-color: var(--aqua); }
+.brand-moon .bm2 { stop-color: var(--aqua-deep); }
+.brand-moon .bmh1 { stop-color: var(--aqua); stop-opacity: .26; }
+.brand-moon .bmh2 { stop-color: var(--aqua); stop-opacity: 0; }
 @keyframes moonbreath {
-  0%, 100% { transform: scale(1); box-shadow: 0 0 0 4px var(--ring), 0 4px 12px -2px rgba(13, 176, 159, .5); }
-  50% { transform: scale(1.12); box-shadow: 0 0 0 7px transparent, 0 4px 16px -2px rgba(13, 176, 159, .65); }
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.12); }
 }
 .brand-text { display: flex; align-items: baseline; gap: .6rem; }
 .brand-text h1 {
