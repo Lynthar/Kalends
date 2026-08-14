@@ -408,7 +408,7 @@ tr.subrow td.c0 { padding-left: 4rem; }
   display: flex; align-items: center; justify-content: flex-end; gap: .15rem;
 }
 .rowgut .rgrip {
-  cursor: grab; color: var(--muted); font-size: .95rem; line-height: 1;
+  cursor: grab; color: var(--ink-2); font-size: .95rem; line-height: 1;
   opacity: 0; transition: opacity .15s; user-select: none; padding: 0 .1rem;
   border: 0; background: none;
 }
@@ -567,7 +567,7 @@ th.drop-r { box-shadow: inset -3px 0 0 var(--aqua); }
 .tgl:hover { color: var(--aqua-deep); }
 /* 子行的缩进跟着首格走（见上面 tr.subrow td.c0），不再按 data-k=name 认——
    名称列不一定排在最左边，缩进画在中间某一列上看着就是错位。 */
-.unnamed { color: var(--muted); font-style: italic; }
+.unnamed { color: var(--ink-2); font-style: italic; }
 /* 订阅服务 logo：名称格小图标 + 表单预览 */
 .slogo {
   width: 20px; height: 20px; border-radius: 5px; object-fit: cover;
@@ -721,6 +721,9 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
   gap: 1.15rem .95rem; padding-top: .4rem;
 }
 .card { cursor: pointer; animation: rise .45s var(--spring) calc(var(--i, 0) * 30ms) both; }
+/* 卡片自己进 Tab 序（海报墙的唯一入口），焦点环要画在海报上而不是整块留白 */
+.card:focus-visible { outline: none; }
+.card:focus-visible .cov { outline: 2.5px solid var(--aqua); outline-offset: 3px; }
 .card .cov {
   aspect-ratio: 2 / 3; border-radius: 14px; overflow: hidden; position: relative;
   background: linear-gradient(160deg, var(--aqua-soft), var(--surface-2) 70%);
@@ -826,12 +829,16 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
 .tab.tab-add::after { display: none; }
 
 /* 金额里的原币小字：折算后主行是折算值，原币缩在后面（表格里另起一行，别处跟在后面） */
-.orig { color: var(--muted); font-size: .72rem; margin-left: .35rem; font-weight: 500; }
+.orig { color: var(--ink-2); font-size: .72rem; margin-left: .35rem; font-weight: 500; }
 .ledger .amt .orig, .lg-a .orig { display: block; margin: 0; }
 /* 详情表单里的费用栏：金额 + 币种一起填 */
 .pricebox { display: flex; gap: .4rem; }
 .pricebox input { flex: 1 1 auto; min-width: 0; }
+/* 币种那一格是「下拉 + 新选项」的竖排小组件（不在内置汇率表里的币种得能现打） */
 .pricebox select { flex: 0 0 6.5rem; }
+.pricebox .sopts, .fp-form .sopts { flex: 0 0 7.5rem; }
+.pricebox .sopts select, .fp-form .sopts select { flex: 1 1 auto; }
+.cur-add { text-transform: uppercase; }
 
 /* 电话号码：可点拨号；位数偏少的挂个问号，只提醒不拦（存量数据里就有残缺值） */
 .grid a.tel { color: inherit; text-decoration: none; border-bottom: 1px dashed var(--line); }

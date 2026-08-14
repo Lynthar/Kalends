@@ -242,18 +242,20 @@ async fn bulk_delete(State(app): State<App>, Json(b): Json<Value>) -> R {
     let conn = app.db.lock().unwrap();
     let mut covers = Vec::new();
     let tx = conn.unchecked_transaction()?;
+    // 报真正删掉的条数，不是请求里的 id 个数（与库那侧同）
+    let mut deleted = 0usize;
     for id in &ids {
         let cover: Option<String> = tx
             .query_row("SELECT cover FROM media_items WHERE id=?1", [id], |r| r.get(0))
             .unwrap_or(None);
         covers.push(cover);
-        tx.execute("DELETE FROM media_items WHERE id=?1", [id])?;
+        deleted += tx.execute("DELETE FROM media_items WHERE id=?1", [id])?;
     }
     tx.commit()?;
     for name in covers.into_iter().flatten().filter(|n| crate::api::safe_name(n)) {
         let _ = std::fs::remove_file(app.data_dir.join("covers").join(name));
     }
-    Ok(Json(json!({ "ok": true, "deleted": ids.len() })))
+    Ok(Json(json!({ "ok": true, "deleted": deleted })))
 }
 
 /// 批量导入（Notion 迁移 / 豆伴 CSV 适配器共用）：douban_id 或 (title,year,kind) 已存在则跳过。

@@ -185,7 +185,7 @@
       <label>年份<input name="year" type="number" min="1870" max="2100"></label>
       <label>我的评分
         <span class="stars" id="m-stars">
-          <button type="button" data-v="1">★</button><button type="button" data-v="2">★</button><button type="button" data-v="3">★</button><button type="button" data-v="4">★</button><button type="button" data-v="5">★</button>
+          <button type="button" data-v="1" aria-label="1 星">★</button><button type="button" data-v="2" aria-label="2 星">★</button><button type="button" data-v="3" aria-label="3 星">★</button><button type="button" data-v="4" aria-label="4 星">★</button><button type="button" data-v="5" aria-label="5 星">★</button>
           <button type="button" class="star-clear" data-v="">清除</button>
         </span>
         <input type="hidden" name="rating">
@@ -308,10 +308,18 @@
       <legend>元数据抓取</legend>
       <div class="fgrid">
         <label class="span2">TMDB API Key（v3 短 key 或 v4 令牌，themoviedb.org 免费申请）<input name="tmdb_key" autocomplete="off"></label>
-        <label class="span2">元数据代理（可选，TMDB 被墙时用）<input name="meta_proxy" placeholder="socks5://127.0.0.1:1080"></label>
       </div>
     </fieldset>
     </div>
+    <!-- 代理不能待在媒体那一段里：meta.proxy 同样管着汇率拉取与「从网站取图标」，
+         而 #settings-media 在 renewals-only 部署下是整块隐藏的，那种部署等于配不了代理 -->
+    <fieldset class="chanset">
+      <legend>出网</legend>
+      <div class="fgrid">
+        <label class="span2">代理（可选）<input name="meta_proxy" placeholder="socks5://127.0.0.1:1080"></label>
+      </div>
+      <p class="note">TMDB 元数据抓取、拉取实时汇率、从网站取图标共用这一个代理。三件事都得你主动触发才会发生。</p>
+    </fieldset>
     <fieldset class="chanset">
       <legend>安全与数据</legend>
       <div class="fgrid">
@@ -334,7 +342,8 @@
   <button id="bulk-clear" class="btn ghost" type="button">取消</button>
 </div>
 
-<div id="toast" hidden></div>
+<!-- 播报区：toast 是唯一的成功/失败反馈，不标 live region 屏幕阅读器就完全听不到 -->
+<div id="toast" role="status" aria-live="polite" hidden></div>
 <script src="/config.js"></script>
 <script src="/app.js"></script>
 </body>

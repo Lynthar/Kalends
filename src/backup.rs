@@ -100,14 +100,29 @@ pub fn run(conn: &Connection, data_dir: &Path) -> Result<Report> {
     })
 }
 
-/// 每半小时醒来：过了 03:30 且今日快照缺失就补跑（重启后自动补上当天的份）。
+/// 今天的 JSONL 导出是否已经写好。看 TABLES 的最后一张表：导出是按序逐张写的，
+/// 最后那张新鲜就说明整轮走完了。
+///
+/// 补跑判据里必须带上它。只看快照的话，「快照写成了、后面的导出才失败」这一路
+/// 当天再也不会重试——留下的是一份停在昨天的明文导出，而它正是"不装 Kalends 也读得懂"
+/// 那条承诺的载体。
+fn exported_today(data_dir: &Path) -> bool {
+    let last = TABLES[TABLES.len() - 1];
+    let Ok(meta) = fs::metadata(data_dir.join("export").join(format!("{last}.jsonl"))) else {
+        return false;
+    };
+    let Ok(mtime) = meta.modified() else { return false };
+    chrono::DateTime::<chrono::Local>::from(mtime).date_naive() == crate::engine::today()
+}
+
+/// 每半小时醒来：过了 03:30 且今日快照或今日导出缺失就补跑（重启后自动补上当天的份）。
 pub async fn scheduler(db: crate::Db, data_dir: PathBuf) {
     loop {
         let now_hhmm = chrono::Local::now().format("%H:%M").to_string();
         let today_snap = data_dir
             .join("backups")
             .join(format!("snapshot-{}.db", crate::engine::today()));
-        if now_hhmm.as_str() >= RUN_AFTER && !today_snap.exists() {
+        if now_hhmm.as_str() >= RUN_AFTER && (!today_snap.exists() || !exported_today(&data_dir)) {
             let result = {
                 let conn = db.lock().unwrap();
                 run(&conn, &data_dir)

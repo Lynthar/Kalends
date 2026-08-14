@@ -205,17 +205,27 @@ async fn settings_get(State(app): State<App>) -> R {
     Ok(Json(Value::Object(out)))
 }
 
+/// 一次请求里的设置要么全落、要么一条不落。
+///
+/// 曾经是边校验边写：前几个键已经生效、后一个键不是字符串就 400 返回，用户看到的是
+/// 「保存失败」而设置已经改了一半（实测复现过）。所以先把整份校验完，再在一个事务里写。
 async fn settings_put(State(app): State<App>, Json(b): Json<Value>) -> R {
-    let conn = app.db.lock().unwrap();
     let obj = b.as_object().ok_or_else(|| bad("需要对象"))?;
+    let mut pairs = Vec::with_capacity(obj.len());
     for (k, v) in obj {
-        let val = v.as_str().ok_or_else(|| bad("值必须是字符串"))?;
-        conn.execute(
+        let val = v.as_str().ok_or_else(|| bad(format!("{k} 的值必须是字符串")))?;
+        pairs.push((k, val));
+    }
+    let conn = app.db.lock().unwrap();
+    let tx = conn.unchecked_transaction()?;
+    for (k, val) in pairs {
+        tx.execute(
             "INSERT INTO settings(key,value) VALUES(?1,?2)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![k, val],
         )?;
     }
+    tx.commit()?;
     Ok(Json(json!({ "ok": true })))
 }
 

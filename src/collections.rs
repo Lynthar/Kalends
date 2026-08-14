@@ -1165,18 +1165,20 @@ async fn items_bulk_delete(State(app): State<App>, Json(b): Json<Value>) -> R {
     let conn = app.db.lock().unwrap();
     let mut logos = Vec::new();
     let tx = conn.unchecked_transaction()?;
+    // 报真正删掉的条数，不是请求里的 id 个数——不存在的 id 也算进去的话，这个数字就是编的
+    let mut deleted = 0usize;
     for id in &ids {
         let logo: Option<String> = tx
             .query_row("SELECT logo FROM items WHERE id=?1", [id], |r| r.get(0))
             .unwrap_or(None);
         logos.push(logo);
-        tx.execute("DELETE FROM items WHERE id=?1", [id])?;
+        deleted += tx.execute("DELETE FROM items WHERE id=?1", [id])?;
     }
     tx.commit()?;
     for logo in logos {
         remove_logo_file(&app, logo);
     }
-    Ok(Json(json!({ "ok": true, "deleted": ids.len() })))
+    Ok(Json(json!({ "ok": true, "deleted": deleted })))
 }
 
 /// 记一笔续费：写台账并按库的到期模型推进日期。
@@ -1369,7 +1371,12 @@ pub fn set_logo(
         "UPDATE items SET logo=?1,updated_at=datetime('now') WHERE id=?2",
         params![name, id],
     )?;
-    remove_logo_file(app, old);
+    // 文件名带的是**秒级**时间戳：同一秒里传第二张（换图时连点两下就够了）新旧同名，
+    // 于是刚写好的新文件恰好就是这里要删的"旧文件"——库里记着名字、文件却没了，
+    // 图标从此 404。同名时不必删：上面那次 write 已经原地覆盖过了。
+    if old.as_deref() != Some(name.as_str()) {
+        remove_logo_file(app, old);
+    }
     Ok(name)
 }
 
@@ -1496,23 +1503,6 @@ async fn body_head(resp: reqwest::Response, limit: usize) -> Vec<u8> {
     }
     out.truncate(limit);
     out
-}
-
-/// 整段读进来，累计超限就断开并报错（图标不该有这么大，读完再判等于白读）。
-async fn body_capped(resp: reqwest::Response, limit: usize) -> Result<Vec<u8>, String> {
-    let too_big = || format!("响应体超过 {} KB", limit >> 10);
-    if resp.content_length().is_some_and(|n| n > limit as u64) {
-        return Err(too_big());
-    }
-    let mut resp = resp;
-    let mut out = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("读取失败：{e}"))? {
-        if out.len() + chunk.len() > limit {
-            return Err(too_big());
-        }
-        out.extend_from_slice(&chunk);
-    }
-    Ok(out)
 }
 
 /// 从首页的 `<link rel="icon">` 里找图标地址。找不到就返回空，调用方退回常规路径。
@@ -1704,7 +1694,7 @@ async fn logo_fetch(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<V
                 continue;
             }
         };
-        let bytes = match body_capped(resp, ICON_MAX).await {
+        let bytes = match crate::notify::body_capped(resp, ICON_MAX).await {
             Ok(x) => x,
             Err(e) => {
                 last = e;

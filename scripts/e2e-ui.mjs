@@ -2022,8 +2022,8 @@ check('金额也原样', fx_afterSave?.price === fx_curRow.price, `${fx_curRow.p
 // 「在表单里改了币种能存回去」——currency 不是注册字段，itemBody 得单独读它那枚控件
 await evl(`openItemDialog('subs', state.subs.find(x => x.id === ${fx_curRow.id}))`);
 await sleep(450);
-// 币种控件是可选可打的 datalist 输入（不在内置汇率表里的币种也得录得进来），直接写值即可
-await evl(`document.querySelector('#item-fields .pricebox [data-f="currency"]').value = 'EUR'`);
+// 币种是「下拉 + 新选项」：EUR 在内置汇率表里，下拉本就有它，直接选中即可
+await evl(`document.querySelector('#item-fields .pricebox select[data-f="currency"]').value = 'EUR'`);
 await evl(`document.querySelector('#form-item').requestSubmit()`);
 await sleep(1200);
 const fx_changed = (await (await fetch(APP + 'api/collections/subs/items')).json()).find(r => r.id === fx_curRow.id);
@@ -2527,6 +2527,119 @@ check('媒体条目同样（405）', (await raw(`/api/media/${pa_m.id}`, 'PUT', 
 await fetch(`${APP}api/items/${pa_item.id}`, { method: 'DELETE' });
 await evl(`loadAll()`);
 await sleep(700);
+
+/* 17.31. 本轮修的几处，各补一条落在缺陷真会发作的那一刻的断言。 */
+
+// ① 台账要能自证。items.id 没带 AUTOINCREMENT，删掉最后一条再新建就会捡回同一个号，
+//    而台账从前是按 (kind, item_id) 回查当前条目名的——旧账于是改口叫了新条目的名字。
+const nx_coll = (await (await fetch(APP + 'api/collections')).json()).find(c => c.key === 'subs');
+const nx_item = await mk('subs', {
+  name: '台账身份', status: 'Active', cycle: 'monthly', next_renewal: day(5), price: 9, currency: 'USD',
+});
+await post(`/api/items/${nx_item.id}/renew`, {});
+const nx_ledger = async () => (await (await fetch(APP + 'api/ledger')).json())
+  .filter(l => l.item_id === nx_item.id && l.kind === 'subs');
+const nx_l1 = await nx_ledger();
+check('续费时把条目名与库名钉进了台账',
+  nx_l1[0]?.item_name === '台账身份' && nx_l1[0]?.coll_name === nx_coll.name,
+  JSON.stringify(nx_l1[0]));
+await fetch(`${APP}api/items/${nx_item.id}`, { method: 'DELETE' });
+check('条目删掉之后，那笔账仍然说得出是谁', (await nx_ledger())[0]?.item_name === '台账身份');
+const nx_new = await mk('subs', { name: '后来的条目', status: 'Active' });
+check('新条目确实捡到了同一个 id（这正是问题的前提）', nx_new.id === nx_item.id, `${nx_item.id} → ${nx_new.id}`);
+check('旧账没有跟着改口叫新条目的名字', (await nx_ledger())[0]?.item_name === '台账身份');
+
+// ② 同一秒里传第二张图标：文件名带的是秒级时间戳，新旧同名，
+//    从前是写完新文件转头把它当"旧文件"删了——库里记着名字，图标 404
+const nx_png = tail => new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...Array(tail).fill(0x41)]);
+const nx_up = body => fetch(`${APP}api/items/${nx_new.id}/logo?ext=png`, { method: 'POST', body }).then(r => r.json());
+await sleep(1050 - (Date.now() % 1000)); // 从一秒的开头起跑，保证两次落在同一秒里
+const nx_u1 = await nx_up(nx_png(8));
+const nx_u2 = await nx_up(nx_png(24));
+check('两次上传确实同名（同一秒）', nx_u1.logo === nx_u2.logo, `${nx_u1.logo} / ${nx_u2.logo}`);
+const nx_logoResp = await fetch(`${APP}logos/${nx_u2.logo}`);
+check('同秒重传之后图标还在，且是后传的那张',
+  nx_logoResp.status === 200 && (await nx_logoResp.arrayBuffer()).byteLength === 32,
+  `HTTP ${nx_logoResp.status}`);
+
+// ③ 有金额没币种的条目一分钱不进总额（engine::totals 要两样都在场才累加）。
+//    界面得点名，别让总额看着像"全都算进去了"
+await mk('subs', { name: '只填了金额', status: 'Active', cycle: 'monthly', next_renewal: day(9), price: 42 });
+await evl(`loadAll()`);
+await sleep(900);
+const nx_note = await evl(`document.querySelector('#totals-note').hidden ? '' : document.querySelector('#totals-note').textContent`);
+check('支出栏点名了"该计支出却没算进来"的条目',
+  nx_note.includes('只填了金额') && nx_note.includes('缺币种'), nx_note);
+
+// ④ 币种可以现打：TWD 这类不在内置汇率表里的币种，从前在界面上根本录不进第一笔
+await evl(`switchTab('subs')`);
+await sleep(300);
+const nx_priceTd = `document.querySelector('#subs-body tr[data-id="${nx_new.id}"] td[data-k="price"]')`;
+await evl(`${nx_priceTd}.scrollIntoView({ block: 'center' })`);
+await sleep(250);
+await evl(`${nx_priceTd}.click()`);
+await sleep(300);
+// 与表单里的 sel 字段同一套：下拉 + 「新选项，回车加入」（datalist 那条路早被拍板否掉）
+check('币种下拉旁有「新币种」输入', await evl(
+  `!!document.querySelector('.cellpop .sopts select[data-cur]')
+   && !!document.querySelector('.cellpop .sopts .cur-add')`) === true);
+await evl(`document.querySelector('.cellpop .cur-add').focus()`);
+await send('Input.insertText', { text: 'twd' });
+await send('Input.dispatchKeyEvent', {
+  type: 'keyDown', key: 'Enter', code: 'Enter', text: '\r', unmodifiedText: '\r',
+  windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+});
+await send('Input.dispatchKeyEvent', {
+  type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+});
+await sleep(250);
+check('回车把手打的币种加进下拉并选中（顺手大写）',
+  await evl(`document.querySelector('.cellpop [data-cur]')?.value`) === 'TWD');
+await evl(`(() => {
+  document.querySelector('.cellpop [data-price]').value = '350';
+  document.querySelector('.cellpop .cp-foot button').click();
+})()`);
+await sleep(900);
+const nx_saved = (await (await fetch(APP + 'api/collections/subs/items')).json()).find(r => r.id === nx_new.id);
+check('手打的币种存得进去，且规范成大写', nx_saved?.currency === 'TWD' && nx_saved?.price === 350,
+  JSON.stringify([nx_saved?.currency, nx_saved?.price]));
+
+// ⑤ 全量加载不再整份重建库表头：从前拿"被 initHead 注入过图标与拖拽结构的 innerHTML"
+//    去比对原始模板串，必然不相等，于是每次 loadAll 都白重建一遍并重新绑事件
+await evl(`document.querySelector('.tablewrap[data-tab="subs"] thead th').dataset.probe = 'kept'`);
+await evl(`loadAll()`);
+await sleep(900);
+check('loadAll 不再重建库表头',
+  await evl(`document.querySelector('.tablewrap[data-tab="subs"] thead th')?.dataset.probe`) === 'kept');
+
+// ⑥ 汇率是辅助资源：它拉不到也不该让整页渲染不出来（media-only 部署下 /api/fx 必然 404，
+//    从前它就在首屏那一批 Promise.all 里，媒体数据取回来了页面却是空的）
+await evl(`(() => { window._rf = window.fetch;
+  window.fetch = (u, o) => String(u).includes('/api/fx') ? Promise.reject(new Error('装作拉不到')) : window._rf(u, o); })()`);
+// 先把行清空：不清的话上一轮渲染的行还在，"渲染出来了"这条断言就没有区分度
+// （首屏被拖垮时 renderAll 根本不会执行，表格停在旧内容上）
+await evl(`document.querySelector('#subs-body').innerHTML = ''`);
+await evl(`loadAll().catch(e => e)`);
+await sleep(1000);
+check('汇率拉不到，表格照常渲染',
+  await evl(`document.querySelectorAll('#subs-body tr').length`) > 0);
+await evl(`window.fetch = window._rf`);
+await evl(`loadAll()`);
+await sleep(900);
+
+// ⑦ 海报墙是媒体库的默认视图，卡片只挂 onclick 就等于键盘用户在这一屏无路可走
+await evl(`(() => { state.page = 'media'; document.querySelector('#page-renewals').hidden = true;
+  document.querySelector('#page-media').hidden = false; views.media.view = 'wall'; renderMedia(); })()`);
+await sleep(500);
+check('海报卡进 Tab 序且自报身份', await evl(
+  `(() => { const c = document.querySelector('#m-wall .card');
+     return c?.tabIndex === 0 && c.getAttribute('role') === 'button' && !!c.getAttribute('aria-label'); })()`) === true);
+await evl(`document.querySelector('#m-wall .card').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`);
+await sleep(400);
+check('回车能打开详情', await evl(`document.querySelector('#dlg-media')?.open`) === true);
+await evl(`document.querySelector('#dlg-media').close(); state.page = 'renewals';
+  document.querySelector('#page-media').hidden = true; document.querySelector('#page-renewals').hidden = false;`);
+await sleep(300);
 
 /* 18. 库删光也不能把界面打崩。放在最后跑——这一段会把预置库连数据一起删掉。
    预置库过去在界面上删不掉（后端一直放行、文档也写着可删），而新库的表格容器

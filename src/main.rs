@@ -36,8 +36,30 @@ pub struct App {
     pub modules: Vec<String>,
 }
 
+/// `kalends --health`：容器 HEALTHCHECK 用的自检。运行镜像里没有 curl / wget，与其为这一件事
+/// 往镜像里装个包（体积与 CVE 面都得跟着走），不如让二进制自己去问一次 /api/health。
+///
+/// 设了 PIN 时这个请求会被门禁挡成 401——那恰恰说明服务活着，所以判据是"答得上话"
+/// （任何 5xx 以下的响应），而不是 200。
+async fn health_probe() -> ! {
+    let addr = std::env::var("KALENDS_ADDR").unwrap_or_else(|_| "127.0.0.1:4180".into());
+    // 0.0.0.0 是监听地址不是可连地址（容器里恒是它）
+    let target = addr.replace("0.0.0.0:", "127.0.0.1:").replace("[::]:", "[::1]:");
+    let alive = match reqwest::get(format!("http://{target}/api/health")).await {
+        Ok(r) => r.status().as_u16() < 500,
+        Err(e) => {
+            eprintln!("health: {e}");
+            false
+        }
+    };
+    std::process::exit(if alive { 0 } else { 1 });
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args().any(|a| a == "--health") {
+        health_probe().await;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();

@@ -5,6 +5,10 @@
 结果文件为 Notion MCP 查询输出（SQL 别名列或 view 模式原始列名均可，自动识别改名）。
 目标实例默认本机，可用 KALENDS_URL 覆盖；设了 PIN 时用 KALENDS_PIN 传入。
 按自己的 Notion 列名改 RENAMES 映射即可复用。
+
+三个续费库走通用接口 POST /api/collections/{key}/items：引擎要用的字段是 items 的真列，
+域字段（分类、支付方式、VPS 的地点线路规格…）一律进 extra，键即字段键——由 item_body 分流。
+目标库得先存在（预置的 subs/sims/vps，或按模板新建的库，把库键传给 add_item）。
 """
 import datetime as dt
 import json
@@ -35,6 +39,28 @@ def post(path, payload, method='POST'):
 
 def clean(d):
     return {k: v for k, v in d.items() if v is not None and v != ''}
+
+
+# ── 条目的形状：引擎要用的字段是 items 的真列，域字段一律进 extra（键即字段键）──
+REAL_COLS = {'name', 'parent_id', 'status', 'price', 'currency', 'cycle', 'cycle_days',
+             'next_renewal', 'last_renewed', 'url', 'notes', 'logo'}
+# 三个续费库的状态词表 2026-07 起统一为英文（迁移 0006）；Notion 导出里还是中文
+STATUS_EN = {'启用': 'Active', '准备': 'Planned', '未启用': 'Unused',
+             '预结束': 'Ending', '已结束': 'Ended'}
+
+
+def item_body(d):
+    """把一个平铺的字段字典拆成 {真列..., extra: {域字段...}}。"""
+    body = clean({k: v for k, v in d.items() if k in REAL_COLS})
+    extra = clean({k: v for k, v in d.items() if k not in REAL_COLS})
+    if extra:
+        body['extra'] = extra
+    return body
+
+
+def add_item(coll, d):
+    """往某个库里加一条。coll 是库键（subs / sims / vps，或自建库的 k<N>）。"""
+    return post(f'/api/collections/{coll}/items', item_body(d))
 
 
 # view 模式返回原始列名 → 统一改名为 SQL 别名版；formulaResult 引用列直接丢弃
@@ -76,9 +102,11 @@ def maybe_rename(rows, table):
         for k in ('marked_at', 'next_renewal', 'last_renewed', 'next_date'):
             if isinstance(nr.get(k), str):
                 nr[k] = nr[k][:10]
-        for k in ('year', 'rating', 'douban_votes', 'cycle_days'):
-            if isinstance(nr.get(k), float):
-                nr[k] = int(nr[k])
+        # Notion 的数字一律是浮点：整数值就还原成整数，否则核数内存这些域字段会
+        # 一路以 "2.0" 的样子进 extra 并这么显示在表格里
+        for k, v in list(nr.items()):
+            if isinstance(v, float) and v.is_integer():
+                nr[k] = int(v)
         out.append(nr)
     return out
 
@@ -152,14 +180,14 @@ def import_subs(files):
         price, cur, conv = orig_price(r.get('price_usd'), r.get('notes'))
         if conv:
             converted.append(f"{name}: USD {r.get('price_usd')} → {cur} {price}")
-        body = clean({
+        body = {
             'name': name, 'status': r.get('status') or 'Planned',
             'category': r.get('category'), 'cycle': CYCLE.get(r.get('cycle_raw') or ''),
             'price': price, 'currency': cur,
             'next_renewal': r.get('next_renewal'),
             'payment_method': r.get('payment_method'), 'notes': r.get('notes'),
-        })
-        res = post('/api/subscriptions', body)
+        }
+        res = add_item('subs', body)
         url2id[r['url']] = res['id']
         bodies[r['url']] = body
     linked = 0
@@ -173,8 +201,8 @@ def import_subs(files):
             purls = [raw]
         pid = next((url2id[u] for u in purls if u in url2id), None)
         if pid:
-            post(f"/api/subscriptions/{url2id[r['url']]}",
-                 dict(bodies[r['url']], parent_id=pid), 'PUT')
+            # 条目更新是局部更新：只发这一个键，其余字段后端原样保留
+            post(f"/api/items/{url2id[r['url']]}", {'parent_id': pid}, 'PATCH')
             linked += 1
     print(f'订阅：导入 {len(url2id)}，父子关系 {linked}，原币还原 {len(converted)} 条：')
     for line in converted:
@@ -204,12 +232,15 @@ def import_sims(files):
                 forms = json.loads(forms) if isinstance(forms, str) else (forms or [])
             except Exception:
                 forms = []
-            post('/api/sims', clean({
+            raw_status = r.get('status') or '未启用'
+            add_item('sims', {
                 'name': name, 'phone_number': r.get('phone_number'),
-                'status': r.get('status') or '未启用', 'forms': forms,
+                'status': STATUS_EN.get(raw_status, raw_status), 'forms': forms,
                 'keepalive_action': r.get('keepalive_action'),
+                # 保号周期并进了通用周期模型：自定义天数 = cycle 'days' + cycle_days
+                'cycle': 'days' if cycle_days else None,
                 'cycle_days': cycle_days, 'last_renewed': last, 'notes': r.get('notes'),
-            }))
+            })
             n += 1
     print(f'SIM：导入 {n}；倒推 {len(derived)} 条：')
     for line in derived:
@@ -235,9 +266,11 @@ def import_vps(files):
                     return json.loads(v) if isinstance(v, str) else (v or [])
                 except Exception:
                     return []
-            post('/api/vps', clean({
-                'vendor': vendor, 'product': r.get('product'),
-                'status': r.get('status') or '未启用', 'purpose': r.get('purpose'),
+            raw_status = r.get('status') or '未启用'
+            add_item('vps', {
+                # 商家是条目名，产品名走库属性 subtitle（VPS 的「商家 · 产品」）
+                'name': vendor, 'product': r.get('product'),
+                'status': STATUS_EN.get(raw_status, raw_status), 'purpose': r.get('purpose'),
                 'locations': arr('locations'), 'routes': arr('routes'),
                 'cores': r.get('cores'), 'ram_gb': r.get('ram_gb'),
                 'storage_gb': r.get('storage_gb'), 'storage_type': r.get('storage_type'),
@@ -248,7 +281,7 @@ def import_vps(files):
                 'currency': 'USD' if r.get('price') is not None else None,
                 'cycle': cycle, 'cycle_days': cycle_days,
                 'last_renewed': r.get('last_renewed'),
-            }))
+            })
             n += 1
     print(f'VPS：导入 {n}')
 

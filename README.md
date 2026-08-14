@@ -17,7 +17,7 @@ Each collection owns its columns and decides how due dates work: store the next 
 
 Prices are stored in their original currency and totalled per currency; nothing is quietly converted. Items nest one level deep (service → tier), so the plans you are comparing and the one you actually pay for sit in the same table. Marking something renewed moves the date on and writes a ledger entry you can read back from the settings page.
 
-Status values carry meaning rather than decoration. Each one declares whether it counts toward spend, fires alerts, and shows on the timeline, and you flip those three from the column header menu. `Deferred` has all three off, which turns it into a price-comparison shelf. `Ending` keeps its calendar entry and stops nagging.
+Status values carry meaning rather than decoration. Each one declares whether it counts toward spend, fires alerts, and shows on the timeline, and you flip those three from the column header menu. `Deferred` has all three off, which turns it into a price-comparison shelf. `Ending` keeps its calendar entry and stops its own reminders — the daily digest still lists it, because the digest is the whole timeline.
 
 ### Tables
 
@@ -27,7 +27,7 @@ Columns are data, so a new collection arrives with a working set. Add your own, 
 
 ### Reminders and calendar
 
-Telegram bot and SMTP mail, N-days-before thresholds plus a daily digest, each channel with its own proxy setting. Sends are deduplicated on (kind, item, due date, threshold, channel) and catch up on whatever was missed while the server was down. There is also an ICS feed whose events carry a one-day alarm — subscribe from your phone's calendar and you can skip push notifications entirely.
+Telegram bot and SMTP mail, N-days-before thresholds plus a daily digest. Telegram can go through its own proxy. Sends are deduplicated on (kind, item, due date, threshold, channel) and catch up on whatever was missed while the server was down. There is also an ICS feed whose events carry a one-day alarm — subscribe from your phone's calendar and you can skip push notifications entirely.
 
 ### Media library
 
@@ -35,7 +35,7 @@ Douban-shaped fields (directors, writers, genres, a snapshot of the Douban ratin
 
 ### Backups and privacy
 
-A SQLite snapshot every night after 03:30, 14 kept on a rolling basis, plus a plain-text JSONL dump of every table that stays readable without Kalends. Optional PIN gate. No telemetry: the only outbound traffic is the TMDB lookups you trigger and the notification channels you configure.
+A SQLite snapshot every night after 03:30, 14 kept on a rolling basis, plus a plain-text JSONL dump of every table that stays readable without Kalends. Optional PIN gate. No telemetry, and nothing leaves the machine on its own: the outbound traffic is a TMDB lookup, an exchange-rate refresh or a favicon fetch — each one only when you ask for it — plus the notification channels you configure.
 
 You can ship half of it. `KALENDS_MODULES=renewals` or `=media` removes the other half's routes, interface and background jobs.
 
@@ -71,7 +71,7 @@ Keep the SQLite file on local disk. Locking over SMB or NFS is not reliable enou
 
 价格按原币存、分币种统计，不替你折算。条目可以套一层父子（服务 → 套餐档位），于是比价的那几档和你真在付的那档待在同一张表里。点一下「已续费」把日期往后推，同时记一笔账，可以在设置页里回看。
 
-状态不只是个标签。每个状态值自己声明计不计支出、发不发提醒、上不上时间线，这三个勾在表头菜单里改。`Deferred` 三个全关，于是成了比价目录；`Ending` 留在日历里，但不再提醒你。
+状态不只是个标签。每个状态值自己声明计不计支出、发不发提醒、上不上时间线，这三个勾在表头菜单里改。`Deferred` 三个全关，于是成了比价目录；`Ending` 留在日历里，不再单独提醒你——每日摘要仍然会列出它，因为摘要是到期时间线的全景。
 
 ### 表格
 
@@ -81,7 +81,7 @@ Keep the SQLite file on local disk. Locking over SMB or NFS is not reliable enou
 
 ### 提醒与日历
 
-Telegram Bot 与 SMTP 邮件，提前 N 天逐档提醒加每日摘要，两个渠道各自可配代理。发送按（种类, 条目, 到期日, 档位, 渠道）去重，停机期间漏掉的会补发。另有 ICS 订阅地址，事件自带提前一天的闹钟——手机日历订上，推送就可以不要了。
+Telegram Bot 与 SMTP 邮件，提前 N 天逐档提醒加每日摘要，Telegram 可以单独走代理。发送按（种类, 条目, 到期日, 档位, 渠道）去重，停机期间漏掉的会补发。另有 ICS 订阅地址，事件自带提前一天的闹钟——手机日历订上，推送就可以不要了。
 
 ### 媒体库
 
@@ -89,7 +89,7 @@ Telegram Bot 与 SMTP 邮件，提前 N 天逐档提醒加每日摘要，两个�
 
 ### 备份与隐私
 
-每天 03:30 之后做一份 SQLite 快照，滚动保留 14 份；同时把每张表导成 JSONL 明文，不装 Kalends 也读得懂。可选 PIN 门禁。零遥测：出网只有你主动触发的 TMDB 抓取，和你自己配的通知渠道。
+每天 03:30 之后做一份 SQLite 快照，滚动保留 14 份；同时把每张表导成 JSONL 明文，不装 Kalends 也读得懂。可选 PIN 门禁。零遥测，也不会自己往外发东西：出网只有 TMDB 抓取、拉取实时汇率、从网站取图标这三件——都得你点一下才发生——加上你自己配的通知渠道。
 
 只要一半也行：`KALENDS_MODULES=renewals` 或 `=media`，另一半的接口、界面、后台任务整个不存在。
 
@@ -103,7 +103,7 @@ TMDB 抓取要先在设置页填一个免费申请的 API key。手机上「添�
 
 生产部署（Docker Compose、反向代理、单模块开关）见 [deploy/DEPLOY.md](deploy/DEPLOY.md)。环境变量：`KALENDS_ADDR`（默认 `127.0.0.1:4180`）、`KALENDS_DATA`（默认 `./data`）、`KALENDS_MODULES`（默认 `renewals,media`）。
 
-SQLite 文件务必放本地磁盘，SMB / NFS 的文件锁不够可靠，别拿账本去赌。被墙的网络环境里，元数据抓取和通知渠道可以分别配代理。
+SQLite 文件务必放本地磁盘，SMB / NFS 的文件锁不够可靠，别拿账本去赌。被墙的网络环境里，设置页有一个共用的出网代理（管 TMDB、汇率、取图标），Telegram 另有自己的一格。
 
 ### 仓库结构
 

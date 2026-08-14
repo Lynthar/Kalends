@@ -93,6 +93,28 @@ fn build_client(
     Ok(builder.build()?)
 }
 
+/// 整段读进来，累计超限就断开并报错（读完再判等于白读）。
+///
+/// **reqwest 没有默认上限**，唯一的边界是上面那 30s 总超时——也就是「带宽 × 30s」：
+/// 千兆链路下最坏是数 GB 进到这个单二进制进程的内存里，而容器内存配额常只有几百 MB，
+/// OOM kill 会把通知调度一起带走。取图标与 TMDB 图片都走它：图标那侧的目标是用户
+/// 自己填的网址（可能被劫持），TMDB 那侧虽是可信源，但中间还隔着一层用户配的代理。
+pub async fn body_capped(resp: reqwest::Response, limit: usize) -> Result<Vec<u8>, String> {
+    let too_big = || format!("响应体超过 {} KB", limit >> 10);
+    if resp.content_length().is_some_and(|n| n > limit as u64) {
+        return Err(too_big());
+    }
+    let mut resp = resp;
+    let mut out = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("读取失败：{e}"))? {
+        if out.len() + chunk.len() > limit {
+            return Err(too_big());
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
 pub async fn send_telegram(cfg: &TelegramCfg, text: &str) -> Result<()> {
     let client = http_client(&cfg.proxy)?;
     let resp = client
@@ -351,6 +373,16 @@ pub async fn tick(db: &Db) -> Result<()> {
     Ok(())
 }
 
+pub async fn scheduler(db: Db) {
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    loop {
+        if let Err(e) = tick(&db).await {
+            tracing::warn!("notify tick failed: {e:#}");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(900)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,15 +435,5 @@ mod tests {
         assert!(line(&full).contains("USD 15.50"));
         let half = json!({ "days_left": 1, "name": "x", "due": "2026-08-01", "price": 15.5 });
         assert!(!line(&half).contains("15.50"));
-    }
-}
-
-pub async fn scheduler(db: Db) {
-    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-    loop {
-        if let Err(e) = tick(&db).await {
-            tracing::warn!("notify tick failed: {e:#}");
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(900)).await;
     }
 }

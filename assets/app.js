@@ -35,9 +35,11 @@ const M_STATUSES = ['想看', '在看', '看过', '弃'];
 
 function toast(msg, err) {
   const t = $('#toast');
-  t.textContent = msg;
   t.classList.toggle('err', !!err);
+  // 先露出来再写文本：hidden 的元素不在无障碍树里，趁它还藏着改内容，
+  // live region 的那次变更就没人听见了
   t.hidden = false;
+  t.textContent = msg;
   clearTimeout(t._h);
   t._h = setTimeout(() => { t.hidden = true; }, err ? 4200 : 1800);
 }
@@ -109,12 +111,20 @@ function safeUrl(u) {
 async function loadAll() {
   const hasR = MODULES.includes('renewals');
   const hasM = MODULES.includes('media');
+  // 汇率表属于续费模块（/api/fx 挂在 renewals 路由上）。这一句曾经不看模块开关：
+  // media-only 部署下它必然 404，而它就在首屏这一批 Promise.all 里——媒体数据明明取回来了，
+  // 整页却渲染不出来，只闪一下错误 toast（实测复现过）。
+  // 拉不到也不该拖垮首屏：折算是呈现层的可选视图，没有汇率就按原币显示，并如实说一声。
+  const noFx = { display: '', rates: {}, live: [], baseline_period: '', source: '' };
   // 先取概览（里面带库清单）与设置，之后才知道有哪些库要拉条目
   [state.overview, state.settings, state.media, state.fx] = await Promise.all([
     hasR ? api('/api/overview') : { today: '', upcoming: [], undated: [], totals: [], collections: [] },
     api('/api/settings'),
     hasM ? api('/api/media') : [],
-    api('/api/fx'), // 汇率表整份下发，折算在呈现层做
+    hasR ? api('/api/fx').catch(e => {
+      toast('汇率表没取到，费用按原币显示：' + e.message, true);
+      return noFx;
+    }) : noFx,
   ]);
   const wins = ['7', '14', '30', '60', '90', '180', 'all'];
   state.upWindow = wins.includes(state.settings['ui.upcoming_days'])
@@ -599,11 +609,13 @@ const TYPE_ICON = {
 const TKEYS = {};
 const colKeys = tab => TKEYS[tab];
 
-function initHead(tab) {
-  const thead = $(HEAD_SEL[tab]);
-  const ths = thead.querySelectorAll('th');
+/* 本机视图偏好对着当前列集结算一次：列集变了做温和迁移、名称列无条件捞回、筛选清洗。
+
+   **它与"重建表头"是两个节奏**：表头只在列集真的变了时才重建（见 ensureCollDom），
+   而偏好来自 localStorage——可能是另一台设备、另一个标签页写的，也可能是这套代码从前
+   放行过的坏值（隐藏名称列就是），所以每次渲染都要结算一遍。 */
+function settleView(tab, keys) {
   const v = views[tab];
-  const keys = [...ths].map(t => t.dataset.k);
   TKEYS[tab] = keys;
   if (!Array.isArray(v.keys)) {
     // 旧版（数字 oi 键）或首装：布局偏好作废重来
@@ -628,6 +640,12 @@ function initHead(tab) {
   v.keys = keys;
   saveViews();
   sanitizeFilters(tab);
+}
+
+function initHead(tab) {
+  const thead = $(HEAD_SEL[tab]);
+  const ths = thead.querySelectorAll('th');
+  settleView(tab, [...ths].map(t => t.dataset.k));
   ths.forEach(th => {
     th.dataset.label = th.textContent.trim();
     if (th.classList.contains('ops')) {
@@ -1967,15 +1985,17 @@ function currencyOptions(tab, cur) {
   return [...[...used].sort(), ...rest];
 }
 
-/* 币种控件：**可选可打**。这里曾经是个纯 `<select>`，候选只有"用过的 ∪ 汇率表里有的"——
-   于是持有 TWD、AED 这类不在欧洲央行那 30 种里的币种时，界面上根本没法录第一笔：
-   要么不填币种（那笔钱从此不进支出总额，见 `engine::uncounted`），要么填个别的。
-   datalist 既给候选又允许现打，且是原生控件，键盘可达不用另外操心。 */
-function currencyInput(tab, cur, listId, attrs) {
+/* 币种控件：下拉 + 「新选项，回车加入」，与表单里的 sel 字段同一套（`.sopts`/`initSoptAdd`）。
+   这里曾经是个纯 `<select>`，候选只有"用过的 ∪ 汇率表里有的"——于是持有 TWD、AED 这类
+   不在欧洲央行那 30 种里的币种时，界面上根本没法录第一笔：要么不填币种（那笔钱从此不进
+   支出总额，见 `engine::uncounted`），要么填个别的。
+   **不用 datalist**：那条路 2026-08-06 拍板否过——iOS Safari 上建议列表会盖住输入框，
+   而全 iOS 都是 WebKit，嗅探不掉。同一个问题在这个项目里已经有惯用解，就别造第二种。 */
+function currencyPicker(tab, cur, attrs) {
   const opts = currencyOptions(tab, cur);
-  return `<input class="fp-q cur-in" list="${listId}" ${attrs} placeholder="币种"
-    maxlength="8" autocomplete="off" value="${esc(cur || '')}">
-    <datalist id="${listId}">${opts.map(c => `<option value="${esc(c)}">`).join('')}</datalist>`;
+  return `<span class="sopts"><select class="mini-select" ${attrs}><option value="">—</option>${
+    opts.map(c => `<option value="${esc(c)}"${c === cur ? ' selected' : ''}>${esc(c)}</option>`).join('')
+  }</select><input class="sopt-add cur-add" placeholder="新币种，回车加入" maxlength="8"></span>`;
 }
 
 /* 费用格是复合格：金额 + 币种（币种不再单独占一列，2026-08-07 合并）。
@@ -1985,8 +2005,9 @@ function priceEditor(tab, it, td) {
   const cur = fxCode(it.currency);
   box.insertAdjacentHTML('beforeend', `<div class="fp-form">
     <input class="fp-q" type="number" step="any" data-price placeholder="金额" value="${esc(String(it.price ?? ''))}">
-    ${currencyInput(tab, cur, 'cur-codes-cell', 'data-cur')}
+    ${currencyPicker(tab, cur, 'data-cur')}
   </div><div class="cp-foot"><button type="button" class="btn primary mini">保存</button></div>`);
+  initSoptAdd(box.querySelector('.cur-add'), fxCode);
   const amt = box.querySelector('[data-price]');
   const sel = box.querySelector('[data-cur]');
   const commit = () => {
@@ -1998,7 +2019,13 @@ function priceEditor(tab, it, td) {
     });
   };
   box.querySelector('.cp-foot button').onclick = commit;
-  box.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') commit(); });
+  box.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || e.target.tagName !== 'INPUT') return;
+    // 「新币种」框里的回车是"把它加进候选"，不是"保存"——不放行的话这一格里的回车
+    // 会被这条监听抢走，浮层当场关掉，刚打的币种一次都存不进去
+    if (e.target.classList.contains('sopt-add')) return;
+    commit();
+  });
   placePop(box, td);
   amt.focus();
 }
@@ -2117,9 +2144,11 @@ function syncFxPanel() {
   const cur = fxCode(state.settings['fx.display']);
   sel.innerHTML = '<option value="">不折算（分币种显示）</option>'
     + codes.map(c => `<option value="${esc(c)}"${c === cur ? ' selected' : ''}>${esc(c)}${fx.rates[c] ? '' : '（无汇率）'}</option>`).join('');
-  $('#fx-status').textContent = fx.live?.length
-    ? `实时汇率 ${fx.live.length} 种，取自 ${fx.fetched_at || '未知日期'}（${fx.source}）；其余用内置平均汇率 ${fx.baseline_period}`
-    : `当前用内置平均汇率（${fx.baseline_period}）。未拉过实时汇率——这是唯一一处按需出网，不点就不发生。`;
+  $('#fx-status').textContent = !fx.baseline_period
+    ? '汇率表没有加载，费用一律按原币显示。'
+    : fx.live?.length
+      ? `实时汇率 ${fx.live.length} 种，取自 ${fx.fetched_at || '未知日期'}（${fx.source}）；其余用内置平均汇率 ${fx.baseline_period}`
+      : `当前用内置平均汇率（${fx.baseline_period}）。未拉过实时汇率——这是唯一一处按需出网，不点就不发生。`;
 }
 
 $('#fx-refresh').onclick = async e => {
@@ -2343,6 +2372,17 @@ function renderMedia() {
     rows.forEach((it, idx) => {
       const card = document.createElement('div');
       card.className = 'card';
+      // 海报墙是媒体库的默认视图，而卡片只挂 onclick 就等于键盘用户在这一屏无路可走
+      //（表格视图那侧早有 ⤢ 与表头菜单的键盘入口，这里一直缺）。与 th 同一套做法：
+      // 自己补 tabIndex + role，Enter/空格都开详情，空格要 preventDefault 否则滚页。
+      card.tabIndex = 0;
+      card.setAttribute('role', 'button');
+      card.setAttribute('aria-label', `${it.title || '未命名'} 详情`);
+      card.onkeydown = e => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        openMediaDialog(it);
+      };
       card.style.setProperty('--i', Math.min(idx, 20));
       const badge = it.status !== '看过' ? `<span class="badge">${esc(it.status)}</span>` : '';
       const cov = it.cover
@@ -2820,11 +2860,19 @@ function ensureCollDom(c) {
   COLS[key] = Object.fromEntries(shownFields(key).map(f => [f.key, colFromField(key, f)]));
   const head = $(HEAD_SEL[key]);
   const want = collThead(key);
-  if (head.rows[0].innerHTML !== want) {
+  // 与**上次生成的那份模板串**比，不能与表头此刻的 innerHTML 比：initHead 会往 th 里
+  // 注入类型图标、排序指示、拖拽与缩放结构，比完必然不相等——于是每次 loadAll（保存一个
+  // 格子、拖一行、改个设置都会触发）都在整份重建库表头、重新绑一遍事件，白干且会丢焦点。
+  if (THEAD_HTML[key] !== want) {
     head.rows[0].innerHTML = want;
     THEAD_HTML[key] = want;
     head.closest('.tablewrap').querySelector('.newrow')?.remove();
-    initHead(key);
+    initHead(key); // 它自己会结算一次偏好
+  } else {
+    // 表头没重建，视图偏好照样每次结算（两个节奏，见 settleView）。
+    // 列键**从字段集现取**，不能从 thead 的 DOM 里取——那份可能已经被列序拖动重排过，
+    // 而 TKEYS 记的必须是模板序（tbody 恒按模板序渲染，td 靠它对上 data-k）
+    settleView(key, [...shownFields(key).map(f => f.key), 'ops']);
   }
 }
 
@@ -2841,6 +2889,7 @@ function syncColls() {
     document.querySelector(`.tab[data-tab="${k}"]`)?.remove();
     w.remove();
     delete views[k]; // 本机视图偏好跟着走，否则 localStorage 里堆一堆已删库的列宽/筛选
+    delete THEAD_HTML[k]; // 表头快照也跟着走：容器都撤了，留着它会让同键的新表跳过重建
     // 落到剩下的第一个库；一个都不剩时 key 是 undefined，交给下面的守卫
     if (state.tab === k) switchTab(colls()[0]?.key);
   });
@@ -3032,14 +3081,15 @@ function initMoptAdd(inp) {
 // 开放词表（币种/分类/注册商…）建库时是空的，没有这个入口的话首装第一条就填不出来——
 // 只能先存个残缺条目、再回表格用就地编辑器把值造出来。词表本就从数据里长，
 // 所以这里只管把值选上，存不存进词表交给保存后的常规流程。
-function initSoptAdd(inp) {
+// tr：落进下拉之前的规范化（币种要统一成大写，其余原样）
+function initSoptAdd(inp, tr = v => v) {
   inp.addEventListener('keydown', e => {
     if (e.key !== 'Enter') return;
     e.preventDefault(); // 不吃掉的话表单直接隐式提交
-    const val = inp.value.trim();
+    const val = tr(inp.value.trim());
     inp.value = '';
     if (!val) return;
-    const sel = inp.parentElement.querySelector('select[data-f]');
+    const sel = inp.parentElement.querySelector('select');
     if (![...sel.options].some(o => o.value === val)) {
       sel.appendChild(Object.assign(document.createElement('option'), { value: val, textContent: val }));
     }
@@ -3086,7 +3136,8 @@ function fieldControl(key, f, it) {
     const n = +val || 0;
     lab.innerHTML = `<span>${esc(f.name || f.key)}</span>
       <span class="stars">${[1, 2, 3, 4, 5].map(i =>
-        `<button type="button" data-v="${i}"${i <= n ? ' class="lit"' : ''}>★</button>`).join('')
+        // 五颗一模一样的 ★ 读出来是五个"星号按钮"，必须自报第几颗
+        `<button type="button" data-v="${i}" aria-label="${i} 星"${i <= n ? ' class="lit"' : ''}>★</button>`).join('')
       }<button type="button" class="star-clear" data-v="">清除</button></span>
       <input type="hidden" data-f="${esc(f.key)}" value="${n || ''}">`;
   } else if (f.ftype === 'sel') {
@@ -3107,9 +3158,8 @@ function fieldControl(key, f, it) {
     lab.className = 'span2';
     lab.innerHTML = `<span>${esc(f.name || f.key)}</span>
       <span class="pricebox"><input type="number" step="any" data-f="price" value="${esc(val)}">
-      <select data-f="currency"><option value="">—</option>${
-        currencyOptions(key, cur).map(c => `<option value="${esc(c)}"${c === cur ? ' selected' : ''}>${esc(c)}</option>`).join('')
-      }</select></span>`;
+      ${currencyPicker(key, cur, 'data-f="currency"')}</span>`;
+    initSoptAdd(lab.querySelector('.cur-add'), fxCode);
   } else {
     const type = f.ftype === 'num' ? 'number' : f.ftype === 'date' ? 'date' : f.ftype === 'tel' ? 'tel' : f.ftype === 'url' ? 'url' : f.ftype === 'email' ? 'email' : 'text';
     // 标出网址输入框：「从网站取图标」认这个标记，所以自建的网址列同样能用

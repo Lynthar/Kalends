@@ -85,6 +85,16 @@ pub fn seed_defaults(conn: &Connection) -> Result<()> {
 /// user_version 也跟着一起提交，不会出现"表建了但版本没推进"的中间态。
 fn migrate(conn: &Connection) -> Result<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    // 版本比这个二进制认识的还高＝这份数据是更新的 Kalends 写的（多半是回滚了部署）。
+    // 照常启动的话旧代码会按旧结构读写新结构的库：列没了当成空、新列一律写不进去，
+    // 而界面上一切正常。宁可起不来也别让它静默写坏账本。
+    let known = MIGRATIONS.len() as i64;
+    if current > known {
+        return Err(anyhow::anyhow!(
+            "数据库版本 {current} 高于本二进制支持的 {known}：这份数据是更新版本的 Kalends 写的，\
+             换回那个版本启动，或从 backups/ 里的快照恢复"
+        ));
+    }
     for (i, sql) in MIGRATIONS.iter().enumerate() {
         let target = (i + 1) as i64;
         if current >= target {
@@ -103,4 +113,24 @@ fn migrate(conn: &Connection) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回滚部署（新版本跑过一次、又换回旧二进制）时必须起不来：旧代码按旧结构读写一个
+    /// 新结构的库，界面上看不出任何异常，等发现时已经写坏了。
+    #[test]
+    fn a_database_from_a_newer_build_refuses_to_start() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "user_version", MIGRATIONS.len() as i64 + 1)
+            .unwrap();
+        let err = migrate(&conn).unwrap_err().to_string();
+        assert!(err.contains("高于本二进制支持的"), "{err}");
+        // 版本正好等于已知迁移数＝跑满了的正常库，不能误伤
+        conn.pragma_update(None, "user_version", MIGRATIONS.len() as i64)
+            .unwrap();
+        assert!(migrate(&conn).is_ok());
+    }
 }
