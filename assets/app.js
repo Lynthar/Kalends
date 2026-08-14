@@ -258,12 +258,18 @@ function renderTotals() {
     el.appendChild(div);
   }
   $('#totals-hint').textContent = fxDisplay() ? `仅在订项，折算成 ${fxDisplay()}` : '仅在订项，分币种';
-  // 折算时把折不出来的币种如实说出来，别让总额看着像"全都算进去了"
+  // 总额漏掉的东西一律说出来，别让它看着像"全都算进去了"：
+  // ① 开了折算但没有报价的币种；② 该计支出却缺了金额/币种/周期一项的条目（engine 点的名）
   const missed = fxDisplay() ? state.overview.totals.filter(t => fxConv(t.monthly, t.currency, fxDisplay()) == null) : [];
-  $('#totals-note').hidden = !missed.length;
-  if (missed.length) {
-    $('#totals-note').textContent = `${missed.map(t => t.currency).join('、')} 没有汇率，未计入`;
+  const gaps = state.overview.uncounted || [];
+  const notes = [];
+  if (missed.length) notes.push(`${missed.map(t => t.currency).join('、')} 没有汇率，未计入`);
+  if (gaps.length) {
+    const names = gaps.slice(0, 3).map(g => `${g.name}（缺${g.missing}）`).join('、');
+    notes.push(`${gaps.length} 项没算进来：${names}${gaps.length > 3 ? ' 等' : ''}`);
   }
+  $('#totals-note').hidden = !notes.length;
+  $('#totals-note').textContent = notes.join('；');
 }
 
 /// 开了折算就并成一笔，否则原样分币种。折不出来的币种不并入，单独留一行。
@@ -1743,47 +1749,22 @@ function renderViewPills(tab) {
   }
 }
 
-/* ── 点格即编：点单元格就地编辑，保存 = 整行 PUT（后端是全量替换语义）──
+/* ── 点格即编：点单元格就地编辑，保存 = 一次 PATCH（只发这次动过的键）──
    复合格（名称/商家产品/规格/周期）弹多输入迷你表单；表外字段仍走「编辑」全表单。 */
-// 行对象 → PUT 全量体（与各编辑表单发的字段集一致，缺一项就会被后端置空）
-const ROW_BODY = {
-  media: it => {
-    const b = { extra: it.extra || {} };
-    for (const k of M_STR) b[k] = it[k] ?? '';
-    for (const k of [...M_INT, ...M_REAL]) b[k] = it[k] ?? undefined;
-    if (it.cover) b.cover = it.cover;
-    return b;
-  },
-};
 
-/* 行对象 → 整行 PUT 的体。后端是全量替换语义：body 里漏一列，那一列就被置空。
-   **不能只按字段注册表拼**——注册表管的是「界面上有哪些列」，并不覆盖每个真列：
-   SIM 的周期恒为自定义天数，当初就没注册 cycle 列，于是 SIM 条目每编辑一次
-   周期就被清一次（剩余天数算不出、整条掉出到期时间线与 ICS）；parent_id 与 logo
-   另有专门 UI，同样没注册。所以先按行数据铺满真列，再让字段集里的值覆盖。 */
-// items 的可写真列，与后端 WRITE_COLS 一一对应
-const ITEM_COLS = ['name', 'parent_id', 'status', 'price', 'currency', 'cycle', 'cycle_days',
-  'next_renewal', 'last_renewed', 'url', 'notes', 'logo'];
+/* 后端是局部更新语义：请求里**出现**的键写入（`""` 与 `null` 都表示清空），
+   **缺席**的键保持原值；`extra` 作为一个整体值走同一条规则。
 
-function itemBodyFromRow(key, r) {
-  const b = { extra: { ...(r.extra || {}) } };
-  for (const k of ITEM_COLS) if (r[k] != null) b[k] = r[k];
-  for (const f of fieldsOf(key)) {
-    if (f.src !== 'col') continue;
-    const v = r[f.key];
-    b[f.key] = f.ftype === 'num' ? (v ?? undefined) : (Array.isArray(v) ? v : (v ?? ''));
-  }
-  b.name = r.name ?? '';
-  return b;
-}
+   所以这里只发改动的那几个键，不必再把整行铺一遍。**但清空必须显式写 `null`**——
+   `JSON.stringify` 会把 `undefined` 连键一起丢掉，在这套语义里那等于"别动它"。
 
+   （从前这里是整行 PUT：body 漏一列就清一列，于是每条写入路径都得先铺整行、再让当前值
+   覆盖，只要有一处没铺到就是一次静默的数据丢失——SIM 的周期、媒体的自定义列、条目图标、
+   父条目都这样被清掉过。缺席即保持之后，那套铺底代码就没有存在的理由了。） */
 async function patchRow(tab, it, patch) {
   try {
-    const body = tab === 'media'
-      ? ROW_BODY.media({ ...it, ...patch })
-      : itemBodyFromRow(tab, { ...it, ...patch });
     const path = tab === 'media' ? `/api/media/${it.id}` : `/api/items/${it.id}`;
-    await api(path, { method: 'PUT', body: JSON.stringify(body) });
+    await api(path, { method: 'PATCH', body: JSON.stringify(patch) });
     await loadAll();
   } catch (err) { toast(err.message, true); }
 }
@@ -1834,8 +1815,10 @@ function inputsEditor(tab, it, td, fieldsDef, save) {
   const commit = () => {
     const patch = {};
     for (const inp of box.querySelectorAll('input[data-f]')) {
+      // 数字栏清空要显式写 null：undefined 会被 JSON.stringify 丢掉，
+      // 而键缺席在 PATCH 语义里是"保持原值"，清空就失效了
       patch[inp.dataset.f] = inp.type === 'number'
-        ? (inp.value === '' ? undefined : +inp.value)
+        ? (inp.value === '' ? null : +inp.value)
         : inp.value;
     }
     closePop();
@@ -1967,7 +1950,8 @@ function cycleEditor(tab, it, td) {
   box.querySelector('.cp-foot button').onclick = () => {
     // 选了自定义天数却不填数：既算不出到期日，周期还会显示成 "Every 0 days"
     if (sel.value === 'days' && !(+days.value > 0)) { toast('自定义周期要填天数', true); return; }
-    const patch = { cycle: sel.value, cycle_days: days.value === '' ? undefined : +days.value };
+    // 天数清空写 null（键缺席＝保持原值，见 patchRow）
+    const patch = { cycle: sel.value, cycle_days: days.value === '' ? null : +days.value };
     closePop();
     patchRow(tab, it, patch);
   };
@@ -1975,12 +1959,23 @@ function cycleEditor(tab, it, td) {
 }
 
 /* 币种候选：数据里用过的 ∪ 汇率表里有的。词表本就从数据里长，汇率表只是让空库首装时
-   下拉里也有东西可选（否则第一条得先手打一个 ISO 码）。 */
+   也有东西可选（否则第一条得先手打一个 ISO 码）。 */
 function currencyOptions(tab, cur) {
   const used = new Set((state[tab] || []).map(r => fxCode(r.currency)).filter(Boolean));
   if (cur) used.add(fxCode(cur));
   const rest = Object.keys(state.fx?.rates || {}).filter(c => !used.has(c));
   return [...[...used].sort(), ...rest];
+}
+
+/* 币种控件：**可选可打**。这里曾经是个纯 `<select>`，候选只有"用过的 ∪ 汇率表里有的"——
+   于是持有 TWD、AED 这类不在欧洲央行那 30 种里的币种时，界面上根本没法录第一笔：
+   要么不填币种（那笔钱从此不进支出总额，见 `engine::uncounted`），要么填个别的。
+   datalist 既给候选又允许现打，且是原生控件，键盘可达不用另外操心。 */
+function currencyInput(tab, cur, listId, attrs) {
+  const opts = currencyOptions(tab, cur);
+  return `<input class="fp-q cur-in" list="${listId}" ${attrs} placeholder="币种"
+    maxlength="8" autocomplete="off" value="${esc(cur || '')}">
+    <datalist id="${listId}">${opts.map(c => `<option value="${esc(c)}">`).join('')}</datalist>`;
 }
 
 /* 费用格是复合格：金额 + 币种（币种不再单独占一列，2026-08-07 合并）。
@@ -1990,17 +1985,16 @@ function priceEditor(tab, it, td) {
   const cur = fxCode(it.currency);
   box.insertAdjacentHTML('beforeend', `<div class="fp-form">
     <input class="fp-q" type="number" step="any" data-price placeholder="金额" value="${esc(String(it.price ?? ''))}">
-    <select class="mini-select fp-op" data-cur><option value="">—</option>${
-      currencyOptions(tab, cur).map(c => `<option value="${esc(c)}"${c === cur ? ' selected' : ''}>${esc(c)}</option>`).join('')
-    }</select>
+    ${currencyInput(tab, cur, 'cur-codes-cell', 'data-cur')}
   </div><div class="cp-foot"><button type="button" class="btn primary mini">保存</button></div>`);
   const amt = box.querySelector('[data-price]');
   const sel = box.querySelector('[data-cur]');
   const commit = () => {
     closePop();
+    // 清空一律显式 null：键缺席在 PATCH 语义里是"保持原值"（见 patchRow）
     patchRow(tab, it, {
-      price: amt.value === '' ? undefined : +amt.value,
-      currency: sel.value || undefined,
+      price: amt.value === '' ? null : +amt.value,
+      currency: fxCode(sel.value) || null, // 手打的 usd 一律存成 USD
     });
   };
   box.querySelector('.cp-foot button').onclick = commit;
@@ -2482,21 +2476,21 @@ $('#form-media').elements.kind.addEventListener('change', e => {
 $('#form-media').addEventListener('submit', async e => {
   e.preventDefault();
   const f = e.target.elements;
-  // 后端是全量替换语义（`values_of` 恒写 extra，body 里没有就写 NULL），所以自定义列的值
-  // 得从行数据铺起再让表单覆盖——不铺的话，用详情表单存一次就把它们全清了（实测过）
+  // extra 在协议里是**一个整体值**：出现即整份替换，缺席即保持。表单要动自定义列，
+  // 就得从行数据铺起再让控件覆盖（表单没显示的键才不会被抹掉）。
+  // 数字栏清空要显式写 null——undefined 会被 JSON.stringify 丢掉，那等于"别动它"。
   const body = { extra: { ...(editingMedia?.extra || {}) } };
   for (const k of M_STR) body[k] = f[k].value;
-  for (const k of [...M_INT, ...M_REAL]) body[k] = f[k].value === '' ? undefined : +f[k].value;
+  for (const k of [...M_INT, ...M_REAL]) body[k] = f[k].value === '' ? null : +f[k].value;
   for (const cf of customFields('media')) {
     const val = readFieldControl('#m-extra-fields', cf);
     if (val === NO_CONTROL) continue; // 控件不在场＝别动这个键，不是"用户清空了"
     if (val == null || val === '' || (Array.isArray(val) && !val.length)) delete body.extra[cf.key];
     else body.extra[cf.key] = val;
   }
-  // 表单不含封面字段，编辑时带上原值以免被清空
-  if (editingMedia && editingMedia.cover) body.cover = editingMedia.cover;
   try {
-    if (editingMedia) await api(`/api/media/${editingMedia.id}`, { method: 'PUT', body: JSON.stringify(body) });
+    // 封面不在表单里，也就不会出现在 body 里——缺席即保持，不必再把原值带上
+    if (editingMedia) await api(`/api/media/${editingMedia.id}`, { method: 'PATCH', body: JSON.stringify(body) });
     else await api('/api/media', { method: 'POST', body: JSON.stringify(body) });
     $('#dlg-media').close();
     toast('已保存');
@@ -3142,9 +3136,6 @@ function parentRow(key, it) {
   return lab;
 }
 
-/* 条目图标：上传/清除各走自己的端点，与表单的整行 PUT 不是一回事。
-   **上传后必须同步 editingItem.row.logo**——整行 PUT 的体由那份行数据拼，
-   不同步的话紧接着按「保存」会把刚传的图标清掉（itemBodyFromRow 没有 logo 就置空）。 */
 /* 表单里"当前那个网址"：优先本表单正在填的 url 控件，其次任何 url 类型字段，
    最后回落到行数据。读 editingItem.row 而不是闭包里的 it——paint() 会换掉那个对象。 */
 function formUrl() {
@@ -3162,6 +3153,10 @@ function syncGrabBtn() {
   if (g) g.hidden = !formUrl();
 }
 
+/* 条目图标：上传/清除各走自己的端点，与表单的保存不是一回事——表单的 PATCH 体里
+   压根没有 logo 这个键，而缺席即保持，所以两者不会互相覆盖。
+   （全量替换那会儿必须把 editingItem.row.logo 同步回去，否则紧接着按「保存」就把刚传的
+   图标清掉了；现在 paint() 仍然同步它，是为了让表单里的预览与本次上传一致。） */
 function logoRow(it) {
   const lab = document.createElement('label');
   lab.className = 'span2';
@@ -3238,10 +3233,12 @@ function readFieldControl(scope, f) {
   const el = document.querySelector(`${scope} [data-f="${f.key}"]`);
   if (!el) return NO_CONTROL;
   const v = el.value.trim();
-  return f.ftype === 'num' || f.ftype === 'star' ? (v === '' ? undefined : Number(v)) : v;
+  // 数字/星级清空给 null 而不是 undefined：这个值会直接进 PATCH 体，而 JSON.stringify
+  // 会把 undefined 连键一起丢掉——键缺席在那套语义里是"保持原值"，清空就失效了
+  return f.ftype === 'num' || f.ftype === 'star' ? (v === '' ? null : Number(v)) : v;
 }
 
-// 表单 → 整行 PUT/POST 的体：先按表单值攒一个补丁，再交给 itemBodyFromRow 补全字段集
+// 表单 → PATCH/POST 的体：只装这张表单读得到的字段，其余交给"缺席即保持"
 function itemBody(key, row) {
   const patch = { extra: { ...(row.extra || {}) } };
   for (const f of fieldsOf(key)) {
@@ -3257,8 +3254,10 @@ function itemBody(key, row) {
   if (psel) patch.parent_id = psel.value ? +psel.value : null;
   // 币种同理：它并进了费用栏，迁移 0013 起不再是注册字段，上面那圈循环读不到它
   const csel = document.querySelector('#item-fields [data-f="currency"]');
-  if (csel) patch.currency = csel.value;
-  return itemBodyFromRow(key, { ...row, ...patch });
+  if (csel) patch.currency = fxCode(csel.value); // 手打的 usd 一律存成 USD；空串＝清空
+  // 就这些。表单没有的真列（SIM 没注册的周期、图标、手动序…）不出现在体里＝后端保持原值，
+  // 不必再按 items 的真列全集铺一遍底——那份铺底代码正是全量替换语义逼出来的
+  return patch;
 }
 
 // 详情表单里的星级：点星写进隐藏输入（与就地编辑的 starEditor 同一套呈现）
@@ -3281,7 +3280,7 @@ document.addEventListener('submit', async e => {
   // 与就地编辑器同一条规矩：选了自定义天数却不填数，既算不出到期日，周期还显示成 "Every 0 days"
   if (body.cycle === 'days' && !(+body.cycle_days > 0)) { toast('自定义周期要填天数', true); return; }
   try {
-    if (id) await api(`/api/items/${id}`, { method: 'PUT', body: JSON.stringify(body) });
+    if (id) await api(`/api/items/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
     else await api(`/api/collections/${encodeURIComponent(key)}/items`, { method: 'POST', body: JSON.stringify(body) });
     $('#dlg-item').close();
     toast('已保存');

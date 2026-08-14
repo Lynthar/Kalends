@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, patch, post, put},
     Json, Router,
 };
 use rusqlite::{params, types::Value as SqlValue, Connection};
@@ -25,7 +25,8 @@ pub fn router() -> Router<App> {
         .route("/api/media", get(list).post(create))
         .route("/api/media/order", put(set_order))
         .route("/api/media/bulk_delete", post(bulk_delete))
-        .route("/api/media/{id}", put(update).delete(delete))
+        // 与库那侧同：条目更新是 PATCH（局部更新，缺席即保持）
+        .route("/api/media/{id}", patch(update).delete(delete))
         .route("/api/media/import", post(import))
         .route("/api/media/from_tmdb", post(from_tmdb))
         .route("/api/media/{id}/fetch_cover", post(fetch_cover))
@@ -170,8 +171,24 @@ async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
     Ok(Json(json!({ "id": id })))
 }
 
+/// 局部更新：请求里出现的键写入（`""`/`null` 即清空），缺席的键保持原值，
+/// `extra` 作为整体走同一条规则。与库那侧同一套语义（`collections::merge_over`）——
+/// 曾经是全量替换，于是"开一次详情表单直接保存"就能把自定义列整片清掉。
 async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value>) -> R {
     let conn = app.db.lock().unwrap();
+    let cur: Value = conn
+        .query_row("SELECT * FROM media_items WHERE id=?1", [id], |r| {
+            let cols: Vec<String> = r.as_ref().column_names().iter().map(|c| c.to_string()).collect();
+            row_to_json(r, &cols)
+        })
+        .map_err(|_| missing("条目不存在"))?;
+    let writable = STR_FIELDS
+        .iter()
+        .chain(INT_FIELDS)
+        .chain(REAL_FIELDS)
+        .copied()
+        .chain(std::iter::once("extra"));
+    let b = crate::collections::merge_over(&cur, &b, writable);
     let b = normalized(&conn, b)?;
     let (cols, mut vals) = values_of(&b);
     let sets: Vec<String> = cols

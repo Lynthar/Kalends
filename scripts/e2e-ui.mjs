@@ -33,6 +33,10 @@ const post = (path, body) => fetch(APP.replace(/\/$/, '') + path, {
 const put = (path, body) => fetch(APP.replace(/\/$/, '') + path, {
   method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
 });
+// 条目（库与媒体）的更新是 PATCH：局部更新语义，缺席即保持。列/库的整份序仍是 PUT
+const patch = (path, body) => fetch(APP.replace(/\/$/, '') + path, {
+  method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+});
 // 拿原始 Response（要断言「被拒绝」时用，post/put 会把错误体也当成正常结果）
 const raw = (path, method, body) => fetch(APP.replace(/\/$/, '') + path, {
   method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -621,7 +625,7 @@ await sleep(500);
 for (const [key, mark] of [['subs', 'notes'], ['sims', 'notes'], ['vps', 'notes']]) {
   const items = () => fetch(`${APP}api/collections/${key}/items`).then(r => r.json());
   const before = (await items())[0];
-  const res = await put(`/api/items/${before.id}`, { ...before, [mark]: 'e2e 往返' });
+  const res = await patch(`/api/items/${before.id}`, { ...before, [mark]: 'e2e 往返' });
   check(`${key} 整行 PUT`, res.ok, res.ok ? '' : JSON.stringify(await res.json().catch(() => ({}))));
   const after = (await items()).find(x => x.id === before.id);
   check(`${key} PUT 后字段落库`, after?.[mark] === 'e2e 往返');
@@ -629,7 +633,7 @@ for (const [key, mark] of [['subs', 'notes'], ['sims', 'notes'], ['vps', 'notes'
   check(`${key} PUT 未丢 extra 域字段`,
     JSON.stringify(after?.extra || {}) === JSON.stringify(before.extra || {}),
     `前 ${JSON.stringify(before.extra)} 后 ${JSON.stringify(after?.extra)}`);
-  check(`${key} 还原`, (await put(`/api/items/${before.id}`, before)).ok); // 不给后续断言留脏数据
+  check(`${key} 还原`, (await patch(`/api/items/${before.id}`, before)).ok); // 不给后续断言留脏数据
 }
 
 /* 12e-2. 详情表单「打开 → 什么都不改 → 保存」必须是幂等的。
@@ -768,7 +772,7 @@ await put('/api/fields/options', { tbl: NK, key: mf.key, options: [{ v: 'CN2 GIA
 const nrows = await (await fetch(`${APP}api/collections/${NK}/items`)).json();
 const slashRow = nrows.find(r => r.name === 'renamed.com') || nrows.find(r => r.name === 'lynthar.com');
 const SLASH_NAME = slashRow.name;
-await put(`/api/items/${slashRow.id}`, {
+await patch(`/api/items/${slashRow.id}`, {
   ...slashRow, extra: { ...(slashRow.extra || {}), [mf.key]: ['CN2 GIA/9929'], [sf.key]: 4 },
 });
 await evl(`loadAll()`);
@@ -1287,9 +1291,9 @@ check('不存在的父行被拒绝',
   !(await raw('/api/collections/subs/items', 'POST', { name: '野父', status: 'Active', parent_id: 999999, extra: {} })).ok);
 const gpRow = subsRows.find(r => r.id === gp.id);
 const topRow = subsRows.find(r => !r.parent_id && r.id !== gp.id && r.id !== pr.id);
-check('自己不能当自己的父行', !(await raw(`/api/items/${gp.id}`, 'PUT', { ...gpRow, parent_id: gp.id })).ok);
+check('自己不能当自己的父行', !(await raw(`/api/items/${gp.id}`, 'PATCH', { ...gpRow, parent_id: gp.id })).ok);
 check('已有子行的条目不能再挂到别人下面',
-  !(await raw(`/api/items/${gp.id}`, 'PUT', { ...gpRow, parent_id: topRow.id })).ok);
+  !(await raw(`/api/items/${gp.id}`, 'PATCH', { ...gpRow, parent_id: topRow.id })).ok);
 /* 12k. 条目图标：上传/清除的界面在 B2 泛化删手写表单时丢过一次（端点还在、前端零调用）。
    关键陷阱：上传后若不同步表单持有的行数据，紧接着按「保存」会把刚传的图标清掉。 */
 const PNG1X1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
@@ -1345,7 +1349,7 @@ check('表头列数与行内格数一致', await evl(`(() => {
 })()`) === true);
 /* 12l. 错误码分级：请求本身的问题不该报 500，否则日志与反代的错误率指标全是假的 */
 const codeOf = async (path, method, body) => (await raw(path, method, body)).status;
-check('改不存在的条目 → 404', await codeOf('/api/items/999999', 'PUT', { name: 'x' }) === 404);
+check('改不存在的条目 → 404', await codeOf('/api/items/999999', 'PATCH', { name: 'x' }) === 404);
 check('往不存在的库里加条目 → 404', await codeOf('/api/collections/nope/items', 'POST', { name: 'x' }) === 404);
 // 空名不再是客户端错误：表尾「＋ 新建」就是先插一行空的、再就地填（界面上渲染成「未命名」）
 const blank9 = await post('/api/collections/subs/items', { status: 'Active' });
@@ -1356,7 +1360,7 @@ check('未知建库模板 → 400', await codeOf('/api/collections', 'POST', { n
 check('改不存在的列 → 404', await codeOf('/api/fields/999999', 'PUT', { name: 'x', shown: true }) === 404);
 check('删不可删的列 → 404', await codeOf(`/api/fields/${nameF.id}`, 'DELETE') === 404);
 check('错误体仍带可读 error 字段',
-  typeof (await (await raw('/api/items/999999', 'PUT', { name: 'x' })).json()).error === 'string');
+  typeof (await (await raw('/api/items/999999', 'PATCH', { name: 'x' })).json()).error === 'string');
 
 for (const x of [pr.id, gp.id]) await fetch(`${APP}api/items/${x}`, { method: 'DELETE' });
 await evl(`loadAll()`);
@@ -1685,9 +1689,11 @@ const kruLedger = await (await fetch(APP + 'api/ledger')).json();
 check('旧账没有被认到新库头上',
   kruLedger.every(r => r.kind !== kruB.key),
   JSON.stringify(kruLedger.filter(r => r.kind === kruB.key)));
-check('旧账仍留着当存档、库名回落成空',
-  kruLedger.some(r => r.kind === kruA.key && !r.coll_name),
-  JSON.stringify(kruLedger.map(r => [r.kind, r.coll_name])));
+// 库删了旧账仍留着当存档，而且名字还在——那是写入时钉进台账的快照（迁移 0018 起），
+// 不再靠回查当前的库与条目：回查的话，库一删这笔账就只剩个编号
+check('旧账仍留着当存档，库名与条目名都还说得出',
+  kruLedger.some(r => r.kind === kruA.key && r.coll_name === kruA.name && r.item_name === 'reuse.example'),
+  JSON.stringify(kruLedger.map(r => [r.kind, r.coll_name, r.item_name])));
 await fetch(`${APP}api/collections/${kruB.id}`, { method: 'DELETE' });
 await evl(`loadAll()`);
 await sleep(700);
@@ -1751,7 +1757,7 @@ if ((await (await fetch(APP + 'api/settings')).json())['meta.tmdb_key']) {
 // 于是这边会拿着旧 COLS 去渲染新字段，colType 读到 undefined 把整个 renderAll 打断。
 const mfield = await post('/api/fields', { tbl: 'media', name: '片源', ftype: 'text' });
 const mrow = (await (await fetch(APP + 'api/media')).json())[0];
-await put(`/api/media/${mrow.id}`, { ...mrow, extra: { [mfield.key]: 'BD 原盘' } });
+await patch(`/api/media/${mrow.id}`, { ...mrow, extra: { [mfield.key]: 'BD 原盘' } });
 // 得等 loadAll 自己结算再问它成没成：它抛的是异步异常，同步去查 DOM 只会看到上一轮
 // 渲染留下的行，两版都「通过」。**而且值必须先落到某一行上**——cellVal 对空值提前返回，
 // 列刚建好、还没有任何行有值时根本走不到 colType，那一刻同样测不出东西（两条都真踩过）。
@@ -1783,7 +1789,7 @@ check('保存没有清掉条目本身的字段',
   msaved?.title === mrow.title && msaved?.rating === mrow.rating,
   `${msaved?.title} / ${msaved?.rating}`);
 // 负向对照的靶子：表单不带 extra 时后端会把它写成 NULL，所以这条要一直有人守着
-await put(`/api/media/${mrow.id}`, { ...msaved, extra: { [mfield.key]: '守着' } });
+await patch(`/api/media/${mrow.id}`, { ...msaved, extra: { [mfield.key]: '守着' } });
 await evl(`loadAll().catch(() => {})`); // 负向对照时这里本就会抛，别让它打断套件
 await sleep(700);
 await evl(`openMediaDialog(state.media.find(m => m.id === ${mrow.id}))`);
@@ -2012,23 +2018,18 @@ await sleep(1200);
 const fx_afterSave = (await (await fetch(APP + 'api/collections/subs/items')).json()).find(r => r.id === fx_curRow.id);
 check('开表单直接保存不会清掉币种', fx_afterSave?.currency === 'USD', JSON.stringify(fx_afterSave?.currency));
 check('金额也原样', fx_afterSave?.price === fx_curRow.price, `${fx_curRow.price} → ${fx_afterSave?.price}`);
-// 上面两条走的是 itemBodyFromRow 从行数据铺底那条路，改不改代码都绿；真正要钉住的是
+// 上面两条现在由"缺席即保持"兜着（表单没改币种就不会碰它），改不改代码都绿；真正要钉住的是
 // 「在表单里改了币种能存回去」——currency 不是注册字段，itemBody 得单独读它那枚控件
 await evl(`openItemDialog('subs', state.subs.find(x => x.id === ${fx_curRow.id}))`);
 await sleep(450);
-await evl(`(() => {
-  const sel = document.querySelector('#item-fields .pricebox [data-f="currency"]');
-  if (![...sel.options].some(o => o.value === 'EUR')) {
-    sel.appendChild(Object.assign(document.createElement('option'), { value: 'EUR', textContent: 'EUR' }));
-  }
-  sel.value = 'EUR';
-})()`);
+// 币种控件是可选可打的 datalist 输入（不在内置汇率表里的币种也得录得进来），直接写值即可
+await evl(`document.querySelector('#item-fields .pricebox [data-f="currency"]').value = 'EUR'`);
 await evl(`document.querySelector('#form-item').requestSubmit()`);
 await sleep(1200);
 const fx_changed = (await (await fetch(APP + 'api/collections/subs/items')).json()).find(r => r.id === fx_curRow.id);
 check('在表单里改币种能存回去', fx_changed?.currency === 'EUR', JSON.stringify(fx_changed?.currency));
 // 改回去，后面的断言按 USD 算
-await put(`/api/items/${fx_curRow.id}`, { ...fx_changed, currency: 'USD' });
+await patch(`/api/items/${fx_curRow.id}`, { ...fx_changed, currency: 'USD' });
 await evl(`loadAll()`);
 await sleep(700);
 
@@ -2103,17 +2104,17 @@ check('tel 在新建列的类型白名单里',
 const simRow0 = (await (await fetch(`${APP}api/collections/sims/items`)).json())[0];
 const simBody = e => ({ ...simRow0, extra: { ...(simRow0.extra || {}), phone_number: e } });
 check('写入口折叠多余空白', (await (async () => {
-  await put(`/api/items/${simRow0.id}`, simBody('  +81  90   1234 5678 '));
+  await patch(`/api/items/${simRow0.id}`, simBody('  +81  90   1234 5678 '));
   const r = (await (await fetch(`${APP}api/collections/sims/items`)).json()).find(x => x.id === simRow0.id);
   return r.extra.phone_number;
 })()) === '+81 90 1234 5678');
 check('一个数字都没有的值被拦下',
-  (await raw(`/api/items/${simRow0.id}`, 'PUT', simBody('打客服'))).status === 400);
+  (await raw(`/api/items/${simRow0.id}`, 'PATCH', simBody('打客服'))).status === 400);
 check('混进不该有的字符也被拦下',
-  (await raw(`/api/items/${simRow0.id}`, 'PUT', simBody('+81 90ab'))).status === 400);
+  (await raw(`/api/items/${simRow0.id}`, 'PATCH', simBody('+81 90ab'))).status === 400);
 // 位数偏少是既有数据里就有的（只填了国家码），放行但标出来——在写入口 400 掉
 // 等于让人打不开自己的旧条目
-check('位数偏少放行，不当错误', (await raw(`/api/items/${simRow0.id}`, 'PUT', simBody('+44'))).ok);
+check('位数偏少放行，不当错误', (await raw(`/api/items/${simRow0.id}`, 'PATCH', simBody('+44'))).ok);
 
 await evl(`loadAll()`);
 await sleep(900);
@@ -2138,7 +2139,7 @@ check('号码列渲染成拨号链接，href 滤掉空格横杠',
     return a ? a.getAttribute('href') : null;
   })()`) === 'tel:+44');
 await put(`/api/fields/${pnField.id}`, { name: pnField.name, shown: false });
-await put(`/api/items/${simRow0.id}`, simBody(simRow0.extra?.phone_number || ''));
+await patch(`/api/items/${simRow0.id}`, simBody(simRow0.extra?.phone_number || ''));
 
 /* 17.23. 规格格就地编辑：值分散在几个真字段里，模板串同时声明"显示哪几项、编辑哪几项"。 */
 const vpsSpec = (await (await fetch(`${APP}api/fields`)).json()).find(f => f.tbl === 'vps' && f.key === 'spec');
@@ -2146,7 +2147,7 @@ check('规格模板串已含端口与流量',
   ['{cores}', '{ram_gb}', '{storage_gb}', '{port_gbps}', '{traffic_tb}'].every(k => vpsSpec.config?.tpl?.includes(k)),
   vpsSpec.config);
 const vpsRow = (await (await fetch(`${APP}api/collections/vps/items`)).json())[0];
-await put(`/api/items/${vpsRow.id}`, { ...vpsRow, extra: {
+await patch(`/api/items/${vpsRow.id}`, { ...vpsRow, extra: {
   ...(vpsRow.extra || {}), cores: 2, ram_gb: 4, storage_gb: 40, storage_type: 'NVMe', port_gbps: 1, traffic_tb: 2,
 } });
 await evl(`loadAll()`);
@@ -2181,7 +2182,7 @@ check('规格格随之刷新',
 /* 17.24. 算不出到期日的条目要被点名，而不是从时间线上静默消失。 */
 const undRow = (await (await fetch(`${APP}api/collections/subs/items`)).json())
   .find(r => r.status === 'Active' && r.next_renewal);
-await put(`/api/items/${undRow.id}`, { ...undRow, next_renewal: '' });
+await patch(`/api/items/${undRow.id}`, { ...undRow, next_renewal: '' });
 await evl(`loadAll()`);
 await sleep(900);
 const undOv = await (await fetch(APP + 'api/overview')).json();
@@ -2192,7 +2193,7 @@ check('它确实不在到期时间线上（所以才必须点名）',
 check('首页点名了它',
   await evl(`!document.querySelector('#up-undated').hidden`) === true
   && (await evl(`document.querySelector('#up-undated').textContent`)).includes(undRow.name));
-await put(`/api/items/${undRow.id}`, undRow);
+await patch(`/api/items/${undRow.id}`, undRow);
 await evl(`loadAll()`);
 await sleep(900);
 check('日期填回去之后提示消失',
@@ -2209,21 +2210,21 @@ const mailKey = shapeFs.find(f => f.name === '账户邮箱').key;
 const shapeRow = (await (await fetch(`${APP}api/collections/subs/items`)).json())[0];
 const shapeBody = ex => ({ ...shapeRow, extra: { ...(shapeRow.extra || {}), ...ex } });
 check('网址没写协议时补 https://', (await (async () => {
-  await put(`/api/items/${shapeRow.id}`, shapeBody({ [urlKey]: 'netflix.com' }));
+  await patch(`/api/items/${shapeRow.id}`, shapeBody({ [urlKey]: 'netflix.com' }));
   const r = (await (await fetch(`${APP}api/collections/subs/items`)).json()).find(x => x.id === shapeRow.id);
   return r.extra[urlKey];
 })()) === 'https://netflix.com');
 check('邮箱域名统一小写、用户名原样', (await (async () => {
-  await put(`/api/items/${shapeRow.id}`, shapeBody({ [mailKey]: ' Me.You+tag@Example.COM ' }));
+  await patch(`/api/items/${shapeRow.id}`, shapeBody({ [mailKey]: ' Me.You+tag@Example.COM ' }));
   const r = (await (await fetch(`${APP}api/collections/subs/items`)).json()).find(x => x.id === shapeRow.id);
   return r.extra[mailKey];
 })()) === 'Me.You+tag@example.com');
 check('形状不对的网址被拦下',
-  (await raw(`/api/items/${shapeRow.id}`, 'PUT', shapeBody({ [urlKey]: 'ftp://a.com' }))).status === 400);
+  (await raw(`/api/items/${shapeRow.id}`, 'PATCH', shapeBody({ [urlKey]: 'ftp://a.com' }))).status === 400);
 check('形状不对的邮箱被拦下',
-  (await raw(`/api/items/${shapeRow.id}`, 'PUT', shapeBody({ [mailKey]: 'a@b' }))).status === 400);
+  (await raw(`/api/items/${shapeRow.id}`, 'PATCH', shapeBody({ [mailKey]: 'a@b' }))).status === 400);
 
-await put(`/api/items/${shapeRow.id}`, shapeBody({ [urlKey]: 'https://www.netflix.com/browse?x=1', [mailKey]: 'me@example.com' }));
+await patch(`/api/items/${shapeRow.id}`, shapeBody({ [urlKey]: 'https://www.netflix.com/browse?x=1', [mailKey]: 'me@example.com' }));
 await evl(`loadAll()`);
 await sleep(900);
 await evl(`switchTab('subs')`);
@@ -2345,7 +2346,7 @@ const xMailF = await post('/api/fields', { tbl: 'subs', name: '联系邮箱', ft
 const xTel = await post('/api/fields', { tbl: 'subs', name: '客服电话', ftype: 'tel' });
 const [xUrl, xMail] = [xUrlF.key, xMailF.key];
 const xRow = (await (await fetch(`${APP}api/collections/subs/items`)).json())[0];
-await put(`/api/items/${xRow.id}`, { ...xRow, extra: { ...(xRow.extra || {}),
+await patch(`/api/items/${xRow.id}`, { ...xRow, extra: { ...(xRow.extra || {}),
   [xUrl]: 'https://www.netflix.com/browse?x=1', [xMail]: 'me@example.com', [xTel.key]: '+81 90 1234 5678' } });
 await evl(`loadAll()`);
 await sleep(900);
@@ -2391,7 +2392,7 @@ await sleep(700);
 // 而写入口不规范化、格子里不给链接的话，同名同类型的列在两张表上表现就不一样。
 const xMField = await post('/api/fields', { tbl: 'media', name: '播放页', ftype: 'url' });
 const xMRow = (await (await fetch(APP + 'api/media')).json())[0];
-await put(`/api/media/${xMRow.id}`, { ...xMRow, extra: { ...(xMRow.extra || {}), [xMField.key]: 'netflix.com/title/1' } });
+await patch(`/api/media/${xMRow.id}`, { ...xMRow, extra: { ...(xMRow.extra || {}), [xMField.key]: 'netflix.com/title/1' } });
 const xMSaved = (await (await fetch(APP + 'api/media')).json()).find(m => m.id === xMRow.id);
 check('媒体的 url 列同样过写入口规范化（没有协议的裸串会被当成站内相对路径）',
   xMSaved?.extra?.[xMField.key] === 'https://netflix.com/title/1', JSON.stringify(xMSaved?.extra));
@@ -2437,7 +2438,7 @@ check('新字段在详情表单里真的有一格可填', await evl(`(() => {
   return has;
 })()`) === true);
 const acRow = (await (await fetch(`${APP}api/collections/${acColl.key}/items`)).json()).find(r => r.id === acItem.id);
-await put(`/api/items/${acItem.id}`, { ...acRow, next_renewal: rfDay(9) });
+await patch(`/api/items/${acItem.id}`, { ...acRow, next_renewal: rfDay(9) });
 check('填上之后到期日就回来了',
   (await (await fetch(APP + 'api/overview')).json()).upcoming
     .some(u => u.kind === acColl.key && u.id === acItem.id && u.due === rfDay(9)));
@@ -2446,14 +2447,14 @@ check('填上之后到期日就回来了',
 // 一律报「缺上次续费日」的话，用户打开条目看见日期填着，按提示无从下手
 await put(`/api/collections/${acColl.id}`, { due_anchor: 'last' });
 const acRow2 = (await (await fetch(`${APP}api/collections/${acColl.key}/items`)).json()).find(r => r.id === acItem.id);
-await put(`/api/items/${acItem.id}`, { ...acRow2, cycle: '', last_renewed: rfDay(-5) });
+await patch(`/api/items/${acItem.id}`, { ...acRow2, cycle: '', last_renewed: rfDay(-5) });
 check('日期填着、周期空着时点名的是「周期」',
   (await (await fetch(APP + 'api/overview')).json()).undated
     .find(x => x.kind === acColl.key && x.id === acItem.id)?.missing === '周期');
 
 // 提前续费（按日程续费会产生「未来的 last_renewed」，0017 之前不可能出现的合法状态）：
 // 本期还没开始，照旧画进度条就是「剩 35 天 / 30」配一根空槽，看着像算错了
-await put(`/api/items/${acItem.id}`, { ...acRow2, cycle: 'days', cycle_days: 30, last_renewed: rfDay(5) });
+await patch(`/api/items/${acItem.id}`, { ...acRow2, cycle: 'days', cycle_days: 30, last_renewed: rfDay(5) });
 await evl(`loadAll()`);
 await sleep(800);
 await evl(`switchTab('${acColl.key}')`);
@@ -2468,6 +2469,62 @@ await evl(`document.querySelector('#${acColl.key}-body tr[data-id="${acItem.id}"
 await sleep(400);
 await shot('25-early-renew-left');
 await fetch(`${APP}api/collections/${acColl.id}`, { method: 'DELETE' });
+await evl(`loadAll()`);
+await sleep(700);
+
+/* 17.30. 条目更新是局部更新（PATCH）：请求里出现的键写入（"" 与 null 即清空），
+   缺席的键保持原值；extra 作为一个整体值走同一条规则。
+   从前是全量替换（PUT），body 漏一列就清一列，于是每条写入路径都得先铺整行再覆盖——
+   SIM 的周期、媒体的自定义列、条目图标、父条目都这样被一次保存清掉过。 */
+const pa_item = await mk('subs', {
+  name: 'PATCH 语义', status: 'Active', price: 12.5, currency: 'USD', cycle: 'monthly',
+  next_renewal: day(20), url: 'https://example.com', notes: '备注原样',
+  extra: { category: 'AI', payment_method: 'Visa' },
+});
+const pa_get = async () => (await (await fetch(APP + 'api/collections/subs/items')).json())
+  .find(r => r.id === pa_item.id);
+const pa_before = await pa_get();
+check('PATCH 只发一个键：其余真列原样', (await patch(`/api/items/${pa_item.id}`, { name: '改过名' })).ok);
+const pa_after = await pa_get();
+check('缺席的键保持原值（价格/币种/周期/到期日/网址/备注）',
+  pa_after.name === '改过名' && pa_after.price === 12.5 && pa_after.currency === 'USD'
+  && pa_after.cycle === 'monthly' && pa_after.next_renewal === pa_before.next_renewal
+  && pa_after.url === pa_before.url && pa_after.notes === '备注原样',
+  JSON.stringify(pa_after));
+check('extra 缺席时整份保持',
+  JSON.stringify(pa_after.extra) === JSON.stringify(pa_before.extra), JSON.stringify(pa_after.extra));
+// 清空要显式说出来：null 与空串都算"清空"，而键缺席一律是"别动它"
+await patch(`/api/items/${pa_item.id}`, { price: null, next_renewal: '' });
+const pa_cleared = await pa_get();
+check('显式 null 清空金额，空串清空日期',
+  pa_cleared.price === null && pa_cleared.next_renewal === null, JSON.stringify(pa_cleared));
+check('清这两项没有连累币种与周期',
+  pa_cleared.currency === 'USD' && pa_cleared.cycle === 'monthly', JSON.stringify(pa_cleared));
+// extra 是整体值：出现即整份替换（少写的键就是要删掉的键）
+await patch(`/api/items/${pa_item.id}`, { extra: { category: 'AI' } });
+const pa_ex = await pa_get();
+check('extra 出现即整份替换',
+  pa_ex.extra.category === 'AI' && pa_ex.extra.payment_method === undefined, JSON.stringify(pa_ex.extra));
+// 历史事故的形状：SIM 的周期不是注册字段，表单里根本没有这一栏
+const pa_sim = (await (await fetch(APP + 'api/collections/sims/items')).json())[0];
+await patch(`/api/items/${pa_sim.id}`, { name: pa_sim.name });
+const pa_sim2 = (await (await fetch(APP + 'api/collections/sims/items')).json()).find(r => r.id === pa_sim.id);
+check('表单里没有的真列（SIM 的周期）不会被一次保存清掉',
+  pa_sim2.cycle === pa_sim.cycle && pa_sim2.cycle_days === pa_sim.cycle_days,
+  `${pa_sim2.cycle}/${pa_sim2.cycle_days}`);
+// 媒体那侧同一套语义
+const pa_m = (await (await fetch(APP + 'api/media')).json())[0];
+await patch(`/api/media/${pa_m.id}`, { extra: { pa_note: '自定义列的值' } });
+await patch(`/api/media/${pa_m.id}`, { title: pa_m.title });
+const pa_m2 = (await (await fetch(APP + 'api/media')).json()).find(r => r.id === pa_m.id);
+check('媒体：只发标题不会清掉 extra 与评分',
+  pa_m2.extra?.pa_note === '自定义列的值' && pa_m2.rating === pa_m.rating,
+  JSON.stringify([pa_m2.extra, pa_m2.rating]));
+await patch(`/api/media/${pa_m.id}`, { extra: {} });
+// 协议真的换了：旧的整行 PUT 不再受理（405），免得有人照旧发全量体却以为是局部更新
+check('条目的 PUT 已不受理（405）', (await raw(`/api/items/${pa_item.id}`, 'PUT', { name: 'x' })).status === 405);
+check('媒体条目同样（405）', (await raw(`/api/media/${pa_m.id}`, 'PUT', { title: 'x' })).status === 405);
+await fetch(`${APP}api/items/${pa_item.id}`, { method: 'DELETE' });
 await evl(`loadAll()`);
 await sleep(700);
 

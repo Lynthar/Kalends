@@ -7,7 +7,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, patch, post, put},
     Json, Router,
 };
 use chrono::NaiveDate;
@@ -32,7 +32,8 @@ pub fn router() -> Router<App> {
         .route("/api/collections/{key}/items", get(items_list).post(items_create))
         .route("/api/collections/{key}/items/order", put(items_order))
         .route("/api/items/bulk_delete", post(items_bulk_delete))
-        .route("/api/items/{id}", put(items_update).delete(items_delete))
+        // 条目更新是 PATCH 不是 PUT：语义就是局部更新（缺席即保持），见 `merge_over`
+        .route("/api/items/{id}", patch(items_update).delete(items_delete))
         .route("/api/items/{id}/renew", post(items_renew))
         .route("/api/items/{id}/logo", post(logo_set).delete(logo_clear))
         .route("/api/items/{id}/logo/fetch", post(logo_fetch))
@@ -1033,25 +1034,54 @@ pub fn insert_item(conn: &Connection, coll: i64, b: &Value) -> anyhow::Result<i6
         |r| r.get(0),
     )?;
     vals.push(rusqlite::types::Value::from(pos));
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         &format!(
             "INSERT INTO items(collection_id,{WRITE_COLS},pos) VALUES({})",
             (1..=vals.len()).map(|n| format!("?{n}")).collect::<Vec<_>>().join(",")
         ),
         rusqlite::params_from_iter(vals),
     )?;
-    Ok(conn.last_insert_rowid())
+    let id = tx.last_insert_rowid();
+    // 新条目可能捡到一个用过的号（items.id 不带 AUTOINCREMENT，SQLite 会复用删掉的 id）。
+    // 通知去重键是 (kind, item_id, 到期日, 阈值, 渠道)，于是旧号留下的记录会让新条目在
+    // 同一个到期日上被判成"已经发过"，静默漏提醒。台账是事实记录、必须留（名字已随
+    // 迁移 0018 钉进那张表），通知日志只为去重服务、也没有读界面，新条目一落地就清掉它那份。
+    let key: String = tx.query_row("SELECT key FROM collections WHERE id=?1", [coll], |r| r.get(0))?;
+    tx.execute(
+        "DELETE FROM notification_log WHERE kind=?1 AND item_id=?2",
+        params![key, id],
+    )?;
+    tx.commit()?;
+    Ok(id)
+}
+
+/// 局部更新的合并规则，**全项目只此一条**（媒体那侧同款）：
+/// 请求里**出现**的键写入（`""` 与 `null` 都表示清空），**缺席**的键保持原值；
+/// `extra` 作为一个整体值走同一条规则——出现即整份替换，缺席即保持。
+///
+/// 这里曾经是全量替换（PUT）：body 漏一列，那一列就被置空。于是每条写入路径都得先把
+/// 整行铺进去再让当前值覆盖，而只要有一处没铺到就是一次静默的数据丢失——SIM 的周期、
+/// 媒体的自定义列、条目图标、父条目都这样被一次保存清掉过。改成"缺席即保持"之后，
+/// 这类事故在协议层面就不成立了，那些补偿代码也就没有存在的理由。
+pub fn merge_over(cur: &Value, b: &Value, cols: impl Iterator<Item = &'static str>) -> Value {
+    let mut out = serde_json::Map::new();
+    for k in cols {
+        let v = b.get(k).or_else(|| cur.get(k)).cloned().unwrap_or(Value::Null);
+        out.insert(k.to_string(), v);
+    }
+    Value::Object(out)
 }
 
 pub fn update_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<()> {
-    let coll: i64 = conn
-        .query_row("SELECT collection_id FROM items WHERE id=?1", [id], |r| r.get(0))
+    let cur = conn
+        .query_row(&format!("SELECT {ITEM_COLS} FROM items WHERE id=?1"), [id], item_row)
         .map_err(|_| missing("条目不存在"))?;
-    check_parent(conn, coll, Some(id), i(b, "parent_id"))?;
-    let mut b = b.clone();
+    let coll = cur["collection_id"].as_i64().unwrap_or_default();
+    let mut b = merge_over(&cur, b, WRITE_COLS.split(',').map(str::trim));
+    check_parent(conn, coll, Some(id), i(&b, "parent_id"))?;
     normalize_shaped_fields(conn, coll, &mut b)?;
-    let b = &b;
-    let mut vals = item_values(b)?;
+    let mut vals = item_values(&b)?;
     let sets = WRITE_COLS
         .split(',')
         .enumerate()
@@ -1059,16 +1089,13 @@ pub fn update_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<()> 
         .collect::<Vec<_>>()
         .join(",");
     vals.push(rusqlite::types::Value::from(id));
-    let n = conn.execute(
+    conn.execute(
         &format!(
             "UPDATE items SET {sets},updated_at=datetime('now') WHERE id=?{}",
             vals.len()
         ),
         rusqlite::params_from_iter(vals),
     )?;
-    if n == 0 {
-        return Err(missing("条目不存在"));
-    }
     Ok(())
 }
 
@@ -1164,13 +1191,15 @@ type RenewRow = (
     Option<i64>,
     Option<String>,
     Option<String>,
+    String,
+    String,
 );
 
 pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value> {
     let row: Option<RenewRow> = conn
         .query_row(
             "SELECT c.key, c.due_anchor, c.renew_from, i.price, i.currency,
-                    i.cycle, i.cycle_days, i.next_renewal, i.last_renewed
+                    i.cycle, i.cycle_days, i.next_renewal, i.last_renewed, i.name, c.name
              FROM items i JOIN collections c ON c.id=i.collection_id WHERE i.id=?1",
             [id],
             |r| {
@@ -1184,20 +1213,37 @@ pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value
                     r.get(6)?,
                     r.get(7)?,
                     r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
                 ))
             },
         )
         .ok();
-    let Some((key, anchor, renew_from, price, currency, cycle, cycle_days, next, last)) = row else {
+    let Some((
+        key,
+        anchor,
+        renew_from,
+        price,
+        currency,
+        cycle,
+        cycle_days,
+        next,
+        last,
+        item_name,
+        coll_name,
+    )) = row
+    else {
         return Err(missing("条目不存在"));
     };
     let today = engine::today();
     // 记账与推日期是一件事：只落成一半的话，账记了而到期日没动，界面照旧显示逾期，
     // 而台账已经声称这笔付过了——"台账=事实"这条承诺就断在这里
     let tx = conn.unchecked_transaction()?;
+    // 名字当场钉进台账。只记 (kind, item_id) 的话，条目一删这笔账就没了名字，而 id 被
+    // 复用之后它还会挂到新条目名下——台账是事实记录，得能自证，不该跟着当前条目变。
     tx.execute(
-        "INSERT INTO renewal_ledger(kind,item_id,renewed_at,amount,currency,note)
-         VALUES(?1,?2,?3,?4,?5,?6)",
+        "INSERT INTO renewal_ledger(kind,item_id,renewed_at,amount,currency,note,item_name,coll_name)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
         params![
             key,
             id,
@@ -1205,6 +1251,8 @@ pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value
             f(b, "amount").or(price),
             s(b, "currency").or(currency),
             s(b, "note"),
+            item_name,
+            coll_name,
         ],
     )?;
     // 日期该落在哪天由 engine 那个纯函数说了算——四种组合都在那里，且有单测钉着
@@ -1748,6 +1796,41 @@ async fn logo_file(State(app): State<App>, Path(name): Path<String>) -> Result<R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 局部更新的合并规则：缺席即保持、出现即写入、`""` 与 `null` 都是清空、
+    /// `extra` 作为一个整体值。这条规则是整个写入协议的地基——它一松，前端就得重新
+    /// 长出那套"先铺整行再覆盖"的补偿代码，而漏铺一处就是一次静默的数据丢失。
+    #[test]
+    fn a_patch_only_touches_the_keys_it_carries() {
+        let cur = json!({
+            "name": "Netflix", "price": 15.49, "currency": "USD", "cycle": "monthly",
+            "next_renewal": "2026-09-01", "logo": "item-1.png",
+            "extra": { "category": "Streaming", "payment_method": "Visa" },
+        });
+        let cols = || ["name", "price", "currency", "cycle", "next_renewal", "logo", "extra"].into_iter();
+
+        // 只发一个键：其余原样，连表单里根本没有的 logo 也在
+        let got = merge_over(&cur, &json!({ "name": "改过名" }), cols());
+        assert_eq!(got["name"], json!("改过名"));
+        assert_eq!(got["price"], json!(15.49));
+        assert_eq!(got["logo"], json!("item-1.png"));
+        assert_eq!(got["extra"]["payment_method"], json!("Visa"));
+
+        // 清空要显式说出来：null 与空串都算，别的键不受连累
+        let got = merge_over(&cur, &json!({ "price": null, "next_renewal": "" }), cols());
+        assert_eq!(got["price"], Value::Null);
+        assert_eq!(got["next_renewal"], json!(""));
+        assert_eq!(got["currency"], json!("USD"));
+
+        // extra 是一个整体值：出现即整份替换（少写的键就是要删的键）
+        let got = merge_over(&cur, &json!({ "extra": { "category": "AI" } }), cols());
+        assert_eq!(got["extra"], json!({ "category": "AI" }));
+
+        // 现值里没有、请求里也没有的键 → NULL（新列刚加出来时就是这个形状）
+        let got = merge_over(&json!({ "name": "x" }), &json!({}), cols());
+        assert_eq!(got["price"], Value::Null);
+        assert_eq!(got["name"], json!("x"));
+    }
 
     /// 一行字段的可比形态。**故意不含 pos**：迁移 0008 自己编了一套序号，而字段顺序本就
     /// 是用户可拖动的呈现细节（`PUT /api/fields/order` 会整份重写），钉它只会逼模板去

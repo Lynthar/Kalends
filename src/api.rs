@@ -139,6 +139,8 @@ async fn overview(State(app): State<App>) -> R {
         // 该上时间线却算不出到期日的：不点名的话它们会从界面上静默消失
         "undated": engine::undated(&conn)?,
         "totals": engine::totals(&conn)?,
+        // 该计支出却缺了金额/币种/周期里的一项，于是一分钱没进总额的：同样要点名
+        "uncounted": engine::uncounted(&conn)?,
         // 到期时间线里的 kind 是库键，前端要靠这份清单显示库名与到期动作说法
         "collections": crate::collections::collections(&conn)?,
     })))
@@ -155,14 +157,19 @@ async fn fx_refresh(State(app): State<App>) -> R {
     Ok(Json(crate::fx::refresh(&app.db).await?))
 }
 
-/// 续费台账，给设置页的只读列表用。带上库名与条目名——光有 kind + item_id 读不出是哪一笔；
-/// 条目名按 (id, 所属库) 取：items 的 id 在删除后会被复用，只按 id 取会张冠李戴。
-/// 库或条目已删的旧账原样留着，名字给空，由界面回落到编号。
+/// 续费台账，给设置页的只读列表用。
+///
+/// 名字以**写入时钉进去的那份快照**为准（迁移 0018 起每笔都记）：只按 (kind, item_id)
+/// 回查当前条目的话，条目一删这笔账就没了名字，而 items 的 id 会被 SQLite 复用——
+/// 「删掉旧条目、在同一个库里再建一条」会让旧账挂到新条目名下（实测复现过）。
+/// 快照为空的是 0018 之前、且条目当时已删的老账，回查一次仍然读不到就交给界面回落成编号。
 async fn ledger_list(State(app): State<App>) -> R {
     let conn = app.db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT l.id, l.kind, l.item_id, l.renewed_at, l.amount, l.currency, l.note, c.name,
-                (SELECT i.name FROM items i WHERE i.id = l.item_id AND i.collection_id = c.id)
+        "SELECT l.id, l.kind, l.item_id, l.renewed_at, l.amount, l.currency, l.note,
+                coalesce(l.coll_name, c.name),
+                coalesce(l.item_name,
+                  (SELECT i.name FROM items i WHERE i.id = l.item_id AND i.collection_id = c.id))
          FROM renewal_ledger l LEFT JOIN collections c ON c.key = l.kind
          ORDER BY l.renewed_at DESC, l.id DESC LIMIT 500",
     )?;

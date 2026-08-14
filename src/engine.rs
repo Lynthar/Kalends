@@ -399,6 +399,67 @@ pub fn upcoming(conn: &Connection) -> Result<Vec<Value>> {
     Ok(items.into_iter().map(|(_, v)| v).collect())
 }
 
+/// 该计支出、却因为缺一半而没被计进去的条目。
+///
+/// `totals` 要金额与币种同时在场才累加：只填了金额的条目一分钱都不进总额，而界面上
+/// 那一行明明白白写着价钱——总额看着像"全都算进去了"。与 `undated` 同一条道理：
+/// 悄悄拿掉比显示错误更糟，所以单独点名交给界面说。
+/// 只填了币种没填金额的不算欠缺（那就是还没定价）。
+pub fn uncounted(conn: &Connection) -> Result<Vec<Value>> {
+    let sems = sem_map(conn)?;
+    let mut out = Vec::new();
+    for r in rows(conn)? {
+        if !sem_of(&sems, &r.key, &r.status).spend || r.price.is_none() {
+            continue;
+        }
+        let missing = if r.currency.as_deref().unwrap_or("").is_empty() {
+            "币种"
+        } else if monthly_factor(r.cycle.as_deref().unwrap_or(""), r.cycle_days).is_none() {
+            // 买断（lifetime）没有"每月多少"可言，不是欠缺
+            if r.cycle.as_deref() == Some("lifetime") {
+                continue;
+            }
+            "周期"
+        } else {
+            continue;
+        };
+        out.push(json!({
+            "kind": r.key,
+            "id": r.id,
+            "name": r.title(),
+            "missing": missing,
+        }));
+    }
+    Ok(out)
+}
+
+/// 分币种月/年支出：状态语义为"计支出"且周期可折算的条目。
+pub fn totals(conn: &Connection) -> Result<Vec<Value>> {
+    let mut map: BTreeMap<String, f64> = BTreeMap::new();
+    let sems = sem_map(conn)?;
+    for r in rows(conn)? {
+        if !sem_of(&sems, &r.key, &r.status).spend {
+            continue;
+        }
+        let (Some(price), Some(currency)) = (r.price, r.currency.clone()) else {
+            continue;
+        };
+        if let Some(f) = monthly_factor(r.cycle.as_deref().unwrap_or(""), r.cycle_days) {
+            *map.entry(currency).or_insert(0.0) += price * f;
+        }
+    }
+    Ok(map
+        .into_iter()
+        .map(|(c, m)| {
+            json!({
+                "currency": c,
+                "monthly": (m * 100.0).round() / 100.0,
+                "annual": (m * 12.0 * 100.0).round() / 100.0,
+            })
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,31 +688,4 @@ mod tests {
         assert_eq!(due_from("last", "", None, None, Some("2026-01-01")), None);
     }
 
-}
-
-/// 分币种月/年支出：状态语义为"计支出"且周期可折算的条目。
-pub fn totals(conn: &Connection) -> Result<Vec<Value>> {
-    let mut map: BTreeMap<String, f64> = BTreeMap::new();
-    let sems = sem_map(conn)?;
-    for r in rows(conn)? {
-        if !sem_of(&sems, &r.key, &r.status).spend {
-            continue;
-        }
-        let (Some(price), Some(currency)) = (r.price, r.currency.clone()) else {
-            continue;
-        };
-        if let Some(f) = monthly_factor(r.cycle.as_deref().unwrap_or(""), r.cycle_days) {
-            *map.entry(currency).or_insert(0.0) += price * f;
-        }
-    }
-    Ok(map
-        .into_iter()
-        .map(|(c, m)| {
-            json!({
-                "currency": c,
-                "monthly": (m * 100.0).round() / 100.0,
-                "annual": (m * 12.0 * 100.0).round() / 100.0,
-            })
-        })
-        .collect())
 }
