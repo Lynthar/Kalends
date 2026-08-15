@@ -339,6 +339,13 @@
 <!-- 播报区：toast 是唯一的成功/失败反馈，不标 live region 屏幕阅读器就完全听不到 -->
 <div id="toast" role="status" aria-live="polite" hidden></div>
 <script src="/config.js"></script>
-<script src="/app.js"></script>
+<!-- 前端拆成七份（2026-08-15）：普通 script 共享全局作用域，**顺序即依赖顺序**，别调换 -->
+<script src="/js/core.js"></script>
+<script src="/js/table.js"></script>
+<script src="/js/fields.js"></script>
+<script src="/js/editors.js"></script>
+<script src="/js/settings-media.js"></script>
+<script src="/js/pages.js"></script>
+<script src="/js/collections.js"></script>
 </body>
 </html>

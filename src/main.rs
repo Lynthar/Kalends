@@ -17,7 +17,7 @@ use std::{
 };
 
 use axum::{
-    extract::{Request, State},
+    extract::{Path, Request, State},
     http::{header, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -95,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut router = Router::new()
         .route("/", get(index))
-        .route("/app.js", get(app_js))
+        .route("/js/{name}", get(js_file))
         .route("/style.css", get(style_css))
         .route("/config.js", get(config_js))
         .route("/manifest.webmanifest", get(manifest))
@@ -161,11 +161,24 @@ async fn index() -> Html<&'static str> {
     Html(include_str!("../assets/index.html"))
 }
 
-async fn app_js() -> impl IntoResponse {
+/// 前端拆成了七份（见 index.html 的加载顺序），仍是编译期嵌入的静态文本。
+/// 用一个带名字的路由而不是七个 handler：加一份只要在这张表里补一行。
+async fn js_file(Path(name): Path<String>) -> Response {
+    let body = match name.as_str() {
+        "core.js" => include_str!("../assets/js/core.js"),
+        "table.js" => include_str!("../assets/js/table.js"),
+        "fields.js" => include_str!("../assets/js/fields.js"),
+        "editors.js" => include_str!("../assets/js/editors.js"),
+        "settings-media.js" => include_str!("../assets/js/settings-media.js"),
+        "pages.js" => include_str!("../assets/js/pages.js"),
+        "collections.js" => include_str!("../assets/js/collections.js"),
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
     (
         [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
-        include_str!("../assets/app.js"),
+        body,
     )
+        .into_response()
 }
 
 async fn style_css() -> impl IntoResponse {

@@ -21,7 +21,7 @@ Status values carry meaning rather than decoration. Each one declares whether it
 
 ### Tables
 
-Modelled on Notion databases. Every column has a field type — text, number, select, multi-select, status, date, rating — and the type drives sorting, the filter panel and how the cell renders. Click a cell to edit it in place; no form to open.
+Modelled on Notion databases. Every column has a field type — text, number, select, multi-select, status, date, phone, link, mail — and the type drives sorting, the filter panel and how the cell renders. Click a cell to edit it in place; no form to open.
 
 Columns are data, so a new collection arrives with a working set. Add your own, rename them, recolour and hand-sort select options with changes propagating to every row, drag widths and order, hide what you don't need, collapse sub-rows. Field order and "show in table" belong to the collection and follow it across devices. Sort, filter and column width stay in the browser, so your phone and your laptop can disagree.
 
@@ -31,7 +31,7 @@ Telegram bot and SMTP mail, N-days-before thresholds plus a daily digest. Telegr
 
 ### Media library
 
-Douban-shaped fields (directors, writers, genres, a snapshot of the Douban rating and reviews), 5-star ratings, poster wall and table views. TMDB lookup on demand in Chinese, posters cached to disk. Bulk import over the API; `scripts/notion-import.py` is the script used to move off Notion.
+Douban-shaped fields (directors, writers, genres, a snapshot of the Douban rating and reviews), your own score out of ten next to Douban's, poster wall and table views. TMDB lookup on demand in Chinese, posters cached to disk. Bulk import over the API; `scripts/notion-import.py` is the script used to move off Notion.
 
 ### Backups and privacy
 
@@ -75,7 +75,7 @@ Keep the SQLite file on local disk. Locking over SMB or NFS is not reliable enou
 
 ### 表格
 
-照 Notion 的数据库表做。每列属于一种字段类型——文本 / 数字 / 单选 / 多选 / 状态 / 日期 / 星级——类型决定这列怎么排序、筛选面板长什么样、格子怎么渲染。点格子就地改，不用开表单。
+照 Notion 的数据库表做。每列属于一种字段类型——文本 / 数字 / 单选 / 多选 / 状态 / 日期 / 电话 / 网址 / 邮箱——类型决定这列怎么排序、筛选面板长什么样、格子怎么渲染。点格子就地改，不用开表单。
 
 列本身是数据，新建的库一上来就有一套能用的列。可以自己加列、改名，给单选多选的选项配色和手动调序（改动传播到所有行），拖列宽列序，隐藏列，折叠子行。字段顺序和「上不上表格」是库的属性，跟着账本走；排序、筛选、列宽存在浏览器本地，所以手机和电脑可以各看各的。
 
@@ -85,7 +85,7 @@ Telegram Bot 与 SMTP 邮件，提前 N 天逐档提醒加每日摘要，Telegra
 
 ### 媒体库
 
-豆瓣式字段（导演 / 编剧 / 类型，豆瓣评分与短评快照），5 星评分，海报墙与表格双视图。按需调 TMDB 抓中文元数据，海报落到本地。批量导入走接口，`scripts/notion-import.py` 是当初从 Notion 搬家用的脚本。
+豆瓣式字段（导演 / 编剧 / 类型，豆瓣评分与短评快照），我的评分按 10 分制、与豆瓣评分并排可比，海报墙与表格双视图。按需调 TMDB 抓中文元数据，海报落到本地。批量导入走接口，`scripts/notion-import.py` 是当初从 Notion 搬家用的脚本。
 
 ### 备份与隐私
 
@@ -110,7 +110,7 @@ SQLite 文件务必放本地磁盘，SMB / NFS 的文件锁不够可靠，别拿
 ```
 src/            axum 服务、到期引擎、通知、备份、TMDB 客户端
 migrations/     数据库迁移（编译期嵌入，PRAGMA user_version 记版本）
-assets/         前端（原生 JS，无构建步骤，编译期嵌入二进制）
+assets/         前端（原生 JS，无构建步骤，编译期嵌入二进制；js/ 下拆成七份按序加载）
 scripts/        Notion 迁移脚本、前端端到端验证、迁移演练与接口对拍
 deploy/         Docker Compose 与部署文档
 ```
