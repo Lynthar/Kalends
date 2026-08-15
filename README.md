@@ -51,6 +51,8 @@ For a real deployment (Docker Compose, reverse proxy, single-module setups) see 
 
 Keep the SQLite file on local disk. Locking over SMB or NFS is not reliable enough to trust a ledger to.
 
+Building has the same constraint. If the repository itself sits on a network share, send Cargo's output to a local directory first — `export CARGO_TARGET_DIR=~/.cache/kalends-target` — because incremental compilation wants file locks those filesystems don't provide, and without it `cargo build` stops at a bare `os error 45`.
+
 ## License
 
 [AGPL-3.0](LICENSE)
@@ -104,6 +106,8 @@ TMDB 抓取要先在设置页填一个免费申请的 API key。手机上「添�
 生产部署（Docker Compose、反向代理、单模块开关）见 [deploy/DEPLOY.md](deploy/DEPLOY.md)。环境变量：`KALENDS_ADDR`（默认 `127.0.0.1:4180`）、`KALENDS_DATA`（默认 `./data`）、`KALENDS_MODULES`（默认 `renewals,media`）。
 
 SQLite 文件务必放本地磁盘，SMB / NFS 的文件锁不够可靠，别拿账本去赌。被墙的网络环境里，设置页有一个共用的出网代理（管 TMDB、汇率、取图标），Telegram 另有自己的一格。
+
+构建受同一条约束。仓库本身放在网络共享上时，先把 Cargo 的产物指到本地盘——`export CARGO_TARGET_DIR=~/.cache/kalends-target`——增量编译要的文件锁这类文件系统给不了，不指的话 `cargo build` 只会撂下一句 `os error 45`。
 
 ### 仓库结构
 
