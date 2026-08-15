@@ -1,14 +1,6 @@
-/* Kalends 前端 · collections.js
-   库这一侧：标签与容器的生成、库序拖动、通用行渲染、通用详情表单（含 logo 与父条目）、库管理对话框。
-
-   **这些文件是普通 <script>，共享同一个全局作用域，按 index.html 里的顺序执行。**
-   不是 ES module，也不打算是：e2e 有十几处靠 `evl('loadAll()')` 这样直接调全局函数，
-   换成模块作用域会让整套断言一起报废；而"零构建步骤"这条也不允许引打包器。
-   拆分本身是纯搬运——**加东西时放进对应的那份，别又长回一个大文件**。
-*/
-
-/* ══ 库：标签页 / 表头 / 行 / 详情表单全部由 /api/collections + /api/fields 生成 ══
-   预置三库（订阅 / SIM / VPS）与用户自建库同走这一份渲染器，没有第二条路径。 */
+/* Kalends 前端 · collections.js —— 库这一侧：标签与容器生成、库序拖动、通用行渲染、
+   通用详情表单（含 logo 与父条目）、库管理对话框。加载方式与作用域约定见 core.js 头注。
+   预置三库与自建库同走这一份渲染器，全部由 /api/collections + /api/fields 生成。 */
 
 const collOf = key => (state.overview?.collections || []).find(c => c.key === key);
 const colls = () => state.overview?.collections || [];
@@ -16,7 +8,7 @@ const fieldsOf = key => state.fields
   .filter(f => f.tbl === key)
   .sort((a, b) => a.pos - b.pos || a.id - b.id);
 // 名称列恒上表：它承载折叠钮 / logo / ⤢ 详情入口，关掉等于整行没有入口。
-// **表头与行必须读同一份字段集**——兜底只写在其中一处就会表头少一列、行多一格，整表错位（真踩过）。
+// **表头与行必须读同一份字段集**——兜底只写在其中一处就会表头少一列、行多一格，整表错位。
 const NAME_FIELD = { key: 'name', name: '名称', ftype: 'text', src: 'col', shown: true };
 function shownFields(key) {
   const fs = fieldsOf(key).filter(f => f.shown || f.key === 'name');
@@ -35,11 +27,9 @@ function semOf(key, status) {
 }
 const statusOrder = key => (fieldOf(key, 'status')?.options || []).map(o => o.v);
 
-/* 字段取值有两个：**显示值与编辑值必须分开**。
-   周期是唯一一个存储键与呈现文案不同的字段（monthly ↔ Monthly）——拿显示值当表单初值，
-   保存时就把文案写回了 items.cycle，存储键就此丢失：周期格变空、支出漏算这一条、
-   「上次续费+周期」的库连到期日都推不出来（条目从时间线与 ICS 上消失）。真踩过。
-   表格与筛选读 fieldVal，表单与编辑器一律读 fieldRaw。 */
+/* **显示值与编辑值必须分开**：表格与筛选读 fieldVal，表单与编辑器一律读 fieldRaw。
+   周期是唯一「存储键≠呈现文案」的字段（monthly ↔ Monthly），拿显示值当表单初值、
+   保存就把文案写回 items.cycle——周期格变空、支出漏算、整条掉出时间线与 ICS。 */
 // 编辑值：真列直接读、extra 读挂载点、calc 由服务端或模板算出
 function fieldRaw(f, r) {
   if (f.src === 'col') return r[f.key];
@@ -156,9 +146,8 @@ function ensureCollDom(c) {
     btn.dataset.tab = key;
     $('#coll-settings').before(btn);
   }
-  // 三个预置库的标签写在 index.html 里，不走上面的新建分支——事件一律在这儿绑，
-  // 否则它们连拖都拖不动（真踩过）。
-  // **右键开库设置已于 2026-08-15 撤掉**：不看文档发现不了，而齿轮就在旁边，同一件事两个入口
+  // 预置库的标签写在 index.html 里、不走上面的新建分支：事件一律在这儿按 wired 绑一次。
+  //（右键开库设置已撤：不看文档发现不了，而齿轮就在旁边，同一件事不留两个入口）
   if (!btn.dataset.wired) {
     btn.dataset.wired = '1';
     btn.onclick = () => switchTab(key);
@@ -186,18 +175,16 @@ function ensureCollDom(c) {
   COLS[key] = Object.fromEntries(shownFields(key).map(f => [f.key, colFromField(key, f)]));
   const head = $(HEAD_SEL[key]);
   const want = collThead(key);
-  // 与**上次生成的那份模板串**比，不能与表头此刻的 innerHTML 比：initHead 会往 th 里
-  // 注入类型图标、排序指示、拖拽与缩放结构，比完必然不相等——于是每次 loadAll（保存一个
-  // 格子、拖一行、改个设置都会触发）都在整份重建库表头、重新绑一遍事件，白干且会丢焦点。
+  // 与**上次生成的模板串**比，不能与表头此刻的 innerHTML 比：initHead 会往 th 里注入
+  // 图标/排序指示/拖拽结构，比完必然不相等——每次 loadAll 都会白白整份重建、重绑事件、丢焦点。
   if (THEAD_HTML[key] !== want) {
     head.rows[0].innerHTML = want;
     THEAD_HTML[key] = want;
     head.closest('.tablewrap').querySelector('.newrow')?.remove();
     initHead(key); // 它自己会结算一次偏好
   } else {
-    // 表头没重建，视图偏好照样每次结算（两个节奏，见 settleView）。
-    // 列键**从字段集现取**，不能从 thead 的 DOM 里取——那份可能已经被列序拖动重排过，
-    // 而 TKEYS 记的必须是模板序（tbody 恒按模板序渲染，td 靠它对上 data-k）
+    // 表头没重建，偏好照样每次结算（两个节奏，见 settleView）。列键**从字段集现取**，
+    // 不能从 thead 的 DOM 取——那份可能已被列序重排，而 TKEYS 必须是模板序
     settleView(key, [...shownFields(key).map(f => f.key), 'ops']);
   }
 }
@@ -230,10 +217,8 @@ function leftBar(it) {
   const left = it.days_left;
   if (it.last_renewed && it.due) {
     const total = dayDiff(new Date(it.due + 'T00:00:00'), new Date(it.last_renewed + 'T00:00:00'));
-    // left > total ⟺ last_renewed 在今天之后 ＝ 本期还没开始。这是提前续费 + 账单日不变
-    // （renew_from='schedule'）产生的合法状态，0017 之前根本不可能出现；照旧画进度条就是
-    // 「剩 37 天 / 31」配一根空槽，看着像算错了。数字都对，错的是拿"进度"去讲一段还没
-    // 开始的周期——直接说清本期哪天起算
+    // left > total ⟺ last_renewed 在未来＝本期还没开始（提前续费 + 账单日不变的合法
+    // 状态）。照旧画进度条就是「剩 37 天 / 31」配一根空槽——直接说清本期哪天起算
     if (total > 0 && left > total) return esc(`剩 ${left} 天（本期 ${it.last_renewed} 起）`);
     if (total > 0) {
       const pct = Math.min(100, Math.max(0, (total - left) / total * 100));
@@ -253,7 +238,7 @@ function renderColl(key) {
   tb.innerHTML = '';
   const byId = Object.fromEntries(all.map(x => [x.id, x]));
   let rows = applyView(key, all);
-  // 无列排序时的基态就是手动序（pos）。这里曾经按名称字母序排，那让「拖出来的顺序」无处安放
+  // 无列排序时的基态就是手动序（pos）——按名称字母序排会让「拖出来的顺序」无处安放
   if (!views[key].sort) rows = [...rows].sort(byPos);
   const vis = new Set(rows.map(r => r.id));
   const kids = new Map();
@@ -343,10 +328,8 @@ function itemDialog() {
     </form>`;
   document.body.appendChild(d);
   d.querySelector('[data-close]').onclick = () => d.close();
-  // 网址是在同一张表单里填的，填完立刻就该能取图标，不必先保存再重开。
-  // **这个监听器只能绑一次**：#item-fields 是常驻节点（对话框只建一次），而 logoRow
-  // 每开一次详情表单就跑一遍——绑在那里等于每开一次叠一个，闭包还攥着上一次那颗
-  // 已经脱离 DOM 的按钮。所以在这里绑，回调里现查当前那颗。
+  // 填了网址立刻就该能取图标。**监听器只绑一次**：#item-fields 是常驻节点，而 logoRow
+  // 每开一次表单跑一遍——绑在那边等于每开一次叠一个、闭包还攥着已脱离 DOM 的旧按钮。
   d.querySelector('#item-fields').addEventListener('input', e => {
     if (e.target.matches('[data-f="url"], [data-urlfield]')) syncGrabBtn();
   });
@@ -366,9 +349,8 @@ function fieldOptions(key, f) {
   return out;
 }
 
-// 周期是目前唯一「存储键 ≠ 呈现文案」的固定档位词表：既不从数据里长，也不接受现场新增。
-// 放开了就会有人把 Monthly 这样的文案写回 items.cycle，按周期推日期的库整条掉出
-// 到期时间线与 ICS（2026-07-31 真踩过）。
+// 周期是唯一「存储键 ≠ 呈现文案」的固定档位词表：不从数据里长、不接受现场新增——
+// 放开了就会有人把 Monthly 这样的文案写回 items.cycle，整条掉出到期时间线与 ICS。
 const fixedVocab = f => f.src === 'col' && f.key === 'cycle';
 
 // 单选下拉的候选：一律 {v: 存回去的值, label: 给人看的文案}。
@@ -401,11 +383,8 @@ function initMoptAdd(inp) {
   });
 }
 
-// 单选下拉旁的「新选项」输入：回车加一项并选中（已有就直接选中）。
-// 开放词表（币种/分类/注册商…）建库时是空的，没有这个入口的话首装第一条就填不出来——
-// 只能先存个残缺条目、再回表格用就地编辑器把值造出来。词表本就从数据里长，
-// 所以这里只管把值选上，存不存进词表交给保存后的常规流程。
-// tr：落进下拉之前的规范化（币种要统一成大写，其余原样）
+// 单选下拉旁的「新选项」：开放词表建库时是空的，没有它空库首装第一条就填不出来。
+// 回车只把值加进下拉并选中（词表本就从数据里长）；tr＝落进下拉前的规范化（币种大写）。
 function initSoptAdd(inp, tr = v => v) {
   inp.addEventListener('keydown', e => {
     if (e.key !== 'Enter') return;
@@ -437,13 +416,9 @@ function openItemDialog(key, it) {
   d.showModal();
 }
 
-/* 一个字段 → 一枚表单控件。库的详情表单与媒体表单的自定义列共用这一份，
-   免得多选/单选这几种非平凡控件各写一遍、各漏一处。
-
-   **一个 `<label>` 只配一枚控件**：多选是一串各带自己 label 的勾选框，外层再套 label 就是
-   嵌套（规范不允许，读屏读出的关联也是错的），所以那一支用 `div[role=group]` +
-   `aria-labelledby` —— 拿到的可访问性结果一样，还不用背 fieldset 的默认边框与
-   grid 里 `min-width:auto` 那些包袱。栅格样式因此要认 `.field`（见 `.fgrid label, .fgrid .field`）。 */
+/* 一个字段 → 一枚表单控件（库表单与媒体自定义列共用）。**一个 label 只配一枚控件**：
+   多选那种一串控件用 div[role=group]+aria-labelledby（嵌套 label 规范不允许、读屏
+   关联也错）；栅格样式因此要认 .field（.fgrid label, .fgrid .field）。 */
 let grpSeq = 0;
 function fieldControl(key, f, it) {
   const v = it ? fieldRaw(f, it) : ''; // 编辑值，不是格子里那份呈现
@@ -458,13 +433,12 @@ function fieldControl(key, f, it) {
     lab.dataset.gid = gid;
   }
   if (f.ftype === 'multi') {
-    // 勾选清单，不是逗号分隔的文本框——值里含 , ， 、 / 时，文本框存回去会把它拆成两个
+    // 勾选清单，不是逗号分隔的文本框——含分隔符的值经文本框往返会被拆坏
     const cur = new Set(Array.isArray(v) ? v.map(String) : v ? [String(v)] : []);
     const opts = fieldOptions(key, f);
     for (const x of cur) if (!opts.includes(x)) opts.push(x);
     lab.className = 'field span2';
-    // 勾选框超过三行就在自己的框里滚（长词表如 VPS 地点有 19 个值，否则把费用/到期挤出首屏）；
-    // 「新选项」输入框留在滚动框外，不然想加值得先滚到底
+    // 勾选框超过三行在自己的框里滚（长词表别把费用/到期挤出首屏）；「新选项」留在滚动框外
     lab.innerHTML = `<span id="${lab.dataset.gid}">${esc(f.name || f.key)}</span>
       <span class="mopts"><span class="mchecks" data-mbox="${esc(f.key)}">${opts.map(o =>
         `<label class="check"><input type="checkbox" value="${esc(o)}"${cur.has(o) ? ' checked' : ''}><span>${esc(o)}</span></label>`
@@ -500,9 +474,8 @@ function fieldControl(key, f, it) {
   return lab;
 }
 
-/* 父条目：子行只有两层（服务 → 套餐档位），所以候选是同库的顶层行。
-   自己已经有子行时不能再挂到别人下面——后端 check_parent 一样会拒，这里先把口封上，
-   免得用户填完一整张表单才被退回。parent_id 不是注册字段，值单独读、单独写。 */
+/* 父条目：子行只有两层，候选是同库顶层行；已有子行的不能再挂到别人下面（后端
+   check_parent 同拒，这里先封口免得填完一整张表单才被退回）。parent_id 不是注册字段。 */
 function parentRow(key, it) {
   const rows = state[key] || [];
   const hasKids = !!it && rows.some(r => r.parent_id === it.id);
@@ -534,10 +507,8 @@ function syncGrabBtn() {
   if (g) g.hidden = !formUrl();
 }
 
-/* 条目图标：上传/清除各走自己的端点，与表单的保存不是一回事——表单的 PATCH 体里
-   压根没有 logo 这个键，而缺席即保持，所以两者不会互相覆盖。
-   （全量替换那会儿必须把 editingItem.row.logo 同步回去，否则紧接着按「保存」就把刚传的
-   图标清掉了；现在 paint() 仍然同步它，是为了让表单里的预览与本次上传一致。） */
+/* 条目图标：上传/清除走自己的端点，与表单保存互不覆盖（PATCH 体里没有 logo 键，
+   缺席即保持）；paint() 同步 editingItem.row.logo 只为让预览与本次上传一致。 */
 function logoRow(it) {
   // 里面是三颗按钮加一个文件选择框，不是单独一枚控件——用 group 而不是 label：
   // 套在 label 里的话它会关联到那个隐藏的 file input，点按钮还可能顺带触发一次文件选择
@@ -604,9 +575,8 @@ function logoRow(it) {
   return lab;
 }
 
-/* fieldControl 的反向：从表单里读回一个字段的值。控件不在场时给 NO_CONTROL，
-   调用方一律要跳过而不是当成空值——把"没这个控件"当成"用户清空了"，就是整行 PUT
-   语义下把字段清掉的那类事故。multi 没有单一的 [data-f]，所以要分支读。 */
+/* fieldControl 的反向：从表单读回一个字段的值。控件不在场给 NO_CONTROL、调用方一律
+   跳过——当成"用户清空了"就是显式写空值出去、照样清掉字段。multi 没有单一 [data-f]，分支读。 */
 const NO_CONTROL = Symbol('no-control');
 function readFieldControl(scope, f) {
   if (f.ftype === 'multi') {
@@ -618,8 +588,7 @@ function readFieldControl(scope, f) {
   const el = document.querySelector(`${scope} [data-f="${f.key}"]`);
   if (!el) return NO_CONTROL;
   const v = el.value.trim();
-  // 数字/星级清空给 null 而不是 undefined：这个值会直接进 PATCH 体，而 JSON.stringify
-  // 会把 undefined 连键一起丢掉——键缺席在那套语义里是"保持原值"，清空就失效了
+  // 数字清空给 null 不给 undefined：undefined 会被 JSON.stringify 连键丢掉，清空就失效了
   return TYPES[f.ftype]?.numeric ? (v === '' ? null : Number(v)) : v;
 }
 
@@ -736,11 +705,9 @@ function pickTpl(d, t) {
   fillTplChips(d);
 }
 
-/* 字段面板：库级的字段顺序与「上不上表」。**这一层是账本自己的属性**（落 `fields.pos`/`shown`），
-   跟着库走、所有设备一致；而「列宽 / 列序 / 隐藏列 / 排序 / 筛选」是**本机视图**，各设备各记各的
-   （CLAUDE.md 有明文，手机和电脑本就该能各看各的）。两层的边界只有一处会打架：本机列序覆写
-   会盖住这里刚排好的字段序——**那件事由 `settleView` 自动结算**（服务端序一变，过期的本机覆写
-   就丢掉），这里不必也不该再手动清一次。 */
+/* 字段面板改的是 schema（fields.pos/shown，跟着账本走、所有设备一致）；列宽/列序/
+   隐藏/排序/筛选是本机 view。两层唯一打架的是列序——由 settleView 自动结算，
+   这里不必也不该再手动清一次。 */
 function fillCollFields(c) {
   const box = $('#coll-fields-box');
   box.hidden = !c;
@@ -865,8 +832,8 @@ document.addEventListener('submit', async e => {
     renew_from: g('renew_from'), verb: g('verb'),
   };
   if (!body.name) { toast('库名不能为空', true); return; }
-  // 换到期模型是有后果的：新锚点那一侧的日期字段是空的，已有条目在填上之前都算不出到期日
-  //（后端会把该字段补进注册表，所以填得上；首页「算不出到期日」那栏会点名它们）
+  // 换到期模型有后果：新锚点那侧的日期字段是空的，已有条目在填上之前算不出到期日
+  //（后端会把字段补进注册表，首页「算不出到期日」会点名它们）
   if (editingColl && body.due_anchor !== editingColl.due_anchor) {
     const to = body.due_anchor === 'next' ? '直接记下次到期日' : '上次续费 + 周期';
     if (!confirm(`把「${editingColl.name}」的到期模型改成「${to}」？\n\n新模型读的是另一个日期字段，已有条目在把它填上之前算不出到期日（会列在首页「算不出到期日」里）。改回来即可恢复。`)) return;

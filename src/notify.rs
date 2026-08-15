@@ -60,13 +60,9 @@ pub fn http_client(proxy: &str) -> Result<reqwest::Client> {
     build_client(proxy, true, None)
 }
 
-/// 不跟重定向、且把目标主机钉死在一个已校验地址上的客户端。
-///
-/// 取图标那条路要自己一跳一跳地跟（交给 reqwest 自动跟的话，
-/// `https://正常站/x → 302 → http://10.0.0.5/` 就绕过了内网防线），
-/// **并且每跳都得钉地址**：先解析校验、再让 reqwest 自己去解析一次的话，
-/// 两次之间 DNS 可以翻脸（DNS rebinding / TOCTOU），校验过的和真正连上的就不是同一台机器。
-/// `resolve` 只改地址，TLS 的 SNI 与证书校验仍按原主机名走。
+/// 不跟重定向、且把目标主机钉死在一个已校验地址上的客户端（取图标那条路每跳都要
+/// 校验并钉地址，见 `collections::resolve_public`）。只校验不钉的话 reqwest 会再解析
+/// 一次，两次之间 DNS 可以翻脸；`resolve` 只改地址，TLS 的 SNI 与证书校验按原主机名走。
 pub fn http_client_pinned(proxy: &str, host: &str, addr: std::net::SocketAddr) -> Result<reqwest::Client> {
     build_client(proxy, false, Some((host, addr)))
 }
@@ -94,12 +90,9 @@ fn build_client(
     Ok(builder.build()?)
 }
 
-/// 整段读进来，累计超限就断开并报错（读完再判等于白读）。
-///
-/// **reqwest 没有默认上限**，唯一的边界是上面那 30s 总超时——也就是「带宽 × 30s」：
-/// 千兆链路下最坏是数 GB 进到这个单二进制进程的内存里，而容器内存配额常只有几百 MB，
-/// OOM kill 会把通知调度一起带走。取图标与 TMDB 图片都走它：图标那侧的目标是用户
-/// 自己填的网址（可能被劫持），TMDB 那侧虽是可信源，但中间还隔着一层用户配的代理。
+/// 整段读进来，累计超限就断开并报错（读完再判等于白读）。reqwest 没有默认上限，
+/// 唯一边界是 30s 总超时＝「带宽 × 30s」全进内存——容器内存配额常只有几百 MB，
+/// OOM kill 会把通知调度一起带走。取图标与 TMDB 图片都走它。
 pub async fn body_capped(resp: reqwest::Response, limit: usize) -> Result<Vec<u8>, String> {
     let too_big = || format!("响应体超过 {} KB", limit >> 10);
     if resp.content_length().is_some_and(|n| n > limit as u64) {
@@ -191,12 +184,9 @@ pub fn line(it: &Value) -> String {
     format!("{when}（{due}）：{name}{extra}")
 }
 
-/// 发送渠道。
-///
-/// **是枚举而不是字符串**：发送分派是一个 `match`，加一种渠道时漏改它会**编译失败**。
-/// 字符串版那个 `_ =>` catch-all 不会——新渠道会掉进邮件分支，`mail` 为 None 时
-/// `unwrap` 直接 panic，而 `scheduler` 的重试循环在 `tick` 外面、只接得住 `Err` 接不住
-/// panic：unwind 会带走整个后台任务，通知从此静默停止直到重启，HTTP 服务却一切正常。
+/// 发送渠道。**是枚举不是字符串**：分派是穷尽 `match`，加渠道漏改会编译失败；
+/// 字符串版的 catch-all 会错发并可能 panic，而 `scheduler` 只接得住 `Err` 接不住
+/// panic——unwind 带走整个后台任务，通知静默停止而 HTTP 服务一切正常。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Channel {
     Telegram,
@@ -233,12 +223,9 @@ struct Pending {
     text: String,
 }
 
-/// 已经成功发出去的通知，去重用。含折叠补发时写下的 `covered` 行——它们同样是 `ok=1`，
-/// 语义就是"这一档不必再发了"。
-///
-/// **一次查询载入，而不是在决策循环里逐条 `EXISTS`**：逐条是「项数 × 阈值数 × 渠道数」次
-/// 查询，几十个条目就是几百次，全都发生在全局那把单连接锁里，而同一把锁挡着所有 HTTP
-/// 请求。载入也让决策变成纯函数，那才是这一段唯一没有测试的地方。
+/// 已成功发出的通知（含折叠时记下的 `covered` 行，同样 `ok=1`）。**一次查询载入**，
+/// 不在决策循环里逐条 `EXISTS`——那是项数×阈值×渠道次查询，全发生在挡着所有 HTTP
+/// 请求的单连接锁里；载入也让决策成为纯函数。
 #[derive(Default)]
 struct SentLog {
     items: HashSet<(String, i64, String, i64, Channel)>,
@@ -292,12 +279,9 @@ impl SentLog {
     }
 }
 
-/// 摘要时刻，恒为零填充的 `HH:MM`。
-///
-/// 判断"到点了吗"是拿 `%H:%M` 的当前时刻做**字符串**比较，所以一个没零填充的
-/// `"9:00"` 会让 `"09:00" >= "9:00"` 乃至 `"23:59" >= "9:00"` 全为假——摘要从此永不
-/// 触发，且界面上看不出任何异常。界面的 `<input type=time>` 按规范写不出这种值，
-/// 但设置接口收任意字符串，所以在读出口这里补齐。
+/// 摘要时刻，恒为零填充的 `HH:MM`。到点判定是**字符串**比较，没零填充的 `"9:00"`
+/// 会让 `"23:59" >= "9:00"` 为假、摘要永不触发且看不出异常；界面的 `<input type=time>`
+/// 写不出这种值，但设置接口收任意字符串，所以在读出口补齐。
 fn digest_at(conn: &Connection) -> String {
     normalize_hhmm(&db::get_setting(conn, "notify.digest_time").unwrap_or_default())
 }
@@ -313,11 +297,8 @@ fn normalize_hhmm(raw: &str) -> String {
     }
 }
 
-/// 载入去重记录的下界。
-///
-/// 两半的 `due_date` 来路不同：逐项提醒记的是条目自己的到期日（**逾期项在过去，可能已经过去
-/// 很久**），每日摘要记的是当天。取两者更早的那个——从今天切起就会把逾期项的记录挡在外面，
-/// 它们于是每轮都被判成"没发过"，天天重发。
+/// 载入去重记录的下界：取"今天"与本轮最早 due 的更早者。逾期项的记录在过去，
+/// 从今天切起会把它们挡在外面——于是每轮都被判成"没发过"，天天重发。
 fn load_since(today: &str, ups: &[Value]) -> String {
     ups.iter()
         .filter_map(|it| it["due"].as_str())
@@ -337,18 +318,9 @@ struct TickInput<'a> {
     sent: &'a SentLog,
 }
 
-/// 决定这一轮要发什么。
-///
-/// 通知语义里有三条**从代码直觉推不出来、改了却看不出异常**的规则，全在这个函数里，
-/// 也全都由单测钉着：
-///
-/// ① **muted 项不发逐项提醒，但仍进每日摘要**。用户拍过板：摘要＝到期时间线的全景，
-///    muted 只管"不单独推送"这一件事。补齐成"摘要也跳过"就是推翻拍板。
-/// ② **补发折叠成一条**：够格的阈值里只发最紧迫的那个，其余记 `covered`。否则停机一周
-///    后重启，同一个条目会按 14/7/3/1/0 一次刷五条出来。
-/// ③ **逾期项只提醒一次**：`days <= t` 对负数满足所有档位，首轮一次发完记完；只要 `due`
-///    不变去重键就不变，此后靠每日摘要。台账里长期挂着几项欠费是常态，改成"逾期就每天提醒"
-///    等于每天按逾期项数刷屏。
+/// 决定这一轮要发什么。三条反直觉语义都在这里、各有单测钉着：① muted 不发逐项提醒
+/// 但**仍进摘要**（定案：摘要＝时间线全景，别"顺手补齐"）；② 补发折叠成一条（只发
+/// 最紧迫档，其余记 covered）；③ 逾期项只提醒一次（due 不变去重键就不变，此后靠摘要）。
 fn plan(inp: &TickInput) -> Vec<Pending> {
     let mut out: Vec<Pending> = Vec::new();
     for &ch in inp.channels {
@@ -480,20 +452,24 @@ pub async fn tick(db: &Db) -> Result<()> {
         if let Err(e) = &res {
             tracing::warn!("notify {channel} failed: {e:#}");
         }
-        conn.execute(
+        // 主行与它折叠掉的那几档是一件事：只落了主行就被硬杀（OOM / docker stop 到点升级），
+        // 下一轮 plan 会发现那几档"没发过"，把一条已经折叠进去的提醒再发一遍
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO notification_log(kind,item_id,channel,threshold_days,due_date,ok,error)
              VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![p.kind, p.item_id, channel, p.threshold, p.due, ok, err],
         )?;
         if ok == 1 {
             for t in p.covered {
-                conn.execute(
+                tx.execute(
                     "INSERT INTO notification_log(kind,item_id,channel,threshold_days,due_date,ok,error)
                      VALUES(?1,?2,?3,?4,?5,1,'covered')",
                     params![p.kind, p.item_id, channel, t, p.due],
                 )?;
             }
         }
+        tx.commit()?;
     }
     Ok(())
 }
@@ -557,8 +533,7 @@ mod tests {
 
     #[test]
     fn the_closest_threshold_is_sent_and_the_looser_ones_are_folded_in() {
-        // 3 天后到期同时够格 14/7/3 三档。发最紧迫的那一档，另两档记 covered——
-        // 逐档各发一条的话，停机几天后重启会一次刷屏。
+        // 3 天后到期同时够格 14/7/3 三档：发最紧迫的那档，另两档记 covered
         let p = plan_at("08:00", "2026-08-15", &[up(1, 3, "2026-08-18")], &SentLog::default(), TG);
         assert_eq!(p.len(), 1);
         assert_eq!(p[0].threshold, Some(3));
@@ -584,8 +559,7 @@ mod tests {
         assert_eq!(first[0].threshold, Some(0));
         assert_eq!(first[0].covered, vec![1, 3, 7, 14]);
 
-        // 次日：同一个 due，去重键没变，应当彻底安静。长期欠费的条目本就常年挂着，
-        // 这里松一格就是每天按逾期项数刷屏。
+        // 次日：同一个 due，去重键没变，应当彻底安静——松一格就是每天按逾期项数刷屏
         let mut sent = SentLog::default();
         mark(&mut sent, 1, "2026-08-10", &TH, Channel::Telegram);
         assert!(plan_at("08:00", "2026-08-16", &[up(1, -6, "2026-08-10")], &sent, TG).is_empty());
@@ -619,7 +593,7 @@ mod tests {
         assert_eq!(p[0].kind, "digest");
     }
 
-    // ── muted（用户拍板，别"顺手补齐"）────────────────────────────
+    // ── muted（定案，别"顺手补齐"）────────────────────────────────
 
     #[test]
     fn a_muted_item_gets_no_reminder_of_its_own() {
@@ -629,8 +603,8 @@ mod tests {
 
     #[test]
     fn a_muted_item_still_shows_up_in_the_digest() {
-        // 摘要＝到期时间线的全景，muted 只管"不单独推送"这一件事。用户明确拍过板，
-        // 摘要那一半**没有**跳过 muted 的分支——补上就是推翻拍板。
+        // 摘要＝到期时间线的全景，muted 只管"不单独推送"。摘要那半**没有**跳过
+        // muted 的分支——补上就是推翻定案。
         let ups = [muted(up(1, 3, "2026-08-18"))];
         let p = plan_at("09:30", "2026-08-15", &ups, &SentLog::default(), TG);
         assert_eq!(p.len(), 1);

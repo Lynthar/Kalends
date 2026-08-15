@@ -1,11 +1,6 @@
-/* Kalends 前端 · core.js
-   工具与全局状态、api 调用、视图偏好存取、汇率折算、loadAll/renderAll、首页的到期栏与支出栏。它定义的东西后面每一份都在用，必须第一个加载。
-
-   **这些文件是普通 <script>，共享同一个全局作用域，按 index.html 里的顺序执行。**
-   不是 ES module，也不打算是：e2e 有十几处靠 `evl('loadAll()')` 这样直接调全局函数，
-   换成模块作用域会让整套断言一起报废；而"零构建步骤"这条也不允许引打包器。
-   拆分本身是纯搬运——**加东西时放进对应的那份，别又长回一个大文件**。
-*/
+/* Kalends 前端 · core.js —— 工具/全局状态/api/视图偏好/汇率折算/loadAll/首页，必须第一个加载。
+   八份文件是普通 <script>、共享同一个全局作用域，按 index.html 里的顺序执行（顺序即依赖）；
+   不是也不打算是 ES module（e2e 直调全局函数，零构建步骤也不允许打包器）。加东西放进对应的那份。 */
 
 'use strict';
 
@@ -45,8 +40,7 @@ const M_STATUSES = ['想看', '在看', '看过', '弃'];
 function toast(msg, err) {
   const t = $('#toast');
   t.classList.toggle('err', !!err);
-  // 先露出来再写文本：hidden 的元素不在无障碍树里，趁它还藏着改内容，
-  // live region 的那次变更就没人听见了
+  // 先露出来再写文本：hidden 的元素不在无障碍树里，趁藏着改内容 live region 就没人听见
   t.hidden = false;
   t.textContent = msg;
   clearTimeout(t._h);
@@ -74,11 +68,8 @@ function esc(s) {
 
 const money = (c, p) => (p == null || !c) ? '' : `${c} ${Number(p).toFixed(2)}`;
 
-/* ── 币种折算：只发生在呈现层 ────────────────────────────────────────────
-   原币入账那条不变（items.price + items.currency 存的永远是原币），这里只决定
-   「显示成什么」。汇率表整份由 /api/fx 下发（内置平均汇率打底、拉到的实时值盖上面），
-   所以换算只有前端这一份实现。通知文案与 ICS 不走这里——那是发到外部系统的内容，
-   数字要对得上真实账单。 */
+/* ── 币种折算只发生在呈现层：原币入账不变，汇率表整份由 /api/fx 下发，
+   换算只有这一份实现；通知与 ICS 不走这里（数字要对得上真实账单）。 */
 const fxCode = c => String(c || '').trim().toUpperCase();
 const fxRate = c => state.fx?.rates?.[fxCode(c)];
 const fxDisplay = () => state.fx?.display || '';
@@ -120,10 +111,8 @@ function safeUrl(u) {
 async function loadAll() {
   const hasR = MODULES.includes('renewals');
   const hasM = MODULES.includes('media');
-  // 汇率表属于续费模块（/api/fx 挂在 renewals 路由上）。这一句曾经不看模块开关：
-  // media-only 部署下它必然 404，而它就在首屏这一批 Promise.all 里——媒体数据明明取回来了，
-  // 整页却渲染不出来，只闪一下错误 toast（实测复现过）。
-  // 拉不到也不该拖垮首屏：折算是呈现层的可选视图，没有汇率就按原币显示，并如实说一声。
+  // /api/fx 挂在 renewals 路由上：media-only 部署下必然 404，且拉不到也不该拖垮首屏——
+  // 折算是可选视图，没有汇率就按原币显示并如实说一声
   const noFx = { display: '', rates: {}, live: [], baseline_period: '', source: '' };
   // 先取概览（里面带库清单）与设置，之后才知道有哪些库要拉条目
   [state.overview, state.settings, state.media, state.fx] = await Promise.all([
@@ -250,10 +239,9 @@ async function doRenew(key) {
   if (!confirm(`记一笔「${it?.name || ''}」的${verb}？`)) return;
   try {
     const r = await api(`/api/items/${id}/renew`, { method: 'POST', body: '{}' });
-    // 报出下次到期是哪天：库设成「从操作当天重新计时」的话账单日会被拽走，说出来才看得见。
-    // 日期由后端算（engine::renew_to 那一份），前端自己再算一遍就又是两份会各说各话的实现。
-    // 算不出到期日时后端仍然会把「上次续费日」记成今天（这正是该动作的语义，也是给缺日期的
-    // 条目补日期的既定路径）——旧日期被覆盖这件事得说出来，不然只看见"算不出"三个字
+    // 报出下次到期是哪天（renew_from='today' 会把账单日拽走，说出来才看得见）；日期由
+    // 后端算，前端不自己算。算不出到期日时后端仍把上次续费日记成今天（给缺日期的条目
+    // 补日期的既定路径）——旧日期被覆盖要说出来
     const stamped = r?.last_renewed;
     toast(r?.due ? `已记账，下次到期 ${r.due}`
       : stamped ? `已记账，上次${verb}日记作 ${stamped}；这条算不出到期日（没有周期或买断），到期日请手动改`

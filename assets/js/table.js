@@ -1,11 +1,6 @@
-/* Kalends 前端 · table.js
-   表格引擎：字段类型表、排序、筛选、表内搜索、自定义列注入、表头生成（initHead/settleView）、列宽三律、列序拖动、行首浮标与选区。
-
-   **这些文件是普通 <script>，共享同一个全局作用域，按 index.html 里的顺序执行。**
-   不是 ES module，也不打算是：e2e 有十几处靠 `evl('loadAll()')` 这样直接调全局函数，
-   换成模块作用域会让整套断言一起报废；而"零构建步骤"这条也不允许引打包器。
-   拆分本身是纯搬运——**加东西时放进对应的那份，别又长回一个大文件**。
-*/
+/* Kalends 前端 · table.js —— 表格引擎：排序、筛选、表内搜索、自定义列注入、
+   表头生成（initHead/settleView）、列宽三律、列序拖动、行首浮标与选区。
+   加载方式与作用域约定见 core.js 头注。 */
 
 /* ── 表格视图：列排序 / 列筛选 / 表内搜索 ── */
 const BLANK = '（空）';
@@ -39,10 +34,7 @@ const ST_CLASS = {
 const stPill = v => v ? `<span class="st${ST_CLASS[v] ? ' ' + ST_CLASS[v] : ''}">${esc(v)}</span>` : '';
 
 /* 字段类型（Notion 式）：每列必属其一，驱动表头图标、排序、筛选操作符与单元格造型。
-   勾选列表型（sel/multi/status）筛选存已选值数组；操作符型（text/num/date）存 {op, q}。
-
-   **认不出的类型一律当 text**（`colType` 的兜底）：漏接一种类型此前的表现是筛选浮层
-   直接 TypeError、无任何提示（R4-#2），有了兜底就退化成"当普通文本用"，不至于打不开。 */
+   列表型（sel/multi/status）筛选存已选值数组；操作符型（text/num/date）存 {op, q}。 */
 // 拨号链接只留 + 与数字：href 里带空格/横杠时部分客户端会拨错
 const telHref = v => 'tel:' + String(v).replace(/[^\d+]/g, '');
 // 位数太少多半是只填了国家码这类残缺值。这里只标不拦——存量数据里就有，
@@ -50,10 +42,8 @@ const telHref = v => 'tel:' + String(v).replace(/[^\d+]/g, '');
 const telSuspect = v => (String(v).match(/\d/g) || []).length < 5;
 // 网址在格子里只显示域名：原始串常是带一长串查询参数的登录页，铺开会把整列撑爆
 const urlHost = v => String(v).replace(/^[a-z]+:\/\//i, '').split(/[/?#]/)[0].replace(/^www\./, '');
-/* 认不出的类型一律当文本。触发它的有两种情形：漏接了一种新类型（R4-#2 那次筛选浮层
-   直接 TypeError），或者某种类型被撤掉而库里还留着旧字段（`star` 就是 2026-08-15 撤的）。
-   退化成"当普通文本用"总好过表头画出个 undefined、或者浮层根本打不开。
-   注意 `tpl` 到不了这里——`colFromField` 早把它映射成 text 了。 */
+/* 认不出的类型一律当文本：漏接新类型、或类型被撤而库里留着旧字段（star）都会走到
+   这里，退化成"当普通文本用"总好过浮层打不开。tpl 到不了这里——colFromField 已映射成 text。 */
 const colType = (tab, k) => {
   const t = views[tab].types?.[k] || COLS[tab][k].t;
   return TYPES[t] ? t : 'text';
@@ -76,8 +66,8 @@ const COLS = {
 };
 
 // 有效类型感知的筛选值：呈现为多选的文本列按分隔符拆开。
-// 真多选列的值本身就是数组，绝不能再拆——否则含 , ， 、 / 的值（如线路「CN2 GIA/9929」）
-// 会碎成两个，勾选它自己筛不出自己那行。cellVal 与 multiEditor 早就是按值形态判断的，这里补齐。
+// 真多选列的值本身就是数组，**绝不能再拆**——含 , ， 、 / 的值（「CN2 GIA/9929」）
+// 会碎成两个，勾选它自己筛不出自己那行。
 function colFvals(tab, k, r) {
   const col = COLS[tab][k];
   const vals = (col.fvals || (() => []))(r);
@@ -98,13 +88,8 @@ function sanitizeFilters(tab) {
   }
 }
 
-/* 单元格值按有效类型呈现：文本原样 / 单选一枚标签 / 多选拆标签 / 星级星串 /
-   有形状的三类渲染成可点链接（conv 列、库的列与媒体的自定义列共用这一份）。
-   **tel/url/email 的渲染必须写在这里而不是各渲染器里**：库那侧 renderColl 走它，
-   媒体的自定义列走 customTds → cellVal，两处写两份就会出现"同名同类型的列在媒体表
-   是灰色纯文本、在续费库是可点链接"这种类型承诺只兑现一半的事。 */
-// 单元格渲染**只此一处**（媒体的自定义列也走它）：写成两份的下场是同名同类型的列
-// 在两张表里长得不一样。具体怎么渲染由类型表的 cell 说了算，没写就是纯文本
+/* 单元格渲染**只此一处**（库的列与媒体的自定义列共用）：写成两份的下场是同名同类型
+   的列在两张表里长得不一样。怎么渲染由类型表的 cell 说了算，没写就是转义纯文本。 */
 function cellVal(tab, k, v) {
   if (v == null || v === '') return '';
   const cell = TYPES[colType(tab, k)]?.cell;
@@ -129,7 +114,7 @@ function injectCustomCols(tab) {
   for (const f of customFields(tab)) {
     const k = FKEY(f);
     const cv = r => (r.extra || {})[k];
-    const numeric = f.ftype === 'num';
+    const numeric = !!TYPES[f.ftype]?.numeric; // 按不按数值排序由类型表说了算
     cols[k] = {
       t: f.ftype, custom: f.id,
       conv: CONV_TYPES.includes(f.ftype) ? 1 : 0,
@@ -186,21 +171,24 @@ function rebuildMediaHead() {
   initHead('media');
 }
 
-/* 媒体的自定义列此前只在 boot 与 rebuildHead 各注入过一次，而 loadAll 每次都刷字段
-   注册表：别处（另一台设备、另一个标签页，或直接调接口）加了列之后，这边下一次
-   loadAll 就会拿着旧 COLS 去渲染新字段，`colType` 读到 undefined 直接把整个 renderAll
-   打断——界面停在半路。库那边由 syncColls → ensureCollDom 兜着，这是对称的那一半。 */
+/* 媒体的 COLS 要跟字段注册表对账：注入只在 boot 与 rebuildHead 跑，而 loadAll 每次都
+   刷注册表——别处（另一台设备/标签页/接口）加了列，这边就会拿旧 COLS 渲染新字段，
+   colType 读到 undefined 把整个 renderAll 打断。库那侧由 ensureCollDom 兜着。 */
 function syncMediaCols() {
   const want = customFields('media').map(FKEY).join();
   const have = Object.keys(COLS.media).filter(k => COLS.media[k].custom).join();
   if (want !== have) rebuildMediaHead();
 }
 
+// td 的造型与要不要挂 title 同样查类型表（与 renderColl 那侧同一份判据），
+// 否则同名同类型的列在两张表上长得不一样
 function customTds(tab, it) {
   let h = '';
   for (const f of customFields(tab)) {
     const k = FKEY(f);
-    h += `<td>${cellVal(tab, k, (it.extra || {})[k])}</td>`;
+    const v = (it.extra || {})[k];
+    const ts = TYPES[f.ftype] || {};
+    h += `<td${ts.td ? ` class="${ts.td}"` : ''}${ts.title ? ` title="${esc(v ?? '')}"` : ''}>${cellVal(tab, k, v)}</td>`;
   }
   return h;
 }
@@ -302,17 +290,18 @@ function colLabel(tab, k) {
 
 const FUNNEL_SVG = '<svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true"><path d="M1.4 1.6h9.2L7.4 5.9v3.4l-2.8 1.1V5.9L1.4 1.6Z"/></svg>';
 
-// 表头属性类型图标（Notion 式：Aa 文本 / # 数字 / ⊙ 单选 / ≔ 多选 / ◐ 状态 / 日历 / 星）
+/* 行的详情入口（⤢）与子行折叠钮长在哪一格：库是名称列、媒体是标题列。
+   这一列撤下去，整表就没了全表单入口——两处守它（表头菜单不出「隐藏此列」、
+   settleView 无条件捞回），所以判据只此一份，别在别处写死 'name'。 */
+const entryKey = tab => (tab === 'media' ? 'title' : 'name');
 
 // 各表列键的模板序快照（tbody 渲染恒为模板序，td 定位靠它；列序重排只动 thead/td 的 DOM 序）
 const TKEYS = {};
 const colKeys = tab => TKEYS[tab];
 
 /* 本机视图偏好对着当前列集结算一次：列集变了做温和迁移、名称列无条件捞回、筛选清洗。
-
-   **它与"重建表头"是两个节奏**：表头只在列集真的变了时才重建（见 ensureCollDom），
-   而偏好来自 localStorage——可能是另一台设备、另一个标签页写的，也可能是这套代码从前
-   放行过的坏值（隐藏名称列就是），所以每次渲染都要结算一遍。 */
+   与"重建表头"是两个节奏：表头只在列集真的变了时重建（见 ensureCollDom），而偏好
+   来自 localStorage（可能是别的设备/标签页写的，也可能就是坏值），每次渲染都要结算。 */
 function settleView(tab, keys) {
   const v = views[tab];
   TKEYS[tab] = keys;
@@ -325,10 +314,8 @@ function settleView(tab, keys) {
     // 列集变了（加删列等）：温和迁移——只丢消失列的偏好，新列插到操作列前
     for (const k of Object.keys(v.widths)) if (!keys.includes(k)) delete v.widths[k];
     v.hiddenCols = v.hiddenCols.filter(k => keys.includes(k));
-    // **服务端字段序变了（列集没增没减、只是换了次序）⇒ 本机这份列序覆写已经过期**：
-    // 它是针对旧序说的，留着就等于"在库设置里排完序，表格纹丝不动"。
-    // 这条规则从前住在字段面板的保存回调里（那里要"记得"清一次），搬到这儿之后
-    // 无论从哪个入口改的序都自动结算——两处管同一件事时，判定要放在结算的地方
+    // 服务端字段序变了（列集没增没减、只是换了次序）⇒ 本机这份列序覆写已过期，丢掉——
+    // 留着就等于"在库设置里排完序，表格纹丝不动"。判定放在结算处，别再往调用方加"顺手清一下"
     if (v.keys.length === keys.length && v.keys.every(k => keys.includes(k))) v.order = null;
     if (v.order) {
       const o = v.order.filter(k => keys.includes(k));
@@ -338,9 +325,9 @@ function settleView(tab, keys) {
       v.order = o;
     }
   }
-  // 表头菜单曾经放行过隐藏名称列，已经踩下去的人光靠上面那段迁移救不回来（列集没变，
-  // 不走温和迁移那一支），所以每次都无条件把它捞出来
-  if (v.hiddenCols?.includes('name')) v.hiddenCols = v.hiddenCols.filter(k => k !== 'name');
+  // 详情入口那一列无条件捞回：已把它存进 hiddenCols 的存量偏好光靠列集迁移救不回来（列集没变）
+  const entry = entryKey(tab);
+  if (v.hiddenCols?.includes(entry)) v.hiddenCols = v.hiddenCols.filter(k => k !== entry);
   v.keys = keys;
   saveViews();
   sanitizeFilters(tab);
@@ -370,12 +357,9 @@ function initHead(tab) {
     initColDrag(tab, th);
     initColResize(tab, th);
     th.onclick = () => openHeadMenu(tab, th); // Notion 式：点表头开属性菜单
-    // 属性菜单是排序/筛选/改列/删列的唯一入口，只挂 click 就等于键盘用户全够不着。
-    // th 不是原生可聚焦元素，得自己给 tabindex 与语义，并把回车/空格接成"点一下"
+    // 属性菜单是排序/筛选/改列/删列的唯一入口：th 不是原生可聚焦元素，自己给 tabindex
+    // 与回车/空格。**别给 role="button"**——会盖掉原生 columnheader，aria-sort 就读不出来了
     th.tabIndex = 0;
-    // **别给它 role="button"**：那会盖掉 th 原生的 columnheader 角色，而 `aria-sort`
-    // 只对列头有意义——读屏于是永远读不出"当前按这一列升序排着"。
-    // 可聚焦 + aria-haspopup + 回车/空格 已经够让键盘用户打开属性菜单了
     th.setAttribute('aria-haspopup', 'menu');
     th.addEventListener('keydown', e => {
       if (e.key !== 'Enter' && e.key !== ' ') return;
@@ -402,13 +386,9 @@ function initHead(tab) {
   applyWidths(tab);
 }
 
-/* 列宽三律（用户定案：右边框是硬边界，最右列右缘恒贴容器右边框）：
-   ① 无手动列宽——fitWidths 把表装进容器：自然宽放得下保持 auto 铺满，放不下等比压缩
-     数据列（下限 MIN_COLW、操作列保持自然宽），随窗口尺寸重排，不落存储；
-   ② 有手动列宽——按存储锁定 fixed，最右可见列吸收残差（存宽是它的下限），
-     表格恒铺满容器、右缘不动；只有窗口骤缩/解除隐藏可能超容器，此时容器内横向滚动兜底；
-   ③ 拖动中——拖宽先吃残差，贴边后从右侧数据列邻列起逐列压缩到下限后把手停住；
-     拖窄的空间全部让给最右列。把手双击整表还原到 ①。 */
+/* 列宽三律（右边框硬边界，最右可见列右缘恒贴容器）：① 无手动宽 fitWidths 自动装容器
+   （不落存储）；② 有手动宽最右可见列吸收残差（存宽是它的下限）；③ 拖宽先吃残差、贴边后
+   压右侧数据列到 MIN_COLW，拖窄全给最右列。一切宽度变化都经 applyWidths 结算。 */
 const MIN_COLW = 52;
 
 function applyWidths(tab) {
@@ -471,9 +451,8 @@ function fitWidths(thead, table) {
   for (const x of pool) fitted.set(x.t, Math.max(MIN_COLW, Math.floor(x.w * room / natSum)));
   let total = 0;
   for (const px of fitted.values()) total += px;
-  // 压到下限还是塞不进容器时，压缩只剩坏处：横滚照样免不了，却把每一列都挤成省略号
-  //（390px 视口实测：九列全被压到 52px，表宽仍有 573px 要滚）。这时退回自然列宽——
-  // 滚是要滚的，至少每一格读得出来。判据是几何而不是视口阈值，桌面端的宽表同样受用。
+  // 压到下限还塞不进容器就整个放弃压缩、退回自然列宽：横滚照样免不了，压缩只会把
+  // 每格挤成省略号。判据是几何（total > avail）而不是视口阈值，桌面端的宽表同样受用。
   if (total > avail + 1) return;
   for (const [t, px] of fitted) t.style.width = px + 'px';
   table.classList.add('fixed');
@@ -617,11 +596,9 @@ function applyColumns(tab) {
   markFirstCol(tab);
 }
 
-/* ── 行首浮标：多选与手动排序（Notion 式）────────────────────────────────
-   浮标不是一列，是首格左内边距里的两个控件：⠿ 拖动手柄 + 复选框。做成真列的话
-   列宽三律、列序存储、隐藏列全都要再认一个新键，而它本就不是数据。
-   手动序的真源是后端的 items.pos / media_items.pos，只在「没按任何列排序」时生效；
-   按列排序时拖动的位置存不住，手柄随之停用（Notion 同款）。 */
+/* ── 行首浮标（⠿ 手柄 + 复选框）：不是一列，是首格左内边距里的两个控件——做成真列，
+   列宽三律/列序存储/隐藏列全要再认一个新键。手动序真源是后端的 pos，只在「没按任何列
+   排序」时生效；按列排序时拖动的位置存不住，手柄随之停用（Notion 同款）。 */
 
 const tbodyOf = tab => $(HEAD_SEL[tab])?.parentElement.tBodies[0] || null;
 const curTab = () => (state.page === 'media' ? 'media' : state.tab);
@@ -659,12 +636,10 @@ function ensureGutter(tab, row, cell, head) {
   }
   g = document.createElement('span');
   g.className = 'rowgut';
+  // 手柄不进 Tab 序（键盘挪行用复选框上的 Alt+↑/↓）；⠿ 由 CSS ::before 画——
+  // 写成按钮文本会混进 td.textContent，行文本从此永远带一个 ⠿
   g.innerHTML = head
     ? '<input class="rgsel" type="checkbox" data-selall aria-label="全选本表">'
-    // 手柄不进 Tab 序——一行一个停靠点已经够多了；键盘改用复选框上的 Alt+↑ / Alt+↓
-    + ''
-    // ⠿ 由 CSS ::before 画，不写成按钮文本——浮标住在名称格里，写成文本就会混进
-    // td.textContent，行文本从此永远带一个 ⠿（复制整行、断言取值都会看见）
     : '<button class="rgrip" data-grip type="button" tabindex="-1" aria-label="拖动排序"></button>'
     + '<input class="rgsel" type="checkbox" data-sel aria-label="选择此行">';
   cell.prepend(g);
@@ -886,9 +861,8 @@ function focusNewRow(tab, id) {
   };
   const r = tr.getBoundingClientRect();
   if (r.top >= 0 && r.bottom <= innerHeight) return open();
-  // 全局的 scroll 监听会关掉浮层（浮层是 fixed 的，滚动后就脱离锚点了），而
-  // scrollIntoView 派发 scroll 事件是异步的——先开编辑器的话会被自己这一下滚动关掉。
-  // 滚动事件在「更新渲染」里排在 rAF 回调之前，所以等一帧就够。
+  // 全局 scroll 监听会关浮层（fixed 浮层滚动后脱锚），而 scrollIntoView 的 scroll 事件
+  // 是异步的——先开编辑器会被自己这下滚动关掉。滚动事件排在 rAF 回调之前，等一帧就够。
   tr.scrollIntoView({ block: 'nearest' });
   requestAnimationFrame(open);
 }
@@ -956,11 +930,9 @@ const OP_MENU = {
   num: [['eq', '='], ['ne', '≠'], ['ge', '≥'], ['le', '≤'], ['gt', '>'], ['lt', '<'], ['empty', '为空'], ['nonempty', '非空']],
   date: [['is', '等于'], ['before', '早于'], ['after', '晚于'], ['empty', '为空'], ['nonempty', '非空']],
 };
-/* 字段类型 → 操作符组。**这张表要认全部非列表型类型，别只列 OP_MENU 的三个键**：
-   tel/url/email 的值就是文本，共用 text 那套；漏接的类型会让 OP_MENU[t] 是 undefined，
-   `OP_MENU[t][0][0]` 当场 TypeError——浮层不出现、无任何提示，而排序还照常，
-   于是「所有列都可排序可筛选」这条不变量对新类型静默失守。filterPred 那侧一直是兜底
-   走文本分支的，所以只差这一层映射。 */
+/* 类型 → 操作符组。**要认全部非列表型类型**：tel/url/email 的值就是文本、共用 text
+   那套；漏接的类型 OP_MENU[t] 是 undefined、取下标当场 TypeError——浮层不出现、
+   无任何提示，而排序照常，「所有列都可排序可筛选」就对新类型静默失守。 */
 const opKind = t => (TYPES[t]?.filter === 'num' || TYPES[t]?.filter === 'date' ? TYPES[t].filter : 'text');
 
 function opFilterBody(tab, k, t) {

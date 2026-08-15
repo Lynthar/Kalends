@@ -130,6 +130,11 @@ def transform_movie(r):
         'release_date', 'douban_url', 'douban_rating', 'douban_votes', 'imdb_id')})
     if r.get('douban_id') is not None:
         out['douban_id'] = str(int(r['douban_id']))
+    # 我的评分：Notion 那边是 5 星制，这里是 10 分制（迁移 0019 起，与豆瓣同一把尺）——
+    # 等比 ×2。0 星＝没评过，去掉这个键；留着会被写入口按「1–10」400 掉
+    star = out.pop('rating', None)
+    if isinstance(star, (int, float)) and star > 0:
+        out['rating'] = int(star * 2)
     out['kind'] = movie_kind(r)
     out['status'] = '看过'
     return out

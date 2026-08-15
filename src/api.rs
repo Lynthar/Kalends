@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 
 use crate::{db, engine, ics, notify, App};
 
+#[derive(Debug)] // 错误类型该是 Debug 的；测试里 unwrap 一个 Result<_, ApiError> 也要靠它
 pub struct ApiError(anyhow::Error);
 
 impl<E: Into<anyhow::Error>> From<E> for ApiError {
@@ -157,12 +158,9 @@ async fn fx_refresh(State(app): State<App>) -> R {
     Ok(Json(crate::fx::refresh(&app.db).await?))
 }
 
-/// 续费台账，给设置页的只读列表用。
-///
-/// 名字以**写入时钉进去的那份快照**为准（迁移 0018 起每笔都记）：只按 (kind, item_id)
-/// 回查当前条目的话，条目一删这笔账就没了名字，而 items 的 id 会被 SQLite 复用——
-/// 「删掉旧条目、在同一个库里再建一条」会让旧账挂到新条目名下（实测复现过）。
-/// 快照为空的是 0018 之前、且条目当时已删的老账，回查一次仍然读不到就交给界面回落成编号。
+/// 续费台账（设置页只读列表）。名字以**写入时钉进去的快照**为准（迁移 0018）：
+/// 回查当前条目的话，条目一删账就没了名字，id 复用后旧账还会挂到新条目名下。
+/// 快照为空的老账回查一次，仍读不到就交给界面回落成编号。
 async fn ledger_list(State(app): State<App>) -> R {
     let conn = app.db.lock().unwrap();
     let mut stmt = conn.prepare(
@@ -205,10 +203,8 @@ async fn settings_get(State(app): State<App>) -> R {
     Ok(Json(Value::Object(out)))
 }
 
-/// 一次请求里的设置要么全落、要么一条不落。
-///
-/// 曾经是边校验边写：前几个键已经生效、后一个键不是字符串就 400 返回，用户看到的是
-/// 「保存失败」而设置已经改了一半（实测复现过）。所以先把整份校验完，再在一个事务里写。
+/// 一次请求里的设置要么全落、要么一条不落：先把整份校验完，再在一个事务里写——
+/// 边校验边写会留下"报错了、设置却已改了一半"。
 async fn settings_put(State(app): State<App>, Json(b): Json<Value>) -> R {
     let obj = b.as_object().ok_or_else(|| bad("需要对象"))?;
     let mut pairs = Vec::with_capacity(obj.len());

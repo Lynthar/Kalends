@@ -1,18 +1,27 @@
-// 模块组合冒烟：renewals,media（默认）/ renewals / media 三种部署各起一次真实例，
-// 用 headless chromium 打开首屏，看它是不是真的渲染出来了。
-//
-// 为什么单开一个脚本：scripts/e2e-ui.mjs 只跑默认组合，而"只装一半"是 README 明写的
-// 交付形态。media-only 曾经整屏渲染不出来（前端无条件请求 /api/fx，而那个端点挂在
-// renewals 路由上），后端一切正常、接口也都 200，光看默认组合永远看不见。
-//
-// 用法：node scripts/e2e-modules.mjs（自己起实例、自己收摊，不用先跑服务）
-// 浏览器同 e2e-ui.mjs：Playwright 缓存里的 headless chromium。
+// 模块组合冒烟：三种 KALENDS_MODULES 部署各起一次真实例，headless chromium 看首屏是否
+// 真的渲染出来（e2e-ui 只跑默认组合，"只装一半"的缺陷它永远看不见）。
+// 用法：node scripts/e2e-modules.mjs——自己起实例自己收摊；浏览器同 e2e-ui.mjs。
 import { spawn, spawnSync } from 'node:child_process';
-import { globSync, mkdtempSync } from 'node:fs';
+import { existsSync, globSync, mkdtempSync } from 'node:fs';
 import os from 'node:os';
 
+// 这个脚本自己起实例，所以两样东西都得先确认在场：二进制与浏览器。
+// 缺了直接 spawn 的话，ENOENT 是以 error 事件抛出来的——绕过 try/catch，
+// 崩出来的是一串看不出所以然的 syscall 堆栈
 const BIN = process.env.KALENDS_BIN || os.homedir() + '/.cache/kalends-target/debug/kalends';
-const SHELL = globSync(os.homedir() + '/Library/Caches/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell').sort().pop();
+if (!existsSync(BIN)) {
+  console.error(`找不到二进制 ${BIN}：先 cargo build，或用 KALENDS_BIN 指一个`);
+  process.exit(2);
+}
+// 浏览器的找法与 e2e-ui.mjs 保持一致：缓存里找不到就认 KALENDS_E2E_CHROME，
+// 两样都没有时给一句人话——不给的话 spawn(undefined) 抛一个看不出所以然的异常
+const SHELL = process.env.KALENDS_E2E_CHROME || globSync(
+  os.homedir() + '/Library/Caches/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell'
+).sort().pop();
+if (!SHELL) {
+  console.error('未找到 headless chromium：请 npx playwright install chromium --with-shell，或设 KALENDS_E2E_CHROME');
+  process.exit(2);
+}
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 let fails = 0;
 const check = (label, cond, extra = '') => {
@@ -21,11 +30,23 @@ const check = (label, cond, extra = '') => {
 };
 
 async function run(modules, port, dbgPort) {
+  const stop = [];
+  try {
+    await drive(modules, port, dbgPort, stop);
+  } finally {
+    // 起了什么就收什么：中途抛异常（浏览器连不上是常客）也不能把实例留在后台占着端口
+    for (const kill of stop.reverse()) { try { kill(); } catch {} }
+    await sleep(400);
+  }
+}
+
+async function drive(modules, port, dbgPort, stop) {
   const dir = mkdtempSync(os.tmpdir() + '/kalends-mm-');
   const srv = spawn(BIN, [], {
     stdio: 'ignore',
     env: { ...process.env, KALENDS_DATA: dir, KALENDS_ADDR: `127.0.0.1:${port}`, KALENDS_MODULES: modules },
   });
+  stop.push(() => srv.kill());
   const APP = `http://127.0.0.1:${port}/`;
   for (let i = 0; i < 40; i++) {
     try { if ((await fetch(APP + 'api/health')).ok) break; } catch {}
@@ -47,12 +68,15 @@ async function run(modules, port, dbgPort) {
 
   const chrome = spawn(SHELL, [`--remote-debugging-port=${dbgPort}`, '--no-first-run',
     '--no-default-browser-check', `--user-data-dir=${dir}/profile`, '--window-size=1400,900', 'about:blank'], { stdio: 'ignore' });
+  stop.push(() => chrome.kill());
   let target;
   for (let i = 0; i < 50 && !target; i++) {
     await sleep(200);
     try { target = await (await fetch(`http://127.0.0.1:${dbgPort}/json/new?${encodeURIComponent(APP)}`, { method: 'PUT' })).json(); } catch {}
   }
+  if (!target) throw new Error(`连不上调试端口 ${dbgPort}：浏览器没起来，或这个端口被占着`);
   const ws = new WebSocket(target.webSocketDebuggerUrl);
+  stop.push(() => ws.close());
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
   let id = 0;
   const pending = new Map();
@@ -83,14 +107,15 @@ async function run(modules, port, dbgPort) {
   if (modules.includes('media')) check(`${modules}：媒体渲染出条目了`, st.mediaCards > 0, JSON.stringify(st));
   check(`${modules}：首屏没有报错 toast`, !st.toast, st.toast);
   check(`${modules}：没有 console 异常`, errors.length === 0, errors.join(' | '));
-  ws.close();
-  chrome.kill();
-  srv.kill();
-  await sleep(400);
 }
 
-await run('renewals,media', 4191, 9341);
-await run('renewals', 4192, 9342);
-await run('media', 4193, 9343);
+// 一种组合崩了不该带走另外两种：记成 FAIL，矩阵照跑完
+for (const [modules, port, dbgPort] of [['renewals,media', 4191, 9341], ['renewals', 4192, 9342], ['media', 4193, 9343]]) {
+  try {
+    await run(modules, port, dbgPort);
+  } catch (e) {
+    check(`${modules}：跑得起来`, false, String(e?.message || e));
+  }
+}
 console.log(fails ? `\n${fails} FAILURES` : '\nALL PASS');
 process.exit(fails ? 1 : 0);

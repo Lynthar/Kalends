@@ -1,24 +1,9 @@
-/* Kalends 前端 · editors.js
-   点格即编：各类型的就地编辑器（多输入 / 单选 / 多选 / 周期 / 费用 / 模板列）与点击委托。
+/* Kalends 前端 · editors.js —— 点格即编：各类型的就地编辑器（多输入/单选/多选/周期/
+   费用/模板列）与点击委托。加载方式与作用域约定见 core.js 头注。 */
 
-   **这些文件是普通 <script>，共享同一个全局作用域，按 index.html 里的顺序执行。**
-   不是 ES module，也不打算是：e2e 有十几处靠 `evl('loadAll()')` 这样直接调全局函数，
-   换成模块作用域会让整套断言一起报废；而"零构建步骤"这条也不允许引打包器。
-   拆分本身是纯搬运——**加东西时放进对应的那份，别又长回一个大文件**。
-*/
-
-/* ── 点格即编：点单元格就地编辑，保存 = 一次 PATCH（只发这次动过的键）──
-   复合格（名称/商家产品/规格/周期）弹多输入迷你表单；表外字段仍走「编辑」全表单。 */
-
-/* 后端是局部更新语义：请求里**出现**的键写入（`""` 与 `null` 都表示清空），
-   **缺席**的键保持原值；`extra` 作为一个整体值走同一条规则。
-
-   所以这里只发改动的那几个键，不必再把整行铺一遍。**但清空必须显式写 `null`**——
-   `JSON.stringify` 会把 `undefined` 连键一起丢掉，在这套语义里那等于"别动它"。
-
-   （从前这里是整行 PUT：body 漏一列就清一列，于是每条写入路径都得先铺整行、再让当前值
-   覆盖，只要有一处没铺到就是一次静默的数据丢失——SIM 的周期、媒体的自定义列、条目图标、
-   父条目都这样被清掉过。缺席即保持之后，那套铺底代码就没有存在的理由了。） */
+/* 后端是局部更新语义：出现的键写入（"" 与 null 都是清空），缺席的键保持原值，extra
+   整体替换——所以只发改动的键。**但清空必须显式写 null**：JSON.stringify 会把
+   undefined 连键一起丢掉，键缺席在这套语义里是"别动它"。 */
 async function patchRow(tab, it, patch) {
   try {
     const path = tab === 'media' ? `/api/media/${it.id}` : `/api/items/${it.id}`;
@@ -140,10 +125,8 @@ function multiEditor(tab, it, td, k, save) {
   const values = effectiveOptions(tab, k);
   for (const v of cur) if (!values.includes(v)) values.push(v);
   const box = cellPopShell(td, colLabel(tab, k));
-  const commit = () => {
-    const sel = [...box.querySelectorAll('input[type=checkbox]:checked')].map(i => i.value);
-    save(sel);
-  };
+  const picked = () => [...box.querySelectorAll('input[type=checkbox]:checked')].map(i => i.value);
+  const commit = () => save(picked());
   for (const x of values) {
     const l = document.createElement('label');
     l.className = 'check fp-item';
@@ -159,11 +142,14 @@ function multiEditor(tab, it, td, k, save) {
     if (e.key !== 'Enter') return;
     const val = inp.value.trim();
     if (!val) return;
+    // 读**此刻**勾着的，不是开浮层那会儿的快照：同一次浮层里先取消勾选再回车加值，
+    // 拿旧快照会把刚取消掉的那个又带回来
+    const sel = picked();
     closePop();
     if (optionsEditable(tab, k) && !values.includes(val)) {
       await putOpts(tab, k, [...storedOpts(tab, k), { v: val }]);
     }
-    save([...cur, val]);
+    save(sel.includes(val) ? sel : [...sel, val]);
   });
   box.appendChild(addRow);
   placePop(box, td);
@@ -193,8 +179,7 @@ function cycleEditor(tab, it, td) {
   placePop(box, td);
 }
 
-/* 币种候选：数据里用过的 ∪ 汇率表里有的。词表本就从数据里长，汇率表只是让空库首装时
-   也有东西可选（否则第一条得先手打一个 ISO 码）。 */
+// 币种候选：数据里用过的 ∪ 汇率表里有的（后者让空库首装时也有东西可选）
 function currencyOptions(tab, cur) {
   const used = new Set((state[tab] || []).map(r => fxCode(r.currency)).filter(Boolean));
   if (cur) used.add(fxCode(cur));
@@ -202,12 +187,9 @@ function currencyOptions(tab, cur) {
   return [...[...used].sort(), ...rest];
 }
 
-/* 币种控件：下拉 + 「新选项，回车加入」，与表单里的 sel 字段同一套（`.sopts`/`initSoptAdd`）。
-   这里曾经是个纯 `<select>`，候选只有"用过的 ∪ 汇率表里有的"——于是持有 TWD、AED 这类
-   不在欧洲央行那 30 种里的币种时，界面上根本没法录第一笔：要么不填币种（那笔钱从此不进
-   支出总额，见 `engine::uncounted`），要么填个别的。
-   **不用 datalist**：那条路 2026-08-06 拍板否过——iOS Safari 上建议列表会盖住输入框，
-   而全 iOS 都是 WebKit，嗅探不掉。同一个问题在这个项目里已经有惯用解，就别造第二种。 */
+/* 币种控件：下拉 + 「新选项，回车加入」（与表单 sel 同一套 .sopts/initSoptAdd）——
+   纯 select 会让不在汇率表里的币种（TWD）录不进第一笔。**不用 datalist**：
+   iOS Safari 上建议列表会盖住输入框，而全 iOS 都是 WebKit，嗅探不掉。 */
 function currencyPicker(tab, cur, attrs) {
   const opts = currencyOptions(tab, cur);
   // 费用格是「金额 + 币种」两枚控件共一个 label，而 label 只关联第一枚——币种得自报名字
@@ -217,8 +199,8 @@ function currencyPicker(tab, cur, attrs) {
     aria-label="加一个新币种，回车加入"></span>`;
 }
 
-/* 费用格是复合格：金额 + 币种（币种不再单独占一列，2026-08-07 合并）。
-   与周期那格同一形状——按列键special case，不为此新造一种字段类型。 */
+/* 费用格是复合格：金额 + 币种（币种并进这一格、不单独占列）。
+   与周期那格同形——按列键特判，不为此新造字段类型。 */
 function priceEditor(tab, it, td) {
   const box = cellPopShell(td, colLabel(tab, 'price'));
   const cur = fxCode(it.currency);
@@ -256,9 +238,8 @@ function tplEditor(tab, it, td, f) {
   if (!parts.length) return openItemDialog(tab, it); // 模板串指向的字段都没了，退回详情表单
   const box = cellPopShell(td, f.name || f.key);
   for (const p of parts) {
-    // 值按注册表的 src 取：模板串引用真列键是允许的定制（CLAUDE.md 明说"改模板串即可"），
-    // 恒读写 extra 的话保存一次就在 extra 里生出一个同名键，把真列**遮蔽**掉——
-    // 规格格从此显示 extra 的那份，而费用列与 engine 读的仍是真列，两格各说各话
+    // 值按注册表的 src 取：模板串引用真列键是允许的定制，恒读写 extra 会生出同名键
+    // 把真列**遮蔽**掉——规格格显示 extra 那份、engine 读真列，两格各说各话
     const cur = fieldRaw(p, it) ?? '';
     const wrap = document.createElement('label');
     wrap.className = 'cp-field';
@@ -271,7 +252,7 @@ function tplEditor(tab, it, td, f) {
         + opts.map(o => `<option${String(o) === String(cur) ? ' selected' : ''}>${esc(o)}</option>`).join('')
         + `</select>`;
     } else {
-      const type = p.ftype === 'num' ? 'number' : p.ftype === 'tel' ? 'tel' : 'text';
+      const type = TYPES[p.ftype]?.input || 'text'; // 控件类型查类型表，别在这儿另立一份映射
       wrap.innerHTML = `${esc(p.name || p.key)}<input class="fp-q" type="${type}"`
         + `${type === 'number' ? ' step="any"' : ''} ${attrs}>`;
       wrap.querySelector('input').value = cur;
@@ -334,8 +315,8 @@ function openCellPop(tab, it, k, td) {
   });
 }
 
-// 点击委托：按钮/链接照旧，其余格子进就地编辑。挂在 document 上、按 tbody 的 data-tab 认表，
-// 后建的库自然生效——曾经写死成四个 tbody 选择器，于是自建库的格子点了毫无反应
+// 点击委托：按钮/链接照旧，其余格子进就地编辑。挂在 document 上、按 tbody 的 data-tab
+// 认表，后建的库自然生效——写死成 tbody 选择器列表的话，自建库的格子点了毫无反应
 document.addEventListener('click', e => {
   if (e.target.closest('button, a, input, select, textarea, label')) return;
   const td = e.target.closest('td');

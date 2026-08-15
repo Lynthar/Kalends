@@ -1,17 +1,8 @@
-/* Kalends 前端 · fields.js
-   字段属性编辑：选项管理（增删改名、配色、手动调序）、新建/改名/删列、状态语义与新增状态值。
+/* Kalends 前端 · fields.js —— 字段属性编辑：选项管理（增删改名、配色、手动调序）、
+   新建/改名/删列、状态语义与新增状态值。加载方式与作用域约定见 core.js 头注。 */
 
-   **这些文件是普通 <script>，共享同一个全局作用域，按 index.html 里的顺序执行。**
-   不是 ES module，也不打算是：e2e 有十几处靠 `evl('loadAll()')` 这样直接调全局函数，
-   换成模块作用域会让整套断言一起报废；而"零构建步骤"这条也不允许引打包器。
-   拆分本身是纯搬运——**加东西时放进对应的那份，别又长回一个大文件**。
-*/
-
-/* ── 字段属性编辑：选项管理 / 自定义列的改名删除新建 ──
-   能管选项的列 = 任何域字段或自定义列里的 sel|multi（判据与后端 resolve() 一致：builtin=0）；
-   状态/周期/类别等参与语义的词表不开放。
-   预置三库的域字段此前不算（builtin=1），只能靠一张硬编码白名单逐个点名；迁移 0014 把它们
-   收归 builtin=0 之后白名单两边一起删了。 */
+/* 能管选项的列 = builtin=0 的 sel|multi（与后端 resolve() 同判据）；
+   状态/周期/类别等参与语义的词表不开放。 */
 const optionsEditable = (tab, k) => !!COLS[tab][k].custom
   && ['sel', 'multi'].includes(COLS[tab][k].t);
 
@@ -223,7 +214,7 @@ function openNewColPop(tab, anchor) {
   popEl.innerHTML = `<div class="fp-head"><b>新建列</b></div>
     <div class="fp-form"><input class="fp-q" data-name placeholder="列名"></div>
     <div class="fp-form"><select class="mini-select fp-op" data-type>
-      ${Object.entries(TYPES).map(([t, s]) => `<option value="${t}">${s.label}</option>`).join('')}
+      ${CREATABLE_TYPES.map(t => `<option value="${t}">${TYPES[t].label}</option>`).join('')}
     </select><button type="button" class="btn primary mini" data-go>创建</button></div>`;
   const go = async () => {
     const name = popEl.querySelector('[data-name]').value.trim();
@@ -319,9 +310,9 @@ function openHeadMenu(tab, th) {
     items.push({ ic: '＋', t: '新增状态值…', act: () => openAddStatusPop(tab, k, th), keepPop: true });
     items.push({ ic: '◐', t: '状态语义…', act: () => openStatusSemPop(tab, k, th), keepPop: true });
   }
-  // 名称列不给隐藏：行的 ⤢ 详情入口与子行折叠钮都长在这一格里，撤掉它整库就没了全表单入口。
-  // 后端 PUT /api/fields/{id} 同样拒绝把它设成 shown=0，这里是本机视图那条口子。
-  if (k !== 'name') {
+  // 详情入口那一列不给隐藏：⤢ 与子行折叠钮都长在这一格里，撤掉整表就没了全表单入口。
+  // 库是名称列（后端 PUT /api/fields/{id} 同样拒绝 shown=0），媒体是标题列——两边都要守。
+  if (k !== entryKey(tab)) {
     items.push({ ic: '⊘', t: '隐藏此列（仅本机）', act: () => {
       v.hiddenCols = [...(v.hiddenCols || []), k];
       saveViews();
@@ -331,9 +322,8 @@ function openHeadMenu(tab, th) {
   if (Object.keys(v.widths || {}).length) {
     items.push({ ic: '⟺', t: '还原列宽（仅本机）', act: () => { v.widths = {}; saveViews(); applyWidths(tab); } });
   }
-  // 值挂在 extra 里的列都归用户管——手加的自定义列，以及建库时按模板播下来的域字段。
-  // 判据用 src 而不是 builtin：预置库的分类/地点/规格参数一样是域字段，凭什么不能改名删除；
-  // 引擎真列（价格/周期/到期日）与算出来的列没有这两项，后端也只认 src='extra'。
+  // 值挂在 extra 里的列都归用户管（判据用 src 不用 builtin，与后端一致）；
+  // 引擎真列与算出来的列没有改名/删除这两项。
   if (inExtra(COLS[tab][k])) {
     const fid = fieldOf(tab, k)?.id;
     items.push({ sep: 1 });

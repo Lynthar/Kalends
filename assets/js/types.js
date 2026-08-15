@@ -1,31 +1,10 @@
-/* Kalends 前端 · types.js
-   **属性内核：一种字段类型的全部行为集中在这一张表里。**
-
-   在此之前它散在十处——类型名、表头图标、筛选样式、操作符组、可否切换呈现、排序取值、
-   单元格渲染、td 造型、就地编辑器、详情表单控件——加一种类型要挨个接一遍，
-   漏哪处就在哪处静默失守（R4 那轮 18 条发现里有 6 条正是这个成因）。
-
-   **加一种类型 = 这里加一行 + 后端 `fields::FTYPES` 加一项**（有形状的再补一段
-   `collections::normalize_shaped`）。别再往下面那些分派点里塞 if。
-
-   每一行的字段：
-     label    属性菜单与「新建列」下拉里的名字
-     filter   'list' 勾选清单 · 'text'/'num'/'date' 三组操作符之一
-     conv     1＝值就是纯文本，可在 文本/单选/多选 三种呈现间切换
-     numeric  1＝排序按数值比较（否则按中文串）
-     group    1＝详情表单里它是一串控件，外层要用 group 而不是 label
-     title    1＝td 上挂 title（长文本列悬停看全）
-     input    详情表单与就地编辑器用的 <input type>，缺省 text
-     td       单元格的 class，缺省无
-     cell     单元格渲染，缺省＝转义后的纯文本
-     editor   就地编辑器，缺省＝通用的多输入迷你表单
-     icon     表头图标
-
-   `cell`/`editor` 里引用的函数住在后面几份文件（table / editors），都在函数体内、
-   调用时才解析——所以这一份可以先加载。 */
+/* Kalends 前端 · types.js —— 属性内核：一种字段类型的全部行为集中在 TYPES 一张表里。
+   加一种类型 = 这里加一行 + 后端 fields::FTYPES 加一项（有形状的再补 normalize_shaped），
+   **别往分派点里塞 if**：类型的行为只在这张表里声明，分派点一律查表。 */
 const TYPES = {
   text: {
     label: '文本',
+    creatable: 1,
     filter: 'text',
     conv: 1,
     title: 1,
@@ -34,6 +13,7 @@ const TYPES = {
   },
   num: {
     label: '数字',
+    creatable: 1,
     filter: 'num',
     numeric: 1,
     input: 'number',
@@ -42,6 +22,7 @@ const TYPES = {
   },
   sel: {
     label: '单选',
+    creatable: 1,
     filter: 'list',
     conv: 1,
     cell: (v, tab, k) => tagFor(tab, k, v),
@@ -50,14 +31,16 @@ const TYPES = {
   },
   multi: {
     label: '多选',
+    creatable: 1,
     filter: 'list',
     conv: 1,
     group: 1,
     cell: (v, tab, k) => tagsFor(tab, k, Array.isArray(v) ? v : splitVals(v)),
     editor: ({ tab, it, td, k, col, toExtra }) => multiEditor(tab, it, td, k, sel => {
-      if (toExtra) return patchRow(tab, it, extraPatch(it, k, sel));
-      if (col.src === 'col') return patchRow(tab, it, { [k]: sel });
-      return patchRow(tab, it, { [k]: sel.join(', ') }); // 文本列的多选呈现：拼回字符串
+      // 存储形态跟着**声明的类型**走，不跟呈现走：真多选列存数组，文本列的多选呈现拼回
+      // 字符串——真列没有数组值这回事，写进去后端读不出来就当成空，那一格原值静默没了
+      const v = col.t === 'multi' ? sel : sel.join(', ');
+      return patchRow(tab, it, toExtra ? extraPatch(it, k, v) : { [k]: v });
     }),
     icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5.5 4h8M5.5 8h8M5.5 12h8"/><circle cx="2.4" cy="4" r=".95" fill="currentColor" stroke="none"/><circle cx="2.4" cy="8" r=".95" fill="currentColor" stroke="none"/><circle cx="2.4" cy="12" r=".95" fill="currentColor" stroke="none"/></svg>',
   },
@@ -69,6 +52,7 @@ const TYPES = {
   },
   date: {
     label: '日期',
+    creatable: 1,
     filter: 'date',
     input: 'date',
     td: 'cdate',
@@ -76,6 +60,7 @@ const TYPES = {
   },
   tel: {
     label: '电话',
+    creatable: 1,
     filter: 'text',
     input: 'tel',
     td: 'cdate',
@@ -85,6 +70,7 @@ const TYPES = {
   },
   url: {
     label: '网址',
+    creatable: 1,
     filter: 'text',
     input: 'url',
     td: 'clip',
@@ -94,6 +80,7 @@ const TYPES = {
   },
   email: {
     label: '邮箱',
+    creatable: 1,
     filter: 'text',
     input: 'email',
     td: 'clip',
@@ -105,3 +92,6 @@ const TYPES = {
 // 下面几个是从上表派生的，别再各自维护一份
 const LIST_TYPES = Object.keys(TYPES).filter(t => TYPES[t].filter === 'list');
 const CONV_TYPES = Object.keys(TYPES).filter(t => TYPES[t].conv); // 纯文本值列可切换呈现
+// 「新建列」能建出来的类型：**必须与后端 fields::FTYPES 同集合**，否则下拉里会有一项
+// 选了必 400。状态不在其中——它的词表带着支出/提醒/时间线三层语义，不是随手能建的列
+const CREATABLE_TYPES = Object.keys(TYPES).filter(t => TYPES[t].creatable);

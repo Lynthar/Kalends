@@ -10,10 +10,8 @@ pub fn today() -> NaiveDate {
 }
 
 /// 从某个到期日按周期前进 n 期；lifetime 或未知周期返回 None。
-///
-/// **一定要一次性前进 n 期，不能循环调用 `advance` n 次。** 月加法会把日期钳到月末，
-/// 而钳过之后锚点就丢了：1/31 迭代六次得 7/28，一次性加六个月才是 7/31。补推逾期条目
-/// （`renew_item`）正是要跨多期的场景，用迭代会把用户的账单日一点点往前拽。
+/// **跨多期必须一次算第 n 期，不能循环调用 `advance` n 次**：月加法钳到月末后
+/// 锚点即丢（1/31 迭代六次得 7/28，正解 7/31）。
 pub fn advance_n(date: NaiveDate, cycle: &str, cycle_days: Option<i64>, n: u32) -> Option<NaiveDate> {
     let months = |m: u32| date.checked_add_months(Months::new(m * n));
     let days = |d: u64| date.checked_add_days(Days::new(d * n as u64));
@@ -36,8 +34,7 @@ pub fn advance(date: NaiveDate, cycle: &str, cycle_days: Option<i64>) -> Option<
 }
 
 /// 到期日的唯一实现：库按 due_anchor 决定是直接读下次续费日，还是从上次续费推一期。
-/// 到期时间线（engine）与库列表（collections::due_of）都走这里——曾经是两份逐行等价的
-/// 拷贝，改一处忘另一处就会让表格和到期栏各说各话。
+/// 到期时间线（engine）与库列表（collections::due_of）都走这里，不许再长出第二份。
 pub fn due_from(
     anchor: &str,
     cycle: &str,
@@ -59,20 +56,9 @@ pub fn due_from(
 /// 越过这个数说明周期或日期本身有问题，返回 None＝不动日期，是安全的失败。
 const MAX_PERIODS: u32 = 10_000;
 
-/// 续费动作要把锚点日期改写成哪一天。返回 None＝推不动，调用方不改日期。
-///
-/// 两个轴是正交的：`due_anchor` 决定到期日从哪儿来（存下次日 / 上次续费推一期），
-/// `renew_from` 决定**这次续费之后从哪天起算**——
-///
-/// - `schedule` 按原定日程：账单日不动。服务商按固定日历日出账的（VPS、域名、保险）
-///   都该是这个，晚付十天不该让账期永久后移十天。
-/// - `today` 从操作当天重新计时。SIM 保号是真的这样：保号窗口从你实际充值那天起算。
-///
-/// 这两种语义此前挤在 `due_anchor='last'` 一个标记里，于是 SIM 对而 VPS 错。
-///
-/// **`last` 锚点算不出日程时一律回落成今天**：没有上次续费日就没有"原定日程"可言，
-/// 操作当天是唯一说得通的锚点——缺 `last_renewed` 的条目正是靠点一次续费把日期补上的，
-/// 回落保住了这条路。
+/// 续费动作把锚点日期改写成哪一天；None＝推不动，调用方不改日期。
+/// `due_anchor` 管到期日从哪儿来，`renew_from` 管续费后从哪天起算（`schedule`＝账单日
+/// 不动 / `today`＝从操作当天重算），两轴正交；`last` 算不出日程时回落成今天。
 #[allow(clippy::too_many_arguments)]
 pub fn renew_to(
     anchor: &str,
@@ -152,8 +138,7 @@ pub fn cycle_label(cycle: &str, cycle_days: Option<i64>) -> String {
 }
 
 /// 状态的三层语义：计不计支出 / 发不发提醒 / 上不上到期时间线。
-/// 以前这三件事散在各表的 SQL 字面量里（`status='Active'`、`IN ('Active','Ending')`），
-/// 现在以各库状态词表里的选项标记为准（见 `sem_map`），读不到就回落到内置六值的既有含义。
+/// 以各库状态词表选项上的标记为准（见 `sem_map`），读不到就回落到内置六值的既有含义。
 #[derive(Clone, Copy)]
 pub struct StatusSem {
     pub spend: bool,
@@ -258,12 +243,9 @@ impl Row {
         )
     }
 
-    /// 算不出到期日时，到底缺的是哪一项。
-    ///
-    /// **不能只按锚点二选一**：`last` 锚点算不出来有两半成因——缺上次续费日，或缺周期
-    /// （cycle 空 / `days` 却没填天数）。后者只报"缺上次续费日"的话，用户打开条目看见
-    /// 日期明明填着，按提示无从下手，真正缺的那一项反倒没被点名。
-    /// `next` 锚点则只有一种成因（`due_from` 对它只读 next_renewal），照报即可。
+    /// 算不出到期日时，到底缺的是哪一项。**不能只按锚点二选一**：`last` 算不出有
+    /// 两半成因（缺上次续费日，或缺周期/天数），一律报"缺上次续费日"会把用户指向
+    /// 一个明明填着的字段；`next` 只有一种成因，照报即可。
     fn missing_for_due(&self) -> &'static str {
         let dated = |s: &Option<String>| {
             s.as_deref()
@@ -279,6 +261,21 @@ impl Row {
         } else {
             "周期"
         }
+    }
+
+    /// 该计支出、却因为缺一半而没被计进去时，缺的是哪一项；None＝不算欠缺。
+    /// **买断要在最前面挡掉**：它本就没有"每月多少"可言，两种欠缺都不算它的——
+    /// 只把豁免写在周期那一支里的话，"买断 + 没填币种"仍会被点名，
+    /// 让人去补一个补了也照样不计入的字段。
+    fn missing_for_spend(&self) -> Option<&'static str> {
+        if self.price.is_none() || self.cycle.as_deref() == Some("lifetime") {
+            return None;
+        }
+        if self.currency.as_deref().unwrap_or("").is_empty() {
+            return Some("币种");
+        }
+        let cycle = self.cycle.as_deref().unwrap_or("");
+        monthly_factor(cycle, self.cycle_days).map_or(Some("周期"), |_| None)
     }
 
     /// 显示名：库配了副标题字段且该条目有值时拼上（VPS 的"商家 · 产品"）。
@@ -332,12 +329,8 @@ fn rows(conn: &Connection) -> Result<Vec<Row>> {
     Ok(out)
 }
 
-/// 该上时间线、却算不出到期日的条目。
-///
-/// 这些条目状态是在管的（Active 之类），但缺 `next_renewal` 或 `last_renewed`，
-/// `due_from` 给不出日期——于是它们既不在到期时间线上、也不进 ICS、更不会提醒。
-/// 以前是直接 `continue` 掉：一个以"别忘了续费"为职责的工具，把算不出日期的条目
-/// 从列表里悄悄拿掉，比显示错误更糟。这里单独列出来交给界面点名。
+/// 该上时间线、却算不出到期日的条目，单独下发给界面点名——它们既不在时间线上、
+/// 也不进 ICS、更不会提醒，悄悄拿掉比显示错误更糟。
 pub fn undated(conn: &Connection) -> Result<Vec<Value>> {
     let sems = sem_map(conn)?;
     let mut out = Vec::new();
@@ -399,28 +392,17 @@ pub fn upcoming(conn: &Connection) -> Result<Vec<Value>> {
     Ok(items.into_iter().map(|(_, v)| v).collect())
 }
 
-/// 该计支出、却因为缺一半而没被计进去的条目。
-///
-/// `totals` 要金额与币种同时在场才累加：只填了金额的条目一分钱都不进总额，而界面上
-/// 那一行明明白白写着价钱——总额看着像"全都算进去了"。与 `undated` 同一条道理：
-/// 悄悄拿掉比显示错误更糟，所以单独点名交给界面说。
-/// 只填了币种没填金额的不算欠缺（那就是还没定价）。
+/// 该计支出、却因缺币种或周期而没被计进去的条目（`totals` 要金额与币种同时在场）。
+/// 与 `undated` 同理单独点名，别让总额看着像"全都算进去了"。
+/// 只填了币种没填金额的不算欠缺（那是还没定价）。
 pub fn uncounted(conn: &Connection) -> Result<Vec<Value>> {
     let sems = sem_map(conn)?;
     let mut out = Vec::new();
     for r in rows(conn)? {
-        if !sem_of(&sems, &r.key, &r.status).spend || r.price.is_none() {
+        if !sem_of(&sems, &r.key, &r.status).spend {
             continue;
         }
-        let missing = if r.currency.as_deref().unwrap_or("").is_empty() {
-            "币种"
-        } else if monthly_factor(r.cycle.as_deref().unwrap_or(""), r.cycle_days).is_none() {
-            // 买断（lifetime）没有"每月多少"可言，不是欠缺
-            if r.cycle.as_deref() == Some("lifetime") {
-                continue;
-            }
-            "周期"
-        } else {
+        let Some(missing) = r.missing_for_spend() else {
             continue;
         };
         out.push(json!({
@@ -517,8 +499,35 @@ mod tests {
         assert_eq!(r.due(), Some(d("2026-05-31")));
     }
 
+    /// 买断没有"每月多少"可言，不算欠缺——这条豁免以前只写在周期那一支里，
+    /// 于是"买断 + 没填币种"仍被点名，让人去补一个补了也不会计入的字段。
+    #[test]
+    fn a_lifetime_purchase_is_never_reported_as_uncounted() {
+        let mut r = row("买断软件", None, json!({}));
+        r.price = Some(49.0);
+        r.cycle = Some("lifetime".into());
+        assert_eq!(r.missing_for_spend(), None);
+        r.currency = Some("USD".into());
+        assert_eq!(r.missing_for_spend(), None);
+
+        // 周期性的条目照旧点名：缺币种那笔钱一分不进总额，而行上明明白白写着价钱
+        r.cycle = Some("monthly".into());
+        r.currency = None;
+        assert_eq!(r.missing_for_spend(), Some("币种"));
+        // 币种在、周期折不出月系数（自定义天数没填天数）：缺的是周期
+        r.currency = Some("USD".into());
+        r.cycle = Some("days".into());
+        assert_eq!(r.missing_for_spend(), Some("周期"));
+        r.cycle_days = Some(30);
+        assert_eq!(r.missing_for_spend(), None);
+        // 没定价的不算欠缺（那是还没定价，不是漏算）
+        r.price = None;
+        r.currency = None;
+        assert_eq!(r.missing_for_spend(), None);
+    }
+
     /// `renew_to` 的两个轴要真的正交：同一个 `last` 锚点，`schedule` 保住账单日、
-    /// `today` 从操作当天重算。这正是 SIM 保号与 VPS 出账此前被挤在一个标记里的地方。
+    /// `today` 从操作当天重算。
     #[test]
     fn renewing_on_schedule_keeps_the_billing_day() {
         let today = d("2026-08-09");

@@ -245,7 +245,7 @@
     <h3>设置</h3>
     <div id="settings-renewals">
     <div class="fgrid">
-      <label>提醒阈值（提前天数）<input name="thresholds" placeholder="14,7,3,1,0"></label>
+      <label>提醒阈值（提前天数，留空＝只发每日摘要）<input name="thresholds" placeholder="14,7,3,1,0"></label>
       <label>摘要发送时间<input name="digest_time" type="time"></label>
       <label>摘要窗口（天）<input name="window_days" type="number" min="1"></label>
     </div>
@@ -305,8 +305,8 @@
       </div>
     </fieldset>
     </div>
-    <!-- 代理不能待在媒体那一段里：meta.proxy 同样管着汇率拉取与「从网站取图标」，
-         而 #settings-media 在 renewals-only 部署下是整块隐藏的，那种部署等于配不了代理 -->
+    <!-- 代理单独一段、恒可见：meta.proxy 管 TMDB / 汇率 / 取图标三件事，
+         放进 #settings-media 的话 renewals-only 部署整块隐藏、就配不了代理 -->
     <fieldset class="chanset">
       <legend>出网</legend>
       <div class="fgrid">
@@ -339,7 +339,7 @@
 <!-- 播报区：toast 是唯一的成功/失败反馈，不标 live region 屏幕阅读器就完全听不到 -->
 <div id="toast" role="status" aria-live="polite" hidden></div>
 <script src="/config.js"></script>
-<!-- 前端拆成七份（2026-08-15）：普通 script 共享全局作用域，**顺序即依赖顺序**，别调换 -->
+<!-- 前端拆成八份：普通 script 共享全局作用域，**顺序即依赖顺序**，别调换 -->
 <script src="/js/core.js"></script>
 <script src="/js/types.js"></script>
 <script src="/js/table.js"></script>

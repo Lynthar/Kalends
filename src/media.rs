@@ -35,27 +35,55 @@ pub fn router() -> Router<App> {
         .route("/covers/{name}", get(cover_file))
 }
 
-fn normalized(conn: &Connection, mut b: Value) -> Result<Value, ApiError> {
-    // 空标题是允许的：表尾「＋ 新建」直接插一行空行、就地填（与库那侧同款）。
-    // title 有 NOT NULL 约束，所以 values_of 会把它写成空串而不是 NULL。
-    // 评分是 10 分制（迁移 0019 起，与 douban_rating 同一把尺）；不填＝没评分，那是允许的。
-    // 范围仍要在写入口卡住：越界的数字会一路渲染到界面上，也会让排序与筛选失去意义
-    if let Some(r) = i(&b, "rating") {
+/// 请求里出现的数字键必须真的是数字。`values_of` 读不出来就写 NULL，而键明明在请求里——
+/// 「出现即写入」的协议下那是一次静默清空（评分填 8.5 就这样把分数丢过，还回 200）。
+/// `""` 与 `null` 仍按协议表示清空。
+fn check_numbers(b: &Value) -> Result<(), ApiError> {
+    let clearing = |v: &&Value| v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty());
+    for k in INT_FIELDS {
+        if let Some(v) = b.get(*k).filter(|v| !clearing(v)) {
+            if v.as_i64().is_none() {
+                return Err(bad(format!("{k} 要写成整数")).into());
+            }
+        }
+    }
+    for k in REAL_FIELDS {
+        if let Some(v) = b.get(*k).filter(|v| !clearing(v)) {
+            if v.as_f64().is_none() {
+                return Err(bad(format!("{k} 要写成数字")).into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 写入口的校验与规范化，**只作用在这次请求带来的键上**：缺席的键在局部更新里来自库中
+/// 现值，拿它去过校验等于让一个陈年坏值把整行锁死（与 `collections::update_item` 同款）。
+fn shape_incoming(conn: &Connection, b: &mut Value) -> Result<(), ApiError> {
+    check_numbers(b)?;
+    // 评分 1–10（迁移 0019）；不填＝没评分是允许的，填了就得在范围内——
+    // 越界的数字会一路渲染到界面，也让排序筛选失去意义
+    if let Some(r) = i(b, "rating") {
         if !(1..=10).contains(&r) {
             return Err(bad("评分只能是 1–10").into());
         }
     }
+    // 有形状字段与库那侧同一套规范化：媒体的自定义列也能选这些类型，
+    // 不过一遍的话「网址」列存的就是没协议的裸串，渲染成链接会被当成站内相对路径
+    crate::collections::normalize_shaped_in(conn, "media", b)?;
+    Ok(())
+}
+
+/// 类别与状态的缺省值。**只补在合并之后**：补在请求上，「只改一个键」的 PATCH
+/// 会把库里存着的类别与状态一并顶掉。空标题是允许的（title 有 NOT NULL，写空串）。
+fn with_defaults(mut b: Value) -> Value {
     if s(&b, "kind").is_none() {
         b["kind"] = json!("电影");
     }
     if s(&b, "status").is_none() {
         b["status"] = json!("想看");
     }
-    // 有形状的字段（tel/url/email）与库那侧同一套规范化：媒体的自定义列也能选这三种
-    // 类型（"新建列"的类型下拉对两侧一视同仁），写入口不过一遍的话「网址」列存进去的
-    // 就是没有协议的裸串，渲染成链接时会被当成站内相对路径
-    crate::collections::normalize_shaped_in(conn, "media", &mut b)?;
-    Ok(b)
+    b
 }
 
 fn values_of(b: &Value) -> (Vec<&'static str>, Vec<SqlValue>) {
@@ -165,18 +193,18 @@ async fn list(State(app): State<App>, Query(q): Query<HashMap<String, String>>) 
     Ok(Json(json!(rows)))
 }
 
-async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
+async fn create(State(app): State<App>, Json(mut b): Json<Value>) -> R {
     let conn = app.db.lock().unwrap();
-    let b = normalized(&conn, b)?;
-    let id = insert(&conn, &b)?;
+    shape_incoming(&conn, &mut b)?;
+    let id = insert(&conn, &with_defaults(b))?;
     Ok(Json(json!({ "id": id })))
 }
 
-/// 局部更新：请求里出现的键写入（`""`/`null` 即清空），缺席的键保持原值，
-/// `extra` 作为整体走同一条规则。与库那侧同一套语义（`collections::merge_over`）——
-/// 曾经是全量替换，于是"开一次详情表单直接保存"就能把自定义列整片清掉。
-async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value>) -> R {
-    let conn = app.db.lock().unwrap();
+/// 局部更新：与库那侧同一套语义（`collections::merge_over`）——出现即写入、
+/// 缺席即保持、`extra` 整体替换。**校验在合并之前、缺省值在合并之后**，两者的次序
+/// 各有理由（见 `shape_incoming` / `with_defaults`），单测走的就是这条路。
+fn update_row(conn: &Connection, id: i64, mut b: Value) -> Result<(), ApiError> {
+    shape_incoming(conn, &mut b)?;
     let cur: Value = conn
         .query_row("SELECT * FROM media_items WHERE id=?1", [id], |r| {
             let cols: Vec<String> = r.as_ref().column_names().iter().map(|c| c.to_string()).collect();
@@ -189,8 +217,7 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
         .chain(REAL_FIELDS)
         .copied()
         .chain(std::iter::once("extra"));
-    let b = crate::collections::merge_over(&cur, &b, writable);
-    let b = normalized(&conn, b)?;
+    let b = with_defaults(crate::collections::merge_over(&cur, &b, writable));
     let (cols, mut vals) = values_of(&b);
     let sets: Vec<String> = cols
         .iter()
@@ -209,6 +236,12 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
     if n == 0 {
         return Err(missing("条目不存在").into());
     }
+    Ok(())
+}
+
+async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value>) -> R {
+    let conn = app.db.lock().unwrap();
+    update_row(&conn, id, b)?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -265,10 +298,12 @@ async fn import(State(app): State<App>, Json(b): Json<Value>) -> R {
     let conn = app.db.lock().unwrap();
     let (mut added, mut skipped, mut failed) = (0, 0, 0);
     for raw in items {
-        let Ok(item) = normalized(&conn, raw.clone()) else {
+        let mut item = raw.clone();
+        if shape_incoming(&conn, &mut item).is_err() {
             failed += 1;
             continue;
-        };
+        }
+        let item = with_defaults(item);
         let dup = if let Some(did) = s(&item, "douban_id") {
             conn.query_row(
                 "SELECT 1 FROM media_items WHERE douban_id=?1 LIMIT 1",
@@ -357,7 +392,8 @@ async fn from_tmdb(State(app): State<App>, Json(b): Json<Value>) -> R {
     fields["status"] = json!(s(&b, "status").unwrap_or_else(|| "想看".into()));
     let id = {
         let conn = app.db.lock().unwrap();
-        insert(&conn, &normalized(&conn, fields)?)?
+        shape_incoming(&conn, &mut fields)?;
+        insert(&conn, &with_defaults(fields))?
     };
     if let Some(p) = poster {
         match client.poster(&p).await {
@@ -473,4 +509,91 @@ async fn cover_file(
         bytes,
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 出现在请求里的数字键读不出来时必须报错，不能悄悄写成 NULL：
+    /// 「出现即写入」的协议下那是一次静默清空——评分填 8.5 就这样把分数丢过，
+    /// 而界面上看到的是保存成功。
+    #[test]
+    fn a_number_that_cannot_be_read_is_refused_not_silently_dropped() {
+        assert!(check_numbers(&json!({ "rating": 8 })).is_ok());
+        assert!(check_numbers(&json!({ "rating": 8.5 })).is_err());
+        assert!(check_numbers(&json!({ "year": 2026.5 })).is_err());
+        assert!(check_numbers(&json!({ "rating": "八分" })).is_err());
+        // 小数列照收小数，字符串仍然不行
+        assert!(check_numbers(&json!({ "douban_rating": 8.4 })).is_ok());
+        assert!(check_numbers(&json!({ "douban_rating": "高" })).is_err());
+        // 清空按协议来：`null` 与空串都算，缺席更不必说
+        assert!(check_numbers(&json!({ "rating": null })).is_ok());
+        assert!(check_numbers(&json!({ "rating": "" })).is_ok());
+        assert!(check_numbers(&json!({ "title": "只改标题" })).is_ok());
+
+        // 光有这个纯函数不算数，写入口得真的调它——下面这几条走的是 update 的那条路
+        let conn = crate::db::fresh_in_memory().unwrap();
+        let id = insert(
+            &conn,
+            &json!({ "title": "打过分的片", "kind": "电影", "status": "看过", "rating": 8 }),
+        )
+        .unwrap();
+        assert!(update_row(&conn, id, json!({ "rating": 8.5 })).is_err());
+        let kept: Option<i64> = conn
+            .query_row("SELECT rating FROM media_items WHERE id=?1", [id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, Some(8), "被拒之后分数要原样留着，不能落成 NULL");
+        // 清空是允许的，而且真的清掉
+        update_row(&conn, id, json!({ "rating": null })).unwrap();
+        let cleared: Option<i64> = conn
+            .query_row("SELECT rating FROM media_items WHERE id=?1", [id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cleared, None);
+    }
+
+    /// 缺省值只能补在合并之后：补在请求上，「只改一个键」的 PATCH 会把库里存着的
+    /// 类别与状态一并顶掉。
+    #[test]
+    fn defaults_fill_in_only_what_is_still_missing() {
+        let fresh = with_defaults(json!({ "title": "新条目" }));
+        assert_eq!(fresh["kind"], json!("电影"));
+        assert_eq!(fresh["status"], json!("想看"));
+        let kept = with_defaults(json!({ "kind": "游戏", "status": "在看" }));
+        assert_eq!(kept["kind"], json!("游戏"));
+        assert_eq!(kept["status"], json!("在看"));
+    }
+
+    /// 存量里一个不合形的值不能把整行锁死（与库那侧同款）：校验只针对这次写进来的键。
+    #[test]
+    fn a_bad_stored_value_does_not_lock_the_media_row() {
+        let conn = crate::db::fresh_in_memory().unwrap();
+        // 绕开写入口塞一个越界评分（迁移 0019 之前的数据就长这样）
+        conn.execute(
+            "INSERT INTO media_items(title,kind,status,rating) VALUES('旧片','电影','看过',99)",
+            [],
+        )
+        .unwrap();
+        let id = conn.last_insert_rowid();
+
+        // 只改短评：这次请求没碰评分，就不该被评分挡住
+        update_row(&conn, id, json!({ "review": "重看一遍" })).unwrap();
+        let (review, rating): (String, i64) = conn
+            .query_row("SELECT review, rating FROM media_items WHERE id=?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(review, "重看一遍");
+        assert_eq!(rating, 99, "没碰的键原样留着：治它要另开一条路，不是让人打不开条目");
+        // 真去改评分时照样拦得住
+        assert!(update_row(&conn, id, json!({ "rating": 99 })).is_err());
+
+        // 缺省值只补在合并之后：只改一个键，不该把库里存着的类别顶回「电影」
+        update_row(&conn, id, json!({ "kind": "剧集" })).unwrap();
+        update_row(&conn, id, json!({ "review": "又看一遍" })).unwrap();
+        let kind: String = conn
+            .query_row("SELECT kind FROM media_items WHERE id=?1", [id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kind, "剧集");
+    }
 }

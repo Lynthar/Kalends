@@ -5,7 +5,7 @@
   --surface: #ffffff;
   --surface-2: #ecf6f1;
   --ink: #0e3833;
-  --ink-2: #56766f; /* 4.70/4.98/4.51:1，都过 WCAG AA 小字的 4.5（原 #5b7d76 是 4.27/4.53/4.10） */
+  --ink-2: #56766f; /* 对 bg/surface/surface-2 是 4.70/4.98/4.51:1，都过 AA 小字的 4.5——别随手调浅，e2e 现算对比度 */
   --line: #d9ebe4;
   --aqua: #0db09f;
   --aqua-deep: #067f72;
@@ -333,9 +333,8 @@ main { max-width: 1400px; margin: 0 auto; padding: .6rem 1.4rem 3rem; }
 .vpill .x:hover { opacity: 1; color: var(--coral); }
 /* 表头属性菜单 */
 .thmenu {
-  /* 最长的一份菜单（可改选项的 extra 列：类型/两个排序/筛选/选项/隐藏/还原列宽/改名/删除）
-     要能整份放下——之前 19rem 差 18px，末项「删除列」被切成半行藏在滚动条后面。
-     视口矮时仍退回滚动，别让浮层长出视口。 */
+  /* 最长的那份菜单（可改选项的 extra 列有九项）要整份放得下，
+     末项「删除列」不能被切进滚动条；视口矮时仍退回滚动。 */
   position: fixed; z-index: 40; min-width: 11.5rem;
   max-height: min(24rem, calc(100vh - 4rem)); overflow-y: auto;
   background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
@@ -379,15 +378,9 @@ main { max-width: 1400px; margin: 0 auto; padding: .6rem 1.4rem 3rem; }
 .grid.fixed { table-layout: fixed; }
 .grid.fixed td { overflow: hidden; text-overflow: ellipsis; }
 .grid.fixed .clip { max-width: none; }
-/* 横滚时首列吸附在左侧，滚到哪一列都还认得出自己在看哪一行（窄屏上尤其要紧）。
-   行本身没有底色、靠卡片的 --surface 透出来，吸附后得自己补一层不透明底，
-   hover 态也要显式对齐，否则悬停时首列不跟着变色。
-   右边框沿用 .grid td:not(:last-child) 那条：实测 Chromium 下 collapse 的边框跟着
-   吸附的格子走，不会脱开；换成 inset 阴影反而画在 padding 边而不是格子右缘，
-   中间会漏出后一列的内容。
-   吸附的是「第一个没被隐藏的格」而不是 :first-child——隐藏列只是 display:none、并没有从
-   DOM 里摘掉，把第一列藏起来时 :first-child 会落在一个不可见的格子上，真正露在最左边的
-   那列反而不吸附。applyColumns 结算完列序后给它打上 .c0。 */
+/* 横滚时首列吸附。行没有底色，吸附格要自己补不透明底与 hover 底色；右边框沿用
+   td:not(:last-child) 那条（换 inset 阴影会画在 padding 边、漏出后一列）。吸附的是
+   算出来的 .c0（首个未隐藏格）而不是 :first-child——隐藏列只是 display:none。 */
 .grid th.c0, .grid td.c0 {
   position: sticky; left: 0; z-index: 1;
   background: var(--surface);
@@ -395,12 +388,9 @@ main { max-width: 1400px; margin: 0 auto; padding: .6rem 1.4rem 3rem; }
 .grid thead th.c0 { z-index: 2; }
 .grid tbody tr:hover td.c0 { background: var(--surface-2); }
 
-/* 行首浮标：⠿ 拖动手柄 + 复选框，占的是首格预留出来的左内边距。
-   没做成真列——那样列宽三律、列序存储、隐藏列全都要再认一个新键，而它本就不是数据。
-   跟着 .c0 一起吸附，横滚时不会跑掉；绝对定位的参照就是 .c0 那条 sticky
-   （position 非 static 即可当包含块，不必另加 relative）。 */
-/* 预留 2.5rem 就够（再宽会把首列的自然宽推过列宽三律的下限，拖窄那几条断言会翻）；
-   复选框与名字之间的空隙从浮标这一侧要——浮标比预留窄，右边自然留出一道缝 */
+/* 行首浮标占首格左内边距（不是一列），跟着 .c0 吸附（sticky 本身就是包含块）。
+   预留 2.5rem 就够——再宽会把首列自然宽推过列宽三律的下限；
+   间距从浮标一侧要（浮标比预留窄，右边自然留缝）。 */
 .grid td.c0, .grid th.c0 { padding-left: 2.5rem; }
 tr.subrow td.c0 { padding-left: 4rem; }
 .rowgut {
@@ -565,8 +555,8 @@ th.drop-r { box-shadow: inset -3px 0 0 var(--aqua); }
   transition: color .15s;
 }
 .tgl:hover { color: var(--aqua-deep); }
-/* 子行的缩进跟着首格走（见上面 tr.subrow td.c0），不再按 data-k=name 认——
-   名称列不一定排在最左边，缩进画在中间某一列上看着就是错位。 */
+/* 子行缩进跟着首格走（tr.subrow td.c0）——名称列不一定排在最左，
+   缩进画在中间某列上就是错位 */
 .unnamed { color: var(--ink-2); font-style: italic; }
 /* 订阅服务 logo：名称格小图标 + 表单预览 */
 .slogo {
@@ -749,8 +739,7 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
   overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
 }
 .card .meta { color: var(--ink-2); font-size: .74rem; display: flex; gap: .5rem; align-items: baseline; }
-/* 评分数字后面那颗星：只是个「这是评分」的标识，用既有的蜂蜜金，别抢数字的位置。
-   （5 星制的整套 .stars/.star-row 样式随 star 类型于 2026-08-15 一并撤掉） */
+/* 评分数字后面那颗星：只是「这是评分」的标识，用既有的蜂蜜金，别抢数字的位置 */
 .rstar { color: var(--honey); font-size: .88em; }
 .fold { border: 1px solid var(--line); border-radius: 12px; margin-top: .8rem; padding: .5rem .8rem .7rem; }
 .fold summary { cursor: pointer; font-size: .8rem; font-weight: 650; color: var(--ink-2); letter-spacing: .05em; transition: color .2s; }

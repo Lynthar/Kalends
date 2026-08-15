@@ -39,12 +39,9 @@ pub fn run(conn: &Connection, data_dir: &Path) -> Result<Report> {
             let _ = fs::remove_file(&p);
         }
     }
-    // **先写 .tmp 再改名。** 判断「今天备过了吗」看的就是正式名那个文件在不在，而
-    // `VACUUM INTO` 是直写目标路径的：中途失败（磁盘满）或被 SIGKILL（docker stop 宽限期
-    // 到点升级）都会留下一份半截快照占着正式名——当天备份从此静默跳过，这份坏快照还会
-    // 进保留 N 份的轮转。rename 是原子的，只有写完的快照才拿得到正式名（与 JSONL 导出同法）。
-    // 已存在的正式快照**不要先删**：rename 本就会原地覆盖，先删了再 VACUUM 失败，
-    // 赔上的是今天那份本来还好好的快照（手动重跑备份走的正是这条路）
+    // **先写 .tmp 再改名**："今天备过了吗"看的就是正式名在不在，而 VACUUM INTO 直写
+    // 目标路径——半途死掉会留半截快照占着正式名，当天备份从此静默跳过。已存在的正式
+    // 快照不要先删：rename 本就原地覆盖，先删了再失败，赔上的是今天那份好快照。
     let snapshot = backups.join(format!("snapshot-{}.db", crate::engine::today()));
     let tmp = snapshot.with_extension("db.tmp");
     conn.execute("VACUUM INTO ?1", [tmp.to_string_lossy().as_ref()])?;
@@ -100,12 +97,9 @@ pub fn run(conn: &Connection, data_dir: &Path) -> Result<Report> {
     })
 }
 
-/// 今天的 JSONL 导出是否已经写好。看 TABLES 的最后一张表：导出是按序逐张写的，
-/// 最后那张新鲜就说明整轮走完了。
-///
-/// 补跑判据里必须带上它。只看快照的话，「快照写成了、后面的导出才失败」这一路
-/// 当天再也不会重试——留下的是一份停在昨天的明文导出，而它正是"不装 Kalends 也读得懂"
-/// 那条承诺的载体。
+/// 今天的 JSONL 导出是否写好（按序逐张写，最后那张新鲜＝整轮走完）。补跑判据必须
+/// 带上它——只看快照的话，"快照成了、导出才失败"这一路当天不再重试，
+/// 留下一份停在昨天的明文导出。
 fn exported_today(data_dir: &Path) -> bool {
     let last = TABLES[TABLES.len() - 1];
     let Ok(meta) = fs::metadata(data_dir.join("export").join(format!("{last}.jsonl"))) else {
@@ -129,9 +123,8 @@ pub async fn scheduler(db: crate::Db, data_dir: PathBuf) {
             };
             match result {
                 Ok(r) => tracing::info!("backup done: {}", r.snapshot.display()),
-                // 这里曾经在失败时删掉今日快照，因为半截快照会让备份从此静默停摆。
-                // 现在快照走 .tmp + rename，失败路径根本产不出正式名的文件，反倒是
-                // 「快照已写好、后面的 JSONL 导出才失败」时删它等于毁掉一份好快照
+                // 失败时不删今日快照：失败路径产不出正式名的文件（.tmp + rename），
+                // 而"快照已写好、导出才失败"时删它等于毁掉一份好快照
                 Err(e) => tracing::warn!("backup failed: {e:#}"),
             }
         }

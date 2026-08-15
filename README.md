@@ -49,6 +49,8 @@ TMDB lookups need a free API key, entered on the settings page. On a phone, "add
 
 For a real deployment (Docker Compose, reverse proxy, single-module setups) see [deploy/DEPLOY.md](deploy/DEPLOY.md). Environment variables: `KALENDS_ADDR` (default `127.0.0.1:4180`), `KALENDS_DATA` (default `./data`), `KALENDS_MODULES` (default `renewals,media`).
 
+Behind a restrictive network, the settings page has one shared outbound proxy covering TMDB lookups, exchange-rate refreshes and favicon fetches; Telegram gets its own proxy field.
+
 Keep the SQLite file on local disk. Locking over SMB or NFS is not reliable enough to trust a ledger to.
 
 Building has the same constraint. If the repository itself sits on a network share, send Cargo's output to a local directory first — `export CARGO_TARGET_DIR=~/.cache/kalends-target` — because incremental compilation wants file locks those filesystems don't provide, and without it `cargo build` stops at a bare `os error 45`.

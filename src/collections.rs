@@ -89,12 +89,9 @@ fn anchor_of(conn: &Connection, id: i64) -> anyhow::Result<String> {
     )?)
 }
 
-/// 新库的键：k<历史用过的最大编号 + 1>。
-///
-/// 不能拿 rowid 派生。SQLite 不带 AUTOINCREMENT 时会复用删掉的 id，而删库按设计保留
-/// 台账与通知日志（那两张表存的是 kind 字符串，不跟着外键走），于是新库会捡到旧库的
-/// kind：台账里凭空多出别人的付款记录，通知去重键也可能把新条目判成"已发过"而漏发。
-/// 所以编号要越过所有"曾经用过"的痕迹，而不只是现存的库。
+/// 新库的键：k<历史用过的最大编号 + 1>。**不能拿 rowid 派生**：SQLite 会复用删掉的
+/// id，而删库按设计保留台账与通知日志的 kind 字符串——新库会捡到旧库的 kind，凭空
+/// 继承旧账、通知去重也会误判。编号要越过所有"曾经用过"的痕迹，不只是现存的库。
 fn next_coll_key(conn: &Connection) -> rusqlite::Result<String> {
     let n: i64 = conn.query_row(
         "SELECT coalesce(max(n),0)+1 FROM (
@@ -170,9 +167,8 @@ async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
 
 /* ── 建库模板：一套预置字段集 + 库属性，免得新建的库是个空壳 ────────── */
 
-/// 模板只决定"库刚建好时长什么样"，落表后就是普通字段——域字段与用户手加的
-/// 自定义列同权（`builtin=0`），可改名、可改选项、可删。
-/// 模板的一个域字段。默认值见 `EXTRA`，写模板时只列与默认不同的键。
+/// 模板的一个域字段；默认值见 `EXTRA`，写模板时只列与默认不同的键。
+/// 模板只决定"库刚建好时长什么样"：落表后一律 builtin=0，与手加的自定义列同权。
 struct Field {
     key: &'static str,
     name: &'static str,
@@ -248,8 +244,7 @@ const TEMPLATES: &[Template] = &[
         desc: "只有通用字段，列自己加",
         ..TPL
     },
-    // 订阅 / SIM / VPS 三个预置库也在这里：它们此前只由迁移 0007/0008 一次性建出来，
-    // 删掉就再也建不回来，也没法建第二个同类库。字段集与 0008 对齐，由单测钉住不漂移。
+    // 订阅 / SIM / VPS 三个预置库也是模板：字段集与迁移 0008 对齐，由单测钉住不漂移。
     Template {
         id: "subs",
         label: "订阅",
@@ -292,9 +287,8 @@ const TEMPLATES: &[Template] = &[
         status: RENEWAL_STATUS_VOCAB,
         subline: "phone_number",
         note_field: "keepalive_action",
-        // 保号周期恒为自定义天数，所以费用/周期/链接退进详情表单，不占表格列位。
-        // 预置库 sims 干脆没注册 cycle 列，那正是「SIM 每次编辑都清掉周期」的成因——
-        // 这里注册上（只是不上表），同类缺陷从根上不会再有。
+        // 保号周期恒为自定义天数：费用/周期/链接退进详情表单，不占表格列位。
+        // cycle 必须注册（只是不上表）——没注册它正是「编辑清掉周期」一类事故的根。
         base: &[
             ("price", "", 0),
             ("cycle", "", 0),
@@ -576,10 +570,9 @@ async fn templates() -> R {
     Ok(Json(json!(out)))
 }
 
-/// 新建的库要能直接用：播一套默认字段集，否则表格没有列、详情表单是空的。
-/// 到期锚点决定给"下次到期日"还是"上次续费 + 剩余天数"，模板再往上加域字段。
-/// 词表按 SQLite `json()` 的形态写成紧凑一行：迁移 0008 播状态词表时用的就是它，
-/// 两边要逐字节一致，模板等价单测才对得上（serde_json 会按字母重排键，不能拿来压缩）。
+/// 新建的库要能直接用：播一套默认字段集，锚点决定给哪一侧的日期字段，模板再加域字段。
+/// 词表常量要按 SQLite `json()` 的形态写成紧凑一行、与迁移 0008 逐字节一致，
+/// 模板对拍单测才对得上（serde_json 会按字母重排键，不能拿来压缩）。
 const STATUS_VOCAB: &str = r#"[{"v":"Active","spend":1,"alert":1,"timeline":1},{"v":"Planned","spend":0,"alert":0,"timeline":0},{"v":"Ending","spend":0,"alert":0,"timeline":1},{"v":"Ended","spend":0,"alert":0,"timeline":0}]"#;
 
 /// 三个续费库共用的六值词表：比通用词表多 Deferred（比价目录，记各档位供比较）
@@ -589,12 +582,9 @@ const RENEWAL_STATUS_VOCAB: &str = r#"[{"v":"Active","spend":1,"alert":1,"timeli
 /// (键, 显示名, 类型, 数据源, 默认上表, 序)
 type FieldDef = (&'static str, &'static str, &'static str, &'static str, i64, i64);
 
-/// 到期模型决定注册哪一侧的日期字段：`next` 记下次到期日，`last` 记上次续费日 + 剩余天数。
-///
-/// 建库播种与**事后切换到期模型**共用这一份。切换那条路非补不可：库建成 `last` 时
-/// `fields` 里从来没有 `next_renewal`，切成 `next` 之后 `due_from` 改读一个界面上
-/// 根本造不出来的字段（字段面板只能建 `src='extra'` 的自定义列），整库到期日就此
-/// 静默消失——表格里旧的"上次续费"列还显示着值，看着一切正常，时间线却空了。
+/// 到期模型决定注册哪一侧的日期字段。建库播种与**事后切换到期模型**共用这一份：
+/// 切换那条路非补不可——否则 `due_from` 改读一个界面上根本造不出来的字段，
+/// 整库到期日静默消失（旧列还显示着值，看着一切正常，时间线却空了）。
 fn anchor_fields(anchor: &str) -> &'static [FieldDef] {
     if anchor == "next" {
         &[("next_renewal", "下次到期", "date", "col", 1, 40)]
@@ -724,9 +714,7 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
             id
         ],
     )?;
-    // 换到期模型就把新锚点那一侧的日期字段补进注册表：没有它，due_from 改读的那个字段
-    // 在界面上既不在表格也不在详情表单，而字段面板只能建 extra 自定义列——用户没有任何
-    // 途径把它造出来，整库到期日从此静默消失（切回去能恢复，但那要先猜到原因）。
+    // 换到期模型就把新锚点那侧的日期字段补进注册表（见 anchor_fields 的注释）。
     // ON CONFLICT DO NOTHING：已注册过就保持用户改过的显示名与上表设置，幂等。
     if anchor != cur["due_anchor"].as_str().unwrap_or_default() {
         let key = cur["key"].as_str().unwrap_or_default();
@@ -855,11 +843,9 @@ async fn items_list(State(app): State<App>, Path(key): Path<String>) -> R {
     Ok(Json(json!(items_of(&conn, &key)?)))
 }
 
-/// 有形状的文本类型（tel / url / email）的规范化。
-///
-/// 共同的分寸：**只拦一眼可辨的垃圾，不拦"不够完整"**。存量数据里就有 `+44` 这种只填了
-/// 国家码的值，在写入口 400 掉等于让人打不开自己的旧条目；可疑但可能是真的，交给界面标出来
-/// （电话号码的位数偏少由前端挂个问号提示，见 `telSuspect`）。
+/// 有形状类型（tel / url / email / date）的规范化。分寸：**只拦一眼可辨的垃圾，
+/// 不拦"不够完整"**——存量里就有 `+44` 这种残缺值，400 掉等于让人打不开旧条目；
+/// 可疑但可能是真的，交给界面标出来（`telSuspect`）。
 pub fn normalize_shaped(ftype: &str, raw: &str) -> anyhow::Result<String> {
     let t = raw.trim();
     if t.is_empty() {
@@ -867,10 +853,8 @@ pub fn normalize_shaped(ftype: &str, raw: &str) -> anyhow::Result<String> {
     }
     match ftype {
         "tel" => {
-            // **折叠必须先于校验。** 连续空白折叠成一个空格本就是为"从别处粘来的号码"
-            // 准备的，而那种号码带的往往是全角空格（U+3000）——下面白名单里的空格是
-            // ASCII 的，次序反过来就等于一边声明要折叠、一边把该折叠的输入 400 掉，
-            // 报错还是「不该出现「　」」，那个字符渲染出来近似空白，几乎读不出所以然。
+            // **折叠必须先于字符白名单**：粘来的号码常带全角空格 U+3000，而白名单里的
+            // 空格是 ASCII 的——次序反了就把该折叠的输入 400 掉，报错还几乎读不出所以然。
             let folded = t.split_whitespace().collect::<Vec<_>>().join(" ");
             if let Some(c) = folded
                 .chars()
@@ -903,10 +887,8 @@ pub fn normalize_shaped(ftype: &str, raw: &str) -> anyhow::Result<String> {
             if t.split_whitespace().count() > 1 {
                 return Err(bad("网址里不该有空格"));
             }
-            // 没写协议就补 https://：多数人直接粘 `netflix.com`，而没有协议的串
-            // 在 <a href> 里会被当成相对路径，点了跳到本站自己的一个不存在页面。
-            // 协议按 RFC 3986 不分大小写：`HTTPS://…`（粘自旧文档，或输入法把首字母
-            // 大写了）在浏览器里能开，这里也得认，顺手统一成小写存下来。
+            // 没写协议补 https://（裸串在 <a href> 里会被当成相对路径）；
+            // 协议按 RFC 3986 不分大小写，认下来并统一成小写存。
             let full = match t.split_once("://") {
                 Some((scheme, rest)) => format!("{}://{rest}", scheme.to_lowercase()),
                 None => format!("https://{t}"),
@@ -922,13 +904,9 @@ pub fn normalize_shaped(ftype: &str, raw: &str) -> anyhow::Result<String> {
             Ok(full)
         }
         "date" => {
-            // 界面用的是原生 <input type=date>，写不出别的形状；但接口与导入脚本能——
-            // 而一个写坏的日期会让条目**掉出到期时间线、不再提醒**（首页的 undated 会点名它，
-            // 所以不是全无声息，但等你看见已经过去几天了）。
-            //
-            // **认得出就补齐成标准形状，而不是拒掉**：`2026-8-15` chrono 本来就认，
-            // 可这些日期是当字符串排序与比较的（`2026-8-15` 会排到 `2026-12-01` 后面），
-            // 存回标准形状才对。与 tel 折叠空白、url 补协议同一条路子。
+            // 界面的原生 <input type=date> 写不出坏值，接口与导入脚本能——坏日期会让
+            // 条目掉出到期时间线。认得出的松散写法补齐而不是拒掉：这些日期是当字符串
+            // 排序的，`2026-8-5` 不补零会排到 `2026-12-01` 后面。
             let d = NaiveDate::parse_from_str(t, "%Y-%m-%d")
                 .map_err(|_| bad(format!("日期要写成 2026-08-15 这样的形状：{t}")))?;
             Ok(d.format("%Y-%m-%d").to_string())
@@ -937,11 +915,8 @@ pub fn normalize_shaped(ftype: &str, raw: &str) -> anyhow::Result<String> {
     }
 }
 
-/// 币种：2–6 位字母，统一存大写。
-///
-/// **不卡死三位 ISO 码**：那今天不会误伤任何东西（生产在用的是 USD/CNY/EUR），但哪天要记
-/// `USDT` 这类四位的就被自己的校验挡在门外了。这里要拦的是「这不是ISO码」那种一眼可辨的
-/// 垃圾——它一旦落库，那笔钱就永远不进支出统计（汇率表查不到，只能单独占一行）。
+/// 币种：2–6 位字母，统一存大写。**不卡死三位 ISO 码**（`USDT` 这类四位的要进得来）；
+/// 拦的是一眼可辨的垃圾——坏币种一旦落库，那笔钱就永远不进支出统计。
 pub fn normalize_currency(raw: &str) -> anyhow::Result<String> {
     let t = raw.trim();
     if t.is_empty() {
@@ -961,11 +936,9 @@ pub fn url_host(raw: &str) -> Option<String> {
     (!host.is_empty() && host.contains('.')).then(|| host.to_lowercase())
 }
 
-/// 把某张表里有形状的字段就地规范化。字段类型是数据（存在 `fields` 表里），
-/// 所以写入口要现查一次——没有这类列的表，这条查询返回空集。
-///
-/// `tbl` 就是字段注册表里的表名：库用库键，媒体用 `media`。**媒体那侧同样要过**，
-/// 它的自定义列也能选 tel/url/email（"新建列"的类型下拉对两侧一视同仁）。
+/// 把某张表里有形状的字段就地规范化。字段类型是数据，写入口按表名现查一次
+/// （`tbl`＝库键或 `media`，没有这类列的表查询返回空集）。**媒体那侧同样要过**：
+/// "新建列"的类型下拉对两侧一视同仁。
 pub fn normalize_shaped_in(conn: &Connection, tbl: &str, b: &mut Value) -> anyhow::Result<()> {
     let mut stmt =
         conn.prepare("SELECT key, ftype FROM fields WHERE tbl=?1 AND ftype IN ('tel','url','email','date')")?;
@@ -1075,10 +1048,9 @@ pub fn insert_item(conn: &Connection, coll: i64, b: &Value) -> anyhow::Result<i6
         rusqlite::params_from_iter(vals),
     )?;
     let id = tx.last_insert_rowid();
-    // 新条目可能捡到一个用过的号（items.id 不带 AUTOINCREMENT，SQLite 会复用删掉的 id）。
-    // 通知去重键是 (kind, item_id, 到期日, 阈值, 渠道)，于是旧号留下的记录会让新条目在
-    // 同一个到期日上被判成"已经发过"，静默漏提醒。台账是事实记录、必须留（名字已随
-    // 迁移 0018 钉进那张表），通知日志只为去重服务、也没有读界面，新条目一落地就清掉它那份。
+    // 新条目可能捡到复用的号（items.id 不带 AUTOINCREMENT）：旧号的通知日志会让新条目
+    // 被判成"已发过"而静默漏提醒。台账是事实记录必须留（名字已随 0018 钉进那张表），
+    // 通知日志只为去重服务，新条目一落地就清掉它那份。
     let key: String = tx.query_row("SELECT key FROM collections WHERE id=?1", [coll], |r| r.get(0))?;
     tx.execute(
         "DELETE FROM notification_log WHERE kind=?1 AND item_id=?2",
@@ -1088,14 +1060,9 @@ pub fn insert_item(conn: &Connection, coll: i64, b: &Value) -> anyhow::Result<i6
     Ok(id)
 }
 
-/// 局部更新的合并规则，**全项目只此一条**（媒体那侧同款）：
-/// 请求里**出现**的键写入（`""` 与 `null` 都表示清空），**缺席**的键保持原值；
-/// `extra` 作为一个整体值走同一条规则——出现即整份替换，缺席即保持。
-///
-/// 这里曾经是全量替换（PUT）：body 漏一列，那一列就被置空。于是每条写入路径都得先把
-/// 整行铺进去再让当前值覆盖，而只要有一处没铺到就是一次静默的数据丢失——SIM 的周期、
-/// 媒体的自定义列、条目图标、父条目都这样被一次保存清掉过。改成"缺席即保持"之后，
-/// 这类事故在协议层面就不成立了，那些补偿代码也就没有存在的理由。
+/// 局部更新的合并规则，**全项目只此一条**（媒体同款）：请求里**出现**的键写入
+/// （`""` 与 `null` 都表示清空），**缺席**的键保持原值；`extra` 作为一个整体值走
+/// 同一条规则。全量替换那套「body 漏一列就清一列」正是这条协议要根除的。
 pub fn merge_over(cur: &Value, b: &Value, cols: impl Iterator<Item = &'static str>) -> Value {
     let mut out = serde_json::Map::new();
     for k in cols {
@@ -1110,9 +1077,13 @@ pub fn update_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<()> 
         .query_row(&format!("SELECT {ITEM_COLS} FROM items WHERE id=?1"), [id], item_row)
         .map_err(|_| missing("条目不存在"))?;
     let coll = cur["collection_id"].as_i64().unwrap_or_default();
-    let mut b = merge_over(&cur, b, WRITE_COLS.split(',').map(str::trim));
+    // 规范化**只作用在这次请求带来的键上**，所以要赶在合并之前：拿合并后的整行去过校验，
+    // 等于让库里一个陈年坏值（接口或导入脚本造得出来）把这一行永久锁死——
+    // 改任何别的字段都会被一个自己没碰过的字段 400 掉。
+    let mut incoming = b.clone();
+    normalize_shaped_fields(conn, coll, &mut incoming)?;
+    let b = merge_over(&cur, &incoming, WRITE_COLS.split(',').map(str::trim));
     check_parent(conn, coll, Some(id), i(&b, "parent_id"))?;
-    normalize_shaped_fields(conn, coll, &mut b)?;
     let mut vals = item_values(&b)?;
     let sets = WRITE_COLS
         .split(',')
@@ -1403,9 +1374,8 @@ pub fn set_logo(
         "UPDATE items SET logo=?1,updated_at=datetime('now') WHERE id=?2",
         params![name, id],
     )?;
-    // 文件名带的是**秒级**时间戳：同一秒里传第二张（换图时连点两下就够了）新旧同名，
-    // 于是刚写好的新文件恰好就是这里要删的"旧文件"——库里记着名字、文件却没了，
-    // 图标从此 404。同名时不必删：上面那次 write 已经原地覆盖过了。
+    // 文件名带秒级时间戳：同一秒传第二张就新旧同名，删"旧文件"会把刚写的新文件
+    // 一起删掉（库里记着名字、文件没了，图标 404）。同名不删——write 已原地覆盖。
     if old.as_deref() != Some(name.as_str()) {
         remove_logo_file(app, old);
     }
@@ -1425,16 +1395,12 @@ async fn logo_set(
     Ok(Json(json!({ "logo": name })))
 }
 
-/// 取图标只连**条目自己那个站**，且只走这几条常规路径。
-///
-/// 这是本项目第二条默认关着的出网（第一条是汇率），由用户在详情表单里点一下才发生：
-/// 你已经是这个站的客户，向它要一张 favicon 不多泄露任何东西——而经第三方 favicon 服务
-/// 取，等于把整份订阅域名清单告诉别人，与「数据主权」的初衷相左。
+/// 取图标只连**条目自己那个站**、只走这几条常规路径，不经第三方 favicon 服务
+/// （那等于把整份订阅域名清单告诉别人）。默认关着的出网，用户点一下才发生。
 const FAVICON_PATHS: &[&str] = &["/favicon.ico", "/favicon.png", "/apple-touch-icon.png"];
 
-/// 服务端替用户发请求前必须挡住内网：这台机器往往和别的服务同处一个局域网，
-/// 不挡的话「取图标」就成了一个替人探测内网的按钮（`image_path_ok` 是同一种防线）。
-/// 一个 IP 是否算"公网"。纯函数，好穷举测试。
+/// 一个 IP 是否算"公网"（纯函数，好穷举测试）。服务端替用户发请求前必须挡住内网，
+/// 否则「取图标」就成了替人探测内网的按钮（`image_path_ok` 是同一种防线）。
 fn public_ip_ok(ip: &std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
@@ -1473,11 +1439,8 @@ fn bare_host(host: &str) -> &str {
     }
 }
 
-/// 字面形状这一关：明显的本机名与字面内网地址直接拒。
-///
-/// **这只是第一道。** 光看字面拦不住「公共域名的 A 记录指向 127.0.0.1」这种——
-/// `localtest.me` 就是现成的例子，根本不需要 DNS 重绑定。所以真正发请求前还要过
-/// `host_is_public` 把解析结果也验一遍。
+/// 字面形状这一关：明显的本机名与字面内网地址直接拒。**这只是第一道**——光看字面
+/// 拦不住"公共域名解析到 127.0.0.1"（localtest.me），发请求前还要过 `resolve_public`。
 fn public_host_ok(host: &str) -> bool {
     let bare = bare_host(host);
     if bare.is_empty()
@@ -1493,14 +1456,9 @@ fn public_host_ok(host: &str) -> bool {
     bare.contains('.')
 }
 
-/// 字面形状 + 解析结果双重校验，**并把校验过的地址交回去钉死**。
-/// 返回 None＝不许连。**每一跳重定向都要重新过这里。**
-///
-/// 为什么要把地址交回去：只校验不钉的话，reqwest 连接时会**再解析一次**，
-/// 两次之间 DNS 可以翻脸（DNS rebinding / TOCTOU）——校验过的和真正连上的不是同一台机器。
-///
-/// 注意：配了 `meta.proxy` 时域名由代理解析，预解析与钉地址都不生效——
-/// 那种部署下真正的出口管控在代理那一侧。
+/// 字面 + 解析结果双重校验，**并把校验过的地址交回去钉死**；None＝不许连，
+/// **每一跳重定向都要重新过这里**。只校验不钉的话 reqwest 连接时会再解析一次，
+/// 两次之间 DNS 可以翻脸（rebinding / TOCTOU）。配了代理时由代理解析，这里都不生效。
 async fn resolve_public(host: &str, port: u16) -> Option<std::net::SocketAddr> {
     if !public_host_ok(host) {
         return None;
@@ -1515,10 +1473,8 @@ async fn resolve_public(host: &str, port: u16) -> Option<std::net::SocketAddr> {
     resolved_ips_ok(&ips).then(|| addrs[0])
 }
 
-/// 响应体上限。**reqwest 没有默认上限**，唯一的边界是那 30s 总超时——也就是
-/// 「带宽 × 30s」：条目的网址指向被劫持的站（或跳到一个大文件），千兆链路下最坏是数 GB
-/// 进到这个单二进制进程的内存里，而容器内存配额常只有几百 MB，OOM kill 会把通知调度
-/// 一起带走。SSRF 那几道防线管的是「连到哪」，不管「读多少」，是正交的缺口。
+/// 响应体上限。reqwest 没有默认上限，唯一边界是 30s 总超时＝「带宽 × 30s」全进内存；
+/// SSRF 防线管"连到哪"，这条管"读多少"，是正交的缺口。
 const ICON_MAX: usize = 2 << 20; // 图标：2 MB（set_logo 还会按 1 MB 再卡一道）
 const PAGE_MAX: usize = 512 << 10; // 发现页：512 KB
 
@@ -1537,10 +1493,8 @@ async fn body_head(resp: reqwest::Response, limit: usize) -> Vec<u8> {
     out
 }
 
-/// 从首页的 `<link rel="icon">` 里找图标地址。找不到就返回空，调用方退回常规路径。
-///
-/// 只做一次 GET 与一段正则——为这点事引 HTML 解析器不值当，而 `rel` 里含 icon 的
-/// link 标签形状足够固定。取不到、超时、页面过大都当作"没发现"，不算失败。
+/// 从首页的 `<link rel="icon">` 里找图标地址；取不到、超时、页面过大都当"没发现"，
+/// 调用方退回常规路径。只做一次 GET 与正则式粗解析——为这点事引 HTML 解析器不值当。
 async fn discover_icon_paths(proxy: &str, ua: &str, scheme: &str, host: &str) -> Vec<String> {
     let Ok(resp) = get_public(proxy, &format!("{scheme}://{host}/"), ua).await else {
         return Vec::new();
@@ -1552,10 +1506,8 @@ async fn discover_icon_paths(proxy: &str, ua: &str, scheme: &str, host: &str) ->
     icon_links_in(&String::from_utf8_lossy(&body), scheme, host)
 }
 
-/// 发一个 GET，自己跟重定向，**每一跳都重新校验目标主机**。
-///
-/// 不能交给 reqwest 自动跟：它默认跟 10 跳且不会回头问我们目标合不合法，于是
-/// `https://正常站/x → 302 → http://10.0.0.5/` 一路直达内网，前面那道防线形同虚设。
+/// 发一个 GET，自己跟重定向，**每一跳都重新校验目标主机**——reqwest 默认跟 10 跳
+/// 且不回头问，`https://正常站/x → 302 → http://10.0.0.5/` 会一路直达内网。
 async fn get_public(proxy: &str, url: &str, ua: &str) -> Result<reqwest::Response, String> {
     let mut current = url.to_string();
     for _ in 0..4 {
@@ -1590,11 +1542,9 @@ async fn get_public(proxy: &str, url: &str, ua: &str) -> Result<reqwest::Respons
     Err("重定向太多".into())
 }
 
-/// 从 HTML 里挑出图标地址。纯函数，好上单测——真去连站点的那层只负责取回页面。
-///
-/// **一律按字符切，不能按字节。** 页面里随便一个多字节字符（实测 Netflix 的 HTML 里有个
-/// `𝔽`）就会让 `&body[..n]` 落在字符中间直接 panic，把整个请求处理线程带走；
-/// 与 `ics::fold` 当年踩的是同一个坑。只做正则式的粗解析——为这点事引 HTML 解析器不值当。
+/// 从 HTML 里挑出图标地址（纯函数，好上单测）。**一律按字符切，不能按字节**：
+/// 页面里一个多字节字符就能让 `&body[..n]` 落在字符中间 panic、带走整个请求线程
+/// （与 `ics::fold` 同一个坑）。
 fn icon_links_in(body: &str, scheme: &str, host: &str) -> Vec<String> {
     let head: String = body.chars().take(200_000).collect();
     let mut out = Vec::new();
@@ -1602,8 +1552,8 @@ fn icon_links_in(body: &str, scheme: &str, host: &str) -> Vec<String> {
         .split('<')
         .filter(|t| t.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("link")))
     {
-        // rel 得**真的**是图标：只看 rel 属性自己的值。曾经图省事扫 rel 后面 40 个字符，
-        // 于是 `<link rel="stylesheet" href="/icon-theme.css">` 也被当成图标捡了进来
+        // rel 得**真的**是图标：只看 rel 属性自己的值，
+        // 否则 `<link rel="stylesheet" href="/icon-theme.css">` 也会被捡进来
         if !attr_value(tag, "rel").is_some_and(|v| v.to_lowercase().contains("icon")) {
             continue;
         }
@@ -1629,11 +1579,9 @@ fn icon_links_in(body: &str, scheme: &str, host: &str) -> Vec<String> {
     out
 }
 
-/// 取标签里某个属性的引号值，属性名按 ASCII 大小写不敏感匹配。
-///
-/// 直接在原串上按字节扫：属性名、`=`、引号全是 ASCII，落点必是字符边界，
-/// 既不必造一份小写副本来定位（`to_lowercase` 可能改变字节长度，索引就对不上了），
-/// 也不会把网址里的大小写抹掉。
+/// 取标签里某个属性的引号值，属性名按 ASCII 大小写不敏感匹配。直接在原串上按字节扫
+/// （属性名、`=`、引号全是 ASCII，落点必是字符边界），不造小写副本定位——
+/// `to_lowercase` 可能改变字节长度，索引就对不上了。
 fn attr_value<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     let b = tag.as_bytes();
     let n = name.as_bytes();
@@ -1689,20 +1637,18 @@ async fn logo_fetch(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<V
     if !public_host_ok(&host) {
         return Err(bad("只能从公网站点取图标").into());
     }
-    // 协议沿用条目自己那个网址：恒拼 https 的话，明写 http:// 的站点每条路径都在做
-    // TLS 握手，全数"连不上"，最后报出来的却是"这个站可能不给自动抓取"——方向全错
+    // 协议沿用条目自己那个网址：恒拼 https 的话，http-only 站点每条路径都在做
+    // TLS 握手、全数"连不上"，报出来的方向还全错
     let scheme = full.split_once("://").map(|x| x.0).unwrap_or("https").to_string();
-    // 不带 UA 会被一部分站点特判成爬虫直接 403（实测 Stack Overflow 就是），
-    // 与 scripts/update-fx-baseline.py 踩过的是同一个坑
+    // 不带 UA 会被一部分站点当爬虫直接 403（update-fx-baseline.py 同一个坑）
     const UA: &str = "kalends-icon-fetch";
-    // 整轮总截止：候选最多 1 + 4 + 3 = 8 条、串行试、每条各有 30s 上限，对着一个
-    // 黑洞式丢包的目标能让按钮在"取图标…"上停约四分钟。常见失败（拒绝/404/TLS 被挡）
-    // 都在秒级，这道闸只砍掉最坏那条尾巴
+    // 整轮总截止：候选最多 8 条、每条各 30s 上限，对着黑洞式丢包的目标能停四分钟；
+    // 常见失败都在秒级，这道闸只砍最坏的尾巴
     const DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
     let started = std::time::Instant::now();
     let mut last = String::from("没找到图标");
-    // 先问网页自己：多数站点的图标不在 /favicon.ico，而是 <link rel="icon"> 指到别处
-    // （实测 Cloudflare 三条常规路径全 404）。取不到就退回常规路径挨个试。
+    // 先问网页自己：多数站点的图标不在 /favicon.ico，而是 <link rel="icon"> 指到别处。
+    // 取不到就退回常规路径挨个试。
     let mut paths: Vec<String> = discover_icon_paths(&proxy, UA, &scheme, &host).await;
     paths.extend(FAVICON_PATHS.iter().map(|p| (*p).to_string()));
     for path in paths {
@@ -1733,11 +1679,9 @@ async fn logo_fetch(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<V
                 continue;
             }
         };
-        // 格式按**字节**认，不从 URL 后缀猜：`/favicon.ico` 实际返回 PNG 字节是极常见的
-        // 部署，而现代站点的 `<link rel="icon" href="/icon">` 干脆没有扩展名（旧写法
-        // rsplit('.') 会猜出 "com/icon"，>4 字符再回落 "ico"）——两类都会被魔数校验
-        // 误拒，用户看到的却是"这个站可能不给自动抓取"。放行的格式集合一点没放宽，
-        // 只是把"声明"从猜测换成事实，校验反而更诚实
+        // 格式按**字节**认，不从 URL 后缀猜：/favicon.ico 返回 PNG 字节是极常见的部署，
+        // 现代站点的 <link rel=icon href=/icon> 干脆没有扩展名——按后缀猜会把可用的
+        // 图标误拒掉。放行集合没放宽，只是把"声明"从猜测换成事实
         let Some(ext) = sniff_image_ext(&bytes) else {
             last = format!("{target} 取到的不是可用图片");
             continue;
@@ -1749,9 +1693,8 @@ async fn logo_fetch(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<V
             Err(e) => last = format!("{target} 取到的不是可用图片（{e}）"),
         }
     }
-    // 取不到就说清楚下一步：有些站（尤其 Cloudflare 前置的）会按 TLS 指纹挡掉非浏览器
-    // 客户端，那不是能靠改请求头绕过去的东西——冒充浏览器指纹要引重依赖且性质上是欺骗，
-    // 不如老实告诉用户手动传一张
+    // Cloudflare 前置的站按 TLS 指纹挡非浏览器客户端，改请求头绕不过去（伪装指纹
+    // 要引重依赖、性质上是欺骗，不做）——老实告诉用户手动传一张
     Err(bad(format!("{last}；这个站可能不给自动抓取，可以手动选一张图片")).into())
 }
 
@@ -1819,9 +1762,8 @@ async fn logo_file(State(app): State<App>, Path(name): Path<String>) -> Result<R
 mod tests {
     use super::*;
 
-    /// 有形状的类型里，日期与币种是 2026-08-15 补的：界面挡得住（原生 date 控件、币种下拉），
-    /// 接口与导入脚本挡不住，而写坏的后果都不出声——坏日期让条目掉出到期时间线、
-    /// 坏币种让那笔钱永远不进支出统计。
+    /// 日期与币种：界面挡得住（原生 date 控件、币种下拉），接口与导入脚本挡不住，
+    /// 而写坏的后果都不出声——坏日期掉出到期时间线、坏币种进不了支出统计。
     #[test]
     fn dates_and_currencies_are_shaped_at_the_write_entry() {
         // 日期：只认 ISO 形状，空值仍然放行（不填＝没这个日期）
@@ -1841,9 +1783,52 @@ mod tests {
         }
     }
 
+    /// 存量里一个不合形的值不能把整行锁死：校验只针对**这次写进来的**键。
+    /// 否则改任何别的字段都会被一个自己没碰过的字段 400 掉——而这些值正是
+    /// 界面挡得住、接口挡不住那批（校验是后来才加的，历史数据没跟着洗）。
+    #[test]
+    fn a_bad_stored_value_does_not_lock_the_row() {
+        let conn = crate::db::fresh_in_memory().unwrap();
+        let coll: i64 = conn
+            .query_row("SELECT id FROM collections WHERE key='subs'", [], |r| r.get(0))
+            .unwrap();
+        // 绕开写入口塞一个坏币种与坏日期（接口与导入脚本历史上都造得出来）
+        conn.execute(
+            "INSERT INTO items(collection_id,name,status,currency,next_renewal)
+             VALUES(?1,'旧条目','Active','人民币','2026/08/05')",
+            [coll],
+        )
+        .unwrap();
+        let id = conn.last_insert_rowid();
+
+        update_item(&conn, id, &json!({ "notes": "改个备注" })).unwrap();
+        let (notes, currency, due): (String, String, String) = conn
+            .query_row(
+                "SELECT notes, currency, next_renewal FROM items WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(notes, "改个备注");
+        // 没碰的键原样留着：治它要另开一条路，而不是让人打不开自己的条目
+        assert_eq!(currency, "人民币");
+        assert_eq!(due, "2026/08/05");
+        // 真去改那两个字段时，校验照样拦得住
+        assert!(update_item(&conn, id, &json!({ "currency": "人民币" })).is_err());
+        assert!(update_item(&conn, id, &json!({ "next_renewal": "2026/08/05" })).is_err());
+        // 改成合形的值就该放行，顺带把旧值治好
+        update_item(&conn, id, &json!({ "currency": "cny", "next_renewal": "2026-8-5" })).unwrap();
+        let (currency, due): (String, String) = conn
+            .query_row("SELECT currency, next_renewal FROM items WHERE id=?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((currency.as_str(), due.as_str()), ("CNY", "2026-08-05"));
+    }
+
     /// 局部更新的合并规则：缺席即保持、出现即写入、`""` 与 `null` 都是清空、
-    /// `extra` 作为一个整体值。这条规则是整个写入协议的地基——它一松，前端就得重新
-    /// 长出那套"先铺整行再覆盖"的补偿代码，而漏铺一处就是一次静默的数据丢失。
+    /// `extra` 作为一个整体值。这条是写入协议的地基，它一松，前端就得重新长出
+    /// "先铺整行再覆盖"的补偿代码。
     #[test]
     fn a_patch_only_touches_the_keys_it_carries() {
         let cur = json!({
@@ -1919,10 +1904,8 @@ mod tests {
     #[test]
     fn builtin_collections_match_their_templates() {
         let conn = crate::db::fresh_in_memory().unwrap();
-        // 模板多出来的字段：只有 SIM。预置库 sims 压根没注册费用/周期/链接三列，
-        // 而通用字段集恒含它们——模板把它们注册上、但不上表（base 里 shown=0）。
-        // 「sims 没注册 cycle」正是"SIM 每次界面编辑都清掉周期"那个缺陷的成因，
-        // 所以这里的差异是有意为之的修正，不是漂移。
+        // 模板多出来的字段只有 SIM 的三列：预置库没注册费用/周期/链接，模板注册上
+        // 但不上表——这是有意为之的修正（没注册 cycle 曾让编辑清掉周期），不是漂移。
         let allowed_extra: &[(&str, &[&str])] = &[
             ("subs", &[]),
             ("sims", &["cycle", "price", "url"]),
@@ -1952,10 +1935,8 @@ mod tests {
         }
     }
 
-    /// 库属性也是模板的一部分：到期锚点、续费起算方式、日历标题的副标题、名称格小字、
-    /// 续费动作说法、进日历描述的备注键——写错任何一个，到期时间线与 ICS 就跟预置库
-    /// 长得不一样。`renew_from` 尤其要钉住：迁移 0017 把 vps 置成 schedule、sims 置成
-    /// today，模板这侧漏改一个，删掉预置库再照模板建回来行为就变了。
+    /// 库属性也是模板的一部分，写错任何一个，删掉预置库再照模板建回来行为就变了。
+    /// `renew_from` 尤其要钉住（迁移 0017 把 vps 置 schedule、sims 置 today）。
     #[test]
     fn builtin_collection_attributes_match_their_templates() {
         let conn = crate::db::fresh_in_memory().unwrap();
@@ -2061,10 +2042,8 @@ mod tests {
         assert_eq!(url_host("no-dot"), None);
     }
 
-    /// 服务端替用户发请求前必须挡住内网：这台机器往往和别的服务同处一个局域网，
-    /// 不挡的话「从网站取图标」就成了一个替人探测内网的按钮。
-    /// 解析结果这一关：**光看字面拦不住"公共域名指向 127.0.0.1"**（`localtest.me`
-    /// 就是现成例子，不需要 DNS 重绑定）。真正发请求前要把解析出来的地址也验一遍。
+    /// 解析结果这一关：**光看字面拦不住"公共域名指向 127.0.0.1"**（localtest.me
+    /// 就是现成例子，不需要 DNS 重绑定），发请求前要把解析出来的地址也验一遍。
     #[test]
     fn resolved_addresses_are_checked_too() {
         use std::net::IpAddr;
@@ -2118,7 +2097,6 @@ mod tests {
     }
 
     /// 页面里随便一个多字节字符都会让按字节切片的解析当场 panic，把请求线程带走。
-    /// 实测 Netflix 的首页里就有个 `𝔽`（四字节），当时整个连接直接断掉。
     #[test]
     fn icon_discovery_survives_multibyte_pages() {
         let html = "𝔽 数学粗体夹在最前面 <link rel=\"icon\" href=\"/a.png\">";

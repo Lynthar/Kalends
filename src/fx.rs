@@ -1,13 +1,6 @@
-//! 币种折算。**原币入账这条不变**：`items.price` + `items.currency` 存的永远是原币，
-//! 折算只发生在呈现层（表格费用列、首页支出、续费台账）。通知文案与 ICS 一律不折算——
-//! 那是发到外部系统的内容，数字要对得上真实账单。
-//!
-//! 两个汇率来源，联网那个默认关着（项目红线是默认零外联）：
-//! - **内置平均汇率**（`BASELINE`）：离线也能折算，随发版更新，由
-//!   `scripts/update-fx-baseline.py` 从欧洲央行的日汇率算一个月均值再重写这个文件；
-//! - **联网拉取**：设置页手动点一次，存进 settings。覆盖不到的币种回落内置表。
-//!
-//! 报价一律是「1 USD = N 单位」，USD 恒为 1。跨币种折算走 USD 中转。
+//! 币种折算。**原币入账不变**（price/currency 永远存原币），折算只发生在呈现层、
+//! 实现只有前端那一份；通知文案与 ICS 一律不折算。两个来源：内置平均汇率打底
+//! （离线可用，脚本重写别手改），设置页手动拉的实时值盖上面。报价恒为「1 USD = N」。
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -54,11 +47,8 @@ pub const BASELINE: &[(&str, f64)] = &[
     ("ZAR", 16.4938),
 ];
 
-/// 生效中的汇率表：内置表打底，拉到的实时汇率盖在上面。
-/// 分开记 `live` 是为了让界面能说清楚哪些币种用的是实时值、哪些回落了内置值。
-///
-/// 折算本身不在这里做——它只发生在呈现层（表格费用列 / 首页支出 / 台账），
-/// 整张表下发给前端由那边算，免得同一套换算在前后端各写一遍。
+/// 生效中的汇率表：内置表打底，实时值盖上面；`live` 单独记，界面要能说清哪些币种
+/// 是实时值。折算不在这里做——整张表下发给前端，免得换算前后端各写一遍。
 pub struct Rates {
     pub map: BTreeMap<String, f64>,
     pub live: Vec<String>,
@@ -109,16 +99,15 @@ pub fn state(conn: &Connection) -> Value {
 pub const SOURCE_LABEL: &str = "欧洲央行参考汇率（Frankfurter）";
 const SOURCE_URL: &str = "https://api.frankfurter.dev/v1/latest?base=USD";
 
-/// 手动拉一次实时汇率。默认关着的那条出网就是这里——用户在设置页点一下才发生，
-/// 不后台轮询。走 notify::http_client 是为了带上连接/总超时与 meta.proxy。
+/// 手动拉一次实时汇率：默认关着的出网，用户在设置页点一下才发生、不后台轮询。
+/// 走 notify::http_client 带上超时与 meta.proxy。
 pub async fn refresh(conn: &crate::Db) -> Result<Value> {
     let proxy = {
         let c = conn.lock().unwrap();
         db::get_setting(&c, "meta.proxy").unwrap_or_default()
     };
     let client = crate::notify::http_client(&proxy)?;
-    // 显式报上名号：reqwest 默认不带 UA，眼下这个接口放行，但被 UA 规则拦掉的话
-    // 表现是 403 而不是网络错误，排查起来完全看不出所以然
+    // 显式带 UA：被 UA 规则拦掉时表现是 403 而不是网络错误，不带名号看不出所以然
     let resp = client
         .get(SOURCE_URL)
         .header(reqwest::header::USER_AGENT, "kalends")

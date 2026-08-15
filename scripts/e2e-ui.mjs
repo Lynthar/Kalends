@@ -1,13 +1,6 @@
-// Kalends 前端端到端验证：headless chromium + CDP，零第三方依赖。
-//
-// 用法：
-//   1. 起一次性实例：KALENDS_DATA=$(mktemp -d) KALENDS_ADDR=127.0.0.1:4181 ./kalends（或 cargo run）
-//   2. node scripts/e2e-ui.mjs
-// 空库会自动播种假数据；断言里的天数按播种日推算，所以数据目录务必用一次性的，
-// 复用旧库会因日期漂移出现失败。截图与浏览器 profile 落在系统临时目录（见输出）。
-//
-// 浏览器：默认在 Playwright 缓存里找 chromium headless shell
-//（npx playwright install chromium --with-shell 可得），或 KALENDS_E2E_CHROME 指定二进制。
+// Kalends 前端端到端验证（headless chromium + CDP，零第三方依赖）。用法：先起一次性
+// 实例 `KALENDS_DATA=$(mktemp -d) KALENDS_ADDR=127.0.0.1:4181 cargo run`，再跑本脚本。
+// 数据目录务必一次性（断言天数按播种日推算）；浏览器用 Playwright 缓存的 chromium 或 KALENDS_E2E_CHROME。
 import { spawn } from 'node:child_process';
 import { writeFileSync, mkdirSync, rmSync, globSync } from 'node:fs';
 import os from 'node:os';
@@ -637,11 +630,8 @@ for (const [key, mark] of [['subs', 'notes'], ['sims', 'notes'], ['vps', 'notes'
   check(`${key} 还原`, (await patch(`/api/items/${before.id}`, before)).ok); // 不给后续断言留脏数据
 }
 
-/* 12e-2. 详情表单「打开 → 什么都不改 → 保存」必须是幂等的。
-   按字段逐条追加断言（多选、星级…）兜不住这一族，所以这里整行深比对：
-   周期曾经在这条路上被写坏——表单初值取的是格子里的显示文案（Monthly），
-   保存就把它写回了 items.cycle，存储键丢失，于是周期格变空、支出漏这一条、
-   按「上次续费+周期」推日期的库整条掉出到期时间线与 ICS。 */
+/* 12e-2. 详情表单「打开 → 什么都不改 → 保存」必须幂等，整行深比对（逐字段追加断言
+   兜不住这一族）。周期在这条路上被写坏过：表单初值拿了显示文案，存储键就丢了。 */
 const stripVolatile = o => {
   const { updated_at, ...rest } = o || {};
   return JSON.stringify(rest);
@@ -1146,10 +1136,8 @@ check('状态格仍不给现场新建（只挑不建）', await evl(
   `!document.querySelector('.cellpop .opt-add')`) === true);
 await evl(`closePop()`);
 
-/* 12i-2. 哪些列删得掉：判据是 src='extra'（值挂在行里），不是 builtin。
-   预置库播下来的域字段（订阅的分类、VPS 的地点/规格参数）与手加的自定义列同权，都能改名删除；
-   引擎真列与算出来的列一项都不给。**shown=0 的列压根没有表头**，表头菜单够不着它们，
-   所以库设置的字段面板里那颗 ✕ 是它们唯一的出口——曾经两处都没有，用户一列也删不掉。 */
+/* 12i-2. 哪些列删得掉：判据是 src='extra' 不是 builtin——域字段与自定义列同权，
+   引擎真列与算出来的列一项都不给。shown=0 的列没有表头，字段面板那颗 ✕ 是唯一出口。 */
 const delFs = await (await fetch(`${APP}api/fields`)).json();
 const thMenuOf = async (tab, k) => {
   await evl(`closePop()`);
@@ -1644,10 +1632,8 @@ check('名称格里的 ⤢ 详情入口还看得见', await evl(`(() => {
   return !!td && td.style.display !== 'none' && !!td.querySelector('.rowopen');
 })()`) === true, nameCellDiag);
 
-/* 17.10. 详情表单的开放词表（分类/支付方式/注册商…）建库时是空的，而表单的 sel 是个纯
-   下拉：空库首装点「＋新建」，这几栏一个候选都没有、也没处输入，只能先存个残缺条目再
-   回表格用就地编辑器把值造出来。周期是固定档位词表，不给现场新增——放开了会有人把
-   Monthly 这样的文案写回 items.cycle，按周期推日期的库整条掉出到期时间线。 */
+/* 17.10. 详情表单的开放词表建库时是空的，sel 要配「新选项，回车加入」——否则空库首装
+   这几栏填不出东西。周期是固定档位词表不给现场新增（放开会把文案写回 items.cycle）。 */
 await evl(`openItemDialog('subs', null)`);
 await sleep(450);
 check('开放词表的下拉旁有「新选项」输入', await evl(
@@ -2264,7 +2250,6 @@ for (const host of ['http://127.0.0.1/', 'http://10.0.0.5/', 'http://192.168.1.1
   const r = await raw(`/api/items/${shapeRow.id}/logo/fetch`, 'POST', { url: host });
   check(`拦下内网地址 ${host}`, r.status === 400 && (await r.json()).error?.includes('公网'));
 }
-// localhost 更早一步就被 url 形状检查拦了（域名里没有点），同样进不去出网那一段
 // localhost 与 IPv6 字面量更早一步就被 url 形状检查拦了（域名里没有点），
 // 同样进不去出网那一段——两道防线叠着，哪道先挡下都行
 for (const h of ['http://localhost/', 'http://[::1]/']) {
@@ -2298,10 +2283,8 @@ for (const f of [shapeFs.find(x => x.name === '官网'), shapeFs.find(x => x.nam
 await evl(`loadAll()`);
 await sleep(800);
 
-/* 17.27. 「续费起算」独立成一个轴。此前 due_anchor='last' 一个标记同时扛着两种语义：
-   SIM 保号的窗口**本来就该**从实际充值那天重新计时，而 VPS 是服务商按固定日历日出账。
-   共用一条实现的结果是 VPS 那侧错着——点一次「已续费」就把锚点拽到今天，晚付十天
-   账期便永久后移十天，逐期累积。 */
+/* 17.27. 「续费起算」是独立的轴：保号窗口从实际充值当天重算（today），
+   VPS 按固定日历日出账（schedule）——两种语义不能挤在一个标记里。 */
 const rfColls = await (await fetch(APP + 'api/collections')).json();
 const rfMap = Object.fromEntries(rfColls.map(c => [c.key, c.renew_from]));
 check('预置库的续费起算：订阅/VPS 按日程、SIM 从当天',
@@ -2351,9 +2334,8 @@ await evl(`(() => { const t = document.querySelector('#toast'); clearTimeout(t._
 await evl(`loadAll()`);
 await sleep(700);
 
-/* 17.28. 「类型 × 场所」的叉积。本轮评审里 18 条发现有 6 条落在这上头，共同的形状是
-   一个新字段类型只接了一半管线：渲染接了、筛选没接；库那侧接了、媒体那侧没接。
-   按功能加断言的习惯抓不到这类缺口，得按「类型 × 场所」补。 */
+/* 17.28. 「类型 × 场所」的叉积：新字段类型最常见的失守是只接一半管线——渲染接了
+   筛选没接、库那侧接了媒体没接。按功能加断言抓不到这类缺口，得按叉积补。 */
 await evl(`document.querySelector('.nav-tab[data-page="renewals"]').click()`);
 await evl(`switchTab('subs')`);
 await sleep(400);
@@ -2489,10 +2471,8 @@ await fetch(`${APP}api/collections/${acColl.id}`, { method: 'DELETE' });
 await evl(`loadAll()`);
 await sleep(700);
 
-/* 17.30. 条目更新是局部更新（PATCH）：请求里出现的键写入（"" 与 null 即清空），
-   缺席的键保持原值；extra 作为一个整体值走同一条规则。
-   从前是全量替换（PUT），body 漏一列就清一列，于是每条写入路径都得先铺整行再覆盖——
-   SIM 的周期、媒体的自定义列、条目图标、父条目都这样被一次保存清掉过。 */
+/* 17.30. 条目更新是局部更新（PATCH）：出现的键写入（"" 与 null 即清空）、缺席的键
+   保持原值、extra 整体替换。全量替换时代"漏一键=清一列"的事故一族由此封口。 */
 const pa_item = await mk('subs', {
   name: 'PATCH 语义', status: 'Active', price: 12.5, currency: 'USD', cycle: 'monthly',
   next_renewal: day(20), url: 'https://example.com', notes: '备注原样',
@@ -2660,8 +2640,7 @@ await sleep(300);
 
 /* 17.31a. schema 与 view 是两层：字段序与「上表」跟着账本走（服务端 fields），
    列宽/列序/隐藏/排序/筛选各设备各记（本机 views）。两层唯一会打架的是列序——
-   本机那份覆写会盖住刚在库设置里排好的字段序，**由 settleView 自动结算**，
-   而不是靠调用方"记得"清一次（从前那句手动清就住在字段面板的保存回调里）。 */
+   本机覆写会盖住刚排好的字段序，**由 settleView 自动结算**，不靠调用方"记得"清。 */
 await evl(`switchTab('subs')`);
 await sleep(300);
 const svKeys = await evl(`TKEYS.subs.slice(0, 3).join(',')`);
@@ -2713,12 +2692,16 @@ check('筛选分派与内核一致（勾选清单 vs 三组操作符，没有落
     ? LIST_TYPES.includes(t)
     : ['text', 'num', 'date'].includes(opKind(t)));
 })()`) === true);
-check('「新建列」下拉列的正是内核里那几种', await evl(`(() => {
+check('「新建列」下拉列的正是内核里**建得出来**的那几种', await evl(`(() => {
   openNewColPop('subs', document.querySelector('#view-subs th.ops'));
   const opts = [...document.querySelectorAll('.optpop [data-type] option')].map(o => o.value).join(',');
   closePop();
-  return opts === Object.keys(TYPES).join(',');
+  return opts === CREATABLE_TYPES.join(',');
 })()`) === true);
+// 状态是内核里的真类型，但不给建：它的词表带着支出/提醒/时间线三层语义，后端 FTYPES 也不收。
+// 下拉一旦直接铺开整张内核表，这一项就是「选了必 400」的死选项（第 17.34 段验后端那一半）
+check('状态在内核里、但不在「新建列」下拉里', await evl(
+  `!!TYPES.status && !CREATABLE_TYPES.includes('status')`) === true);
 
 /* 17.32. 无障碍收尾与对比度：这批的价值不在"合规"，在于当前态与控件名字此前**只存在于视觉里**。
    刻意**不认领 role=tab**——那等于向读屏承诺方向键能在标签间移动，而我们没有那套键盘模型。 */
@@ -2826,6 +2809,164 @@ check('齿轮仍能开库设置', await evl(`(() => {
   document.querySelector('#dlg-coll')?.close();
   return open;
 })()`) === true);
+
+/* 17.34. 审计修掉的十二处，能在界面上发作的各补一条断言（另有四条落在单测里：
+   数字键读不出来要报错而不是写成 NULL、缺省值只补在合并之后、存量坏值不锁行、
+   买断不算漏算的判据）。 */
+
+// ① 下拉里的每一种都得真建得出来：后端 FTYPES 少收一种，那一项就是选了必 400 的死选项
+const offeredTypes = JSON.parse(await evl(`JSON.stringify(CREATABLE_TYPES)`) || '[]');
+const reallyCreatable = [];
+for (const t of offeredTypes) {
+  const r = await raw('/api/fields', 'POST', { tbl: 'subs', name: '_t_' + t, ftype: t });
+  if (!r.ok) continue;
+  reallyCreatable.push(t);
+  await raw(`/api/fields/${(await r.json()).id}`, 'DELETE');
+}
+check('「新建列」下拉里的每一种类型，后端都真的建得出来',
+  reallyCreatable.join(',') === offeredTypes.join(','), `${reallyCreatable} vs ${offeredTypes}`);
+check('状态类型后端不收（所以它也不该出现在下拉里）',
+  (await raw('/api/fields', 'POST', { tbl: 'subs', name: '_t_status', ftype: 'status' })).status === 400);
+
+// ② 文本真列切成「多选」呈现后勾一下：存回去必须是字符串。写数组的话后端读不出来当成空——
+//    那一格的原值被静默清成 NULL，而界面只说「已保存」
+await evl(`(() => { views.subs.hiddenCols = []; views.subs.order = null;
+  views.subs.types.notes = 'multi'; saveViews(); })()`);
+const subsForNotes = await (await fetch(APP + 'api/collections/subs/items')).json();
+const noteIt = subsForNotes.find(x => x.name === 'Netflix') || subsForNotes[0];
+await patch(`/api/items/${noteIt.id}`, { notes: '甲, 乙' });
+await evl(`switchTab('subs')`);
+check('切了呈现类型之后 loadAll 不崩', await evl(
+  `loadAll().then(() => 'ok', e => 'ERR: ' + (e && e.message))`) === 'ok');
+await sleep(900);
+const openNotes = await evl(`(() => {
+  const tr = document.querySelector('#subs-body tr[data-id="${noteIt.id}"]');
+  if (!tr) return 'no-row';
+  const td = [...tr.children].find(x => x.dataset.k === 'notes');
+  if (!td) return 'no-td';
+  openCellPop('subs', state.subs.find(x => x.id === ${noteIt.id}), 'notes', td);
+  return 'ok';
+})()`);
+const notesChecked = await evl(
+  `JSON.stringify([...document.querySelectorAll('.cellpop input[type=checkbox]:checked')].map(i => i.value))`) || '';
+check('备注格开出多选编辑器，「甲, 乙」拆成两个勾着的选项',
+  openNotes === 'ok' && notesChecked.includes('甲') && notesChecked.includes('乙'), `${openNotes} ${notesChecked}`);
+await evl(`[...document.querySelectorAll('.cellpop input[type=checkbox]')].find(i => i.value === '乙')?.click()`);
+await sleep(1200);
+const noteAfter = (await (await fetch(APP + 'api/collections/subs/items')).json()).find(x => x.id === noteIt.id);
+check('文本真列存回去的是字符串，原值没被清成 NULL',
+  noteAfter?.notes === '甲', JSON.stringify(noteAfter?.notes));
+await evl(`(() => { delete views.subs.types.notes; saveViews(); })()`);
+
+// ③ 评分填 8.5：as_i64 读不出来，范围校验整个跳过、再被写成 NULL——键明明在请求里
+const mediaAll = await (await fetch(APP + 'api/media')).json();
+const rated = mediaAll.find(m => m.rating != null) || mediaAll[0];
+check('评分只收整数：8.5 要被拦下，不能悄悄写成 NULL',
+  (await raw(`/api/media/${rated.id}`, 'PATCH', { rating: 8.5 })).status === 400);
+check('拒了之后分数原样还在',
+  ((await (await fetch(APP + 'api/media')).json()).find(m => m.id === rated.id) || {}).rating === rated.rating);
+check('清空仍按协议放行（null 是清空，不是坏值）',
+  (await raw(`/api/media/${rated.id}`, 'PATCH', { rating: null })).ok);
+await patch(`/api/media/${rated.id}`, { rating: rated.rating });
+
+// ④ 买断没有「每月多少」可言：缺币种也不该被点名——补了也照样不计入
+const lifeIt = await mk('subs', { name: '买断软件', status: 'Active', price: 49, cycle: 'lifetime' });
+const gapIt = await mk('subs', { name: '缺币种月付', status: 'Active', price: 9, cycle: 'monthly' });
+const ovGap = await (await fetch(APP + 'api/overview')).json();
+check('买断条目缺币种不进「没算进来」清单',
+  !(ovGap.uncounted || []).some(x => x.id === lifeIt.id), JSON.stringify(ovGap.uncounted));
+check('同样缺币种的月付条目照旧点名（对照）',
+  (ovGap.uncounted || []).some(x => x.id === gapIt.id && x.missing === '币种'), JSON.stringify(ovGap.uncounted));
+await raw(`/api/items/${lifeIt.id}`, 'DELETE');
+await raw(`/api/items/${gapIt.id}`, 'DELETE');
+
+// ⑤ 清空阈值栏＝只发每日摘要（后端认 []），不能悄悄变成「只在到期当天提醒」：
+//    Number('') 是 0，滤不掉就落成 [0]，而界面上看不出任何异常
+await evl(`openSettings()`);
+await sleep(500);
+check('阈值栏：清空给 []，末尾多个逗号也不会多出一个 0 档', await evl(`(() => {
+  const f = document.querySelector('#form-settings').elements;
+  const was = f.thresholds.value;
+  f.thresholds.value = '';
+  const empty = settingsBody()['notify.thresholds'];
+  f.thresholds.value = '14,7,';
+  const trailing = settingsBody()['notify.thresholds'];
+  f.thresholds.value = was;
+  return empty + ' | ' + trailing;
+})()`) === '[] | [14,7]');
+await evl(`document.querySelector('#dlg-settings').close()`);
+await sleep(200);
+
+// ⑥ 多选浮层里「先取消勾选、再回车加新值」：拿开浮层那会儿的快照会把刚取消的又带回来
+await evl(`switchTab('vps')`);
+await sleep(300);
+const vpsRows = await (await fetch(APP + 'api/collections/vps/items')).json();
+const hostA = vpsRows.find(x => x.name === 'HostA') || vpsRows[0];
+await patch(`/api/items/${hostA.id}`, { extra: { ...(hostA.extra || {}), locations: ['东京', '大阪'] } });
+await evl(`loadAll()`);
+await sleep(1000);
+await evl(`(() => {
+  const tr = document.querySelector('#vps-body tr[data-id="${hostA.id}"]');
+  const td = tr && [...tr.children].find(x => x.dataset.k === 'locations');
+  if (td) openCellPop('vps', state.vps.find(x => x.id === ${hostA.id}), 'locations', td);
+})()`);
+await sleep(350);
+await evl(`[...document.querySelectorAll('.cellpop input[type=checkbox]')].find(i => i.value === '大阪')?.click()`);
+await sleep(1100);
+await evl(`(() => {
+  const inp = document.querySelector('.cellpop .opt-add input');
+  if (!inp) return;
+  inp.value = '京都';
+  inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+})()`);
+await sleep(1600);
+const hostAfter = (await (await fetch(APP + 'api/collections/vps/items')).json()).find(x => x.id === hostA.id);
+check('回车加新值用的是此刻的勾选态，不是开浮层时的快照',
+  JSON.stringify(hostAfter?.extra?.locations) === '["东京","京都"]', JSON.stringify(hostAfter?.extra?.locations));
+
+// ⑦ 媒体的详情入口在标题格里：那一列同样不给隐藏（此前只守了库的名称列）
+await evl(`(() => { views.media.view = 'table'; renderMedia(); })()`);
+await sleep(400);
+await evl(`document.querySelector('#m-tablewrap thead th[data-k="title"]')?.click()`);
+await sleep(300);
+check('媒体标题列的表头菜单里没有「隐藏此列」', await evl(
+  `[...document.querySelectorAll('.thmenu .mi')].every(x => !x.textContent.includes('隐藏此列'))`) === true);
+await evl(`closePop()`);
+await evl(`(() => { views.media.hiddenCols = ['title']; saveViews(); })()`);
+await evl(`rebuildHead('media')`);
+await sleep(800);
+check('本机存着的隐藏标题列偏好被捞回来', await evl(
+  `!views.media.hiddenCols.includes('title')
+   && document.querySelector('#m-tablewrap thead th[data-k="title"]').style.display !== 'none'`) === true);
+
+// ⑧ 媒体自定义列的 td 造型也查类型表（与库那侧同一份判据）：数字列右对齐、
+//    文本列可截断且悬停看全，否则同名同类型的列在两张表上长得不一样
+const mtxt = await post('/api/fields', { tbl: 'media', name: '片源说明', ftype: 'text' });
+const mnum = await post('/api/fields', { tbl: 'media', name: '集数', ftype: 'num' });
+const mrowT = (await (await fetch(APP + 'api/media')).json())[0];
+await patch(`/api/media/${mrowT.id}`, {
+  extra: { ...(mrowT.extra || {}), [mtxt.key]: '一段很长的片源说明', [mnum.key]: 12 },
+});
+await evl(`loadAll()`);
+await sleep(1000);
+await evl(`(() => { views.media.view = 'table'; renderMedia(); })()`);
+await sleep(400);
+const mtd = JSON.parse(await evl(`(() => {
+  const tr = document.querySelector('#m-body tr[data-id="${mrowT.id}"]');
+  const g = k => {
+    const td = tr && [...tr.children].find(x => x.dataset.k === k);
+    return td ? { cls: td.className, title: td.getAttribute('title') } : null;
+  };
+  return JSON.stringify({ txt: g('${mtxt.key}'), num: g('${mnum.key}') });
+})()`) || '{}');
+check('媒体自定义数字列右对齐', (mtd.num?.cls || '').includes('amt'), JSON.stringify(mtd));
+check('媒体自定义文本列可截断且悬停看全',
+  (mtd.txt?.cls || '').includes('clip') && mtd.txt?.title === '一段很长的片源说明', JSON.stringify(mtd));
+await fetch(`${APP}api/fields/${mtxt.id}`, { method: 'DELETE' });
+await fetch(`${APP}api/fields/${mnum.id}`, { method: 'DELETE' });
+await evl(`(() => { views.media.view = 'wall'; saveViews(); })()`);
+await evl(`loadAll()`);
+await sleep(900);
 
 /* 18. 库删光也不能把界面打崩。放在最后跑——这一段会把预置库连数据一起删掉。
    预置库过去在界面上删不掉（后端一直放行、文档也写着可删），而新库的表格容器

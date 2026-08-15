@@ -164,12 +164,8 @@ impl Tmdb {
     /// 海报按 w500 取，最大的也就几百 KB；留 8 MB 是给将来换更大尺寸的余量。
     const IMAGE_MAX: usize = 8 << 20;
 
-    /// 图片一律经服务端取：浏览器直连 image.tmdb.org 会绕开 `meta.proxy`（被墙环境
-    /// 配了代理也全是空图），也是「出网收敛到服务端」这条唯一的破口。
-    ///
-    /// 响应体要封顶。TMDB 本身可信，但请求可能经用户配的代理出去，而 reqwest 没有
-    /// 默认上限——唯一的边界是那 30s 总超时，也就是「带宽 × 30s」全进内存（取图标那条
-    /// 路已经这么封了，这里是同一个缺口的另一半）。
+    /// 图片一律经服务端取：浏览器直连会绕开 `meta.proxy`（被墙环境配了代理也全是空图）。
+    /// 响应体要封顶——TMDB 可信，但请求可能经用户配的代理出去，而 reqwest 没有默认上限。
     pub async fn image(&self, size: &str, path: &str) -> Result<Vec<u8>> {
         let resp = self
             .client

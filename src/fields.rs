@@ -12,8 +12,7 @@ use serde_json::{json, Value};
 use crate::api::{bad, missing, s, R};
 use crate::App;
 
-/// 可建的列类型。**`star` 已于 2026-08-15 撤掉**：它只是"数字加个星形壳"，而媒体评分
-/// 改成 10 分制之后星形反倒把精度抹掉了；要打分用 `num`，要档位用 `sel`。
+/// 可建的列类型。`star` 已撤掉：它只是"数字加个星形壳"——要打分用 `num`，要档位用 `sel`。
 const FTYPES: &[&str] = &["text", "num", "sel", "multi", "date", "tel", "url", "email"];
 
 /// 字段所属的数据源：库（值在 items.extra，按 collection_id 圈定）或独立表（媒体库）。
@@ -200,8 +199,7 @@ async fn set_order(State(app): State<App>, Json(b): Json<Value>) -> R {
     }
     let conn = app.db.lock().unwrap();
     owner(&conn, &tbl)?;
-    // 整份序是一件事，半途断掉留下的是交错的 pos（同形的 collections::set_order
-    // 与 items_order 都包了事务，唯独这里曾经裸奔）
+    // 整份序是一件事，半途断掉留下的是交错的 pos
     let tx = conn.unchecked_transaction()?;
     for (n, k) in keys.iter().enumerate() {
         tx.execute(
@@ -300,9 +298,8 @@ async fn delete_field(State(app): State<App>, Path(id): Path<i64>) -> R {
     Ok(Json(json!({ "ok": true })))
 }
 
-// 一个可管理选项的字段：任何 builtin=0 的 sel/multi 列——域字段与用户手加的自定义列同权
-// （迁移 0014 把预置三库的域字段一并收归 builtin=0，此前它们要靠一张硬编码白名单点名）。
-// 值一律在 extra 里，所以定位结果只需要"改哪张表的哪些行、哪个键"。
+// 一个可管理选项的字段：任何 builtin=0 的 sel/multi 列——域字段与自定义列同权。
+// 值一律在 extra 里，定位结果只需要"改哪张表的哪些行、哪个键"。
 struct Target {
     table: &'static str,
     cond: String,

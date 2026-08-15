@@ -1,15 +1,8 @@
-/* Kalends 前端 · settings-media.js
-   设置页（通知、汇率、ICS、台账、备份、PIN）与媒体库（海报墙、媒体表格、TMDB 搜索与抓取、媒体详情表单）。
-
-   **这些文件是普通 <script>，共享同一个全局作用域，按 index.html 里的顺序执行。**
-   不是 ES module，也不打算是：e2e 有十几处靠 `evl('loadAll()')` 这样直接调全局函数，
-   换成模块作用域会让整套断言一起报废；而"零构建步骤"这条也不允许引打包器。
-   拆分本身是纯搬运——**加东西时放进对应的那份，别又长回一个大文件**。
-*/
+/* Kalends 前端 · settings-media.js —— 设置页（通知、汇率、ICS、台账、备份、PIN）与
+   媒体库（海报墙、媒体表格、TMDB 搜索与抓取、媒体详情表单）。加载方式见 core.js 头注。 */
 
 /* ── 设置页 ── */
-/* 设置页的币种折算那一栏。候选＝汇率表里有的 ∪ 数据里用过的（后者可能没有报价，
-   仍然让它出现在下拉里，选中后界面会如实说"这个币种没有汇率"而不是悄悄漏掉）。 */
+// 币种折算栏的候选＝汇率表里有的 ∪ 数据里用过的（后者可能没报价，仍列出并如实标注）
 function syncFxPanel() {
   const fx = state.fx || { rates: {}, live: [] };
   const used = new Set();
@@ -74,8 +67,7 @@ function openSettings() {
   if (MODULES.includes('renewals')) loadLedger(); // 不挡对话框，读回来再填
 }
 
-/* 续费台账：每次「已续费 / 已保号」记的那一笔，此前只进库不露面。
-   条目或库删掉之后旧账仍在（那是历史），名字取不到就回落到编号。 */
+// 续费台账的只读列表：条目或库删掉之后旧账仍在（那是历史），名字取不到就回落到编号
 async function loadLedger() {
   const box = $('#ledger-list');
   box.textContent = '读取中…';
@@ -105,13 +97,16 @@ async function loadLedger() {
 
 function settingsBody() {
   const f = $('#form-settings').elements;
-  const thresholds = f.thresholds.value.split(/[,，\s]+/).map(Number)
+  // 空串必须先滤掉：`Number('')` 是 0，混进来就成了「只在到期当天提醒」，而界面上看不出来
+  //（清空这一栏、或末尾多打一个逗号都会撞上）。留空是合法配置——后端认 `[]` ＝只发每日摘要，
+  // 拿默认值把它顶回去，这条配置在界面上就永远表达不出来
+  const thresholds = [...new Set(f.thresholds.value.split(/[,，\s]+/).filter(Boolean).map(Number))]
     .filter(n => Number.isInteger(n) && n >= 0).sort((a, b) => b - a);
   return {
     'auth.pin': f.pin.value.replace(/[^A-Za-z0-9]/g, ''),
     'meta.tmdb_key': f.tmdb_key.value.trim(),
     'meta.proxy': f.meta_proxy.value.trim(),
-    'notify.thresholds': JSON.stringify(thresholds.length ? thresholds : [14, 7, 3, 1, 0]),
+    'notify.thresholds': JSON.stringify(thresholds),
     'notify.digest_time': f.digest_time.value || '09:00',
     'notify.window_days': String(+f.window_days.value || 14),
     'fx.display': f.fx_display.value,
@@ -249,9 +244,8 @@ function renderMedia() {
     rows.forEach((it, idx) => {
       const card = document.createElement('div');
       card.className = 'card';
-      // 海报墙是媒体库的默认视图，而卡片只挂 onclick 就等于键盘用户在这一屏无路可走
-      //（表格视图那侧早有 ⤢ 与表头菜单的键盘入口，这里一直缺）。与 th 同一套做法：
-      // 自己补 tabIndex + role，Enter/空格都开详情，空格要 preventDefault 否则滚页。
+      // 海报墙是默认视图，卡片只挂 onclick 就等于键盘用户在这一屏无路可走：
+      // 补 tabIndex + role，Enter/空格都开详情（空格要 preventDefault 否则滚页）
       card.tabIndex = 0;
       card.setAttribute('role', 'button');
       card.setAttribute('aria-label', `${it.title || '未命名'} 详情`);
@@ -297,8 +291,8 @@ function renderMedia() {
 
 let editingMedia = null;
 
-/* 我的评分：10 分制的数字 + 一颗蜂蜜金星。光一列数字看不出这是评分（旁边就是豆瓣评分，
-   两列纯数字会糊成一片），而星串又恰恰把 10 分制的精度抹掉——数字给精度，星给辨识。 */
+/* 我的评分：10 分制数字 + 一颗蜂蜜金星。光一列数字看不出是评分（旁边就是豆瓣评分），
+   星串又把 10 分制精度抹掉——数字给精度，星给辨识。 */
 const ratingView = n => (n ? `${n} <span class="rstar">★</span>` : '');
 
 function openMediaDialog(it) {
@@ -313,14 +307,13 @@ function openMediaDialog(it) {
     for (const k of M_STR) f[k].value = it[k] ?? '';
     for (const k of [...M_INT, ...M_REAL]) f[k].value = it[k] ?? ''; // 评分也在 M_INT 里
   }
-  // 自定义列此前只有表格里点格能改，海报墙用户等于没有入口
+  // 自定义列在表单里也要有入口（海报墙用户没有点格即编那条路）
   const ex = $('#m-extra-fields');
   const exFields = customFields('media');
   ex.innerHTML = '';
   for (const cf of exFields) ex.appendChild(fieldControl('media', cf, it));
   $('#m-extra-fold').hidden = !exFields.length;
-  // 已经有值就摊开（与「游戏字段」按类别自动展开同理）：藏在一次点击后面，
-  // 等于海报墙用户仍然看不见自己填过什么
+  // 已经有值就摊开：藏在一次点击后面，等于海报墙用户仍看不见自己填过什么
   $('#m-extra-fold').open = exFields.some(cf => {
     const v = (it?.extra || {})[cf.key];
     return v != null && v !== '' && !(Array.isArray(v) && !v.length);
@@ -379,9 +372,8 @@ $('#form-media').elements.kind.addEventListener('change', e => {
 $('#form-media').addEventListener('submit', async e => {
   e.preventDefault();
   const f = e.target.elements;
-  // extra 在协议里是**一个整体值**：出现即整份替换，缺席即保持。表单要动自定义列，
-  // 就得从行数据铺起再让控件覆盖（表单没显示的键才不会被抹掉）。
-  // 数字栏清空要显式写 null——undefined 会被 JSON.stringify 丢掉，那等于"别动它"。
+  // extra 是**一个整体值**（出现即整份替换）：要动自定义列就得从行数据铺起再让控件
+  // 覆盖，表单没显示的键才不会被抹掉。数字栏清空显式写 null（undefined 会被丢掉）。
   const body = { extra: { ...(editingMedia?.extra || {}) } };
   for (const k of M_STR) body[k] = f[k].value;
   for (const k of [...M_INT, ...M_REAL]) body[k] = f[k].value === '' ? null : +f[k].value;

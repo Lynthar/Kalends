@@ -36,11 +36,9 @@ pub struct App {
     pub modules: Vec<String>,
 }
 
-/// `kalends --health`：容器 HEALTHCHECK 用的自检。运行镜像里没有 curl / wget，与其为这一件事
-/// 往镜像里装个包（体积与 CVE 面都得跟着走），不如让二进制自己去问一次 /api/health。
-///
-/// 设了 PIN 时这个请求会被门禁挡成 401——那恰恰说明服务活着，所以判据是"答得上话"
-/// （任何 5xx 以下的响应），而不是 200。
+/// `kalends --health`：容器 HEALTHCHECK 自检（镜像里没有 curl / wget，为一件事装包
+/// 不值当）。判据是"答得上话"（5xx 以下）而不是 200——设了 PIN 会被挡成 401，
+/// 那恰恰说明服务活着。
 async fn health_probe() -> ! {
     let addr = std::env::var("KALENDS_ADDR").unwrap_or_else(|_| "127.0.0.1:4180".into());
     // 0.0.0.0 是监听地址不是可连地址（容器里恒是它）
@@ -68,9 +66,8 @@ async fn main() -> anyhow::Result<()> {
     let conn = db::open(&data_dir)?;
     db::seed_defaults(&conn)?;
     tracing::info!("database ready at {}", data_dir.join("kalends.db").display());
-    // 到期日、剩余天数、摘要时刻、备份的每日边界全看本地时区。容器默认是 UTC，
-    // 与用户所在时区差几小时就意味着「今天」错位、09:00 的摘要在别的钟点发出。
-    // 启动时把解析出来的本地时间与偏移打出来，好让这件事一眼看得见（compose 里设 TZ 即可）。
+    // 到期日、剩余天数、摘要时刻、备份边界全看本地时区，而容器默认 UTC——「今天」会
+    // 错位。启动时把本地时间与偏移打出来，好让这件事一眼看得见（compose 里设 TZ）。
     {
         let now = chrono::Local::now();
         tracing::info!("local time {} (UTC{})", now.format("%Y-%m-%d %H:%M"), now.format("%:z"));
@@ -161,8 +158,8 @@ async fn index() -> Html<&'static str> {
     Html(include_str!("../assets/index.html"))
 }
 
-/// 前端拆成了七份（见 index.html 的加载顺序），仍是编译期嵌入的静态文本。
-/// 用一个带名字的路由而不是七个 handler：加一份只要在这张表里补一行。
+/// 前端拆成八份（见 index.html 的加载顺序），仍是编译期嵌入的静态文本。
+/// 用一个带名字的路由而不是八个 handler：加一份只要在这张表里补一行。
 async fn js_file(Path(name): Path<String>) -> Response {
     let body = match name.as_str() {
         "core.js" => include_str!("../assets/js/core.js"),

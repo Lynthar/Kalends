@@ -1,11 +1,5 @@
-/* Kalends 前端 · pages.js
-   页面级交互：主导航切页、模块开关裁剪、切表、表内搜索、滚动与缩放的收尾，以及 boot() 启动。
-
-   **这些文件是普通 <script>，共享同一个全局作用域，按 index.html 里的顺序执行。**
-   不是 ES module，也不打算是：e2e 有十几处靠 `evl('loadAll()')` 这样直接调全局函数，
-   换成模块作用域会让整套断言一起报废；而"零构建步骤"这条也不允许引打包器。
-   拆分本身是纯搬运——**加东西时放进对应的那份，别又长回一个大文件**。
-*/
+/* Kalends 前端 · pages.js —— 页面级交互：主导航切页、模块开关裁剪、切表、表内搜索、
+   滚动与缩放的收尾，以及 boot() 启动。加载方式与作用域约定见 core.js 头注。 */
 
 /* ── 页面级交互 ── */
 document.querySelectorAll('.nav-tab[data-page]').forEach(b => b.onclick = () => {
@@ -14,9 +8,8 @@ document.querySelectorAll('.nav-tab[data-page]').forEach(b => b.onclick = () => 
   clearAllSel(); // 选区跟着看得见的那张表走，换页就散掉，免得批量删到看不见的表里
   document.querySelectorAll('.nav-tab[data-page]').forEach(x => {
     x.classList.toggle('on', x === b);
-    // 「当前在哪一页」此前只有那条水色下划线表达，读屏完全听不出来。
-    // **不认领 role=tab**：那等于向读屏承诺方向键能在标签间移动，而我们没有那套键盘模型，
-    // 半套的 tablist 比不做更糟（用户按了方向键没反应，只会以为页面坏了）
+    // 当前页要让读屏听得出来。**不认领 role=tab**：那承诺方向键能在标签间移动，
+    // 而我们没有那套键盘模型——半套 tablist 比不做更糟
     if (x === b) x.setAttribute('aria-current', 'page'); else x.removeAttribute('aria-current');
   });
   $('#page-renewals').hidden = state.page !== 'renewals';
