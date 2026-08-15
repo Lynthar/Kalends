@@ -12,7 +12,9 @@ use serde_json::{json, Value};
 use crate::api::{bad, missing, s, R};
 use crate::App;
 
-const FTYPES: &[&str] = &["text", "num", "sel", "multi", "date", "star", "tel", "url", "email"];
+/// 可建的列类型。**`star` 已于 2026-08-15 撤掉**：它只是"数字加个星形壳"，而媒体评分
+/// 改成 10 分制之后星形反倒把精度抹掉了；要打分用 `num`，要档位用 `sel`。
+const FTYPES: &[&str] = &["text", "num", "sel", "multi", "date", "tel", "url", "email"];
 
 /// 字段所属的数据源：库（值在 items.extra，按 collection_id 圈定）或独立表（媒体库）。
 enum Owner {

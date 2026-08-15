@@ -58,9 +58,10 @@ if (subs0.length === 0) {
   await mk('vps', { name: 'HostA', status: 'Active', price: 25, currency: 'USD', cycle: 'annual', last_renewed: day(-334), extra: { product: 'VPS-1', purpose: '代理出口', locations: ['东京'], routes: ['CN2 GIA'], cores: 1, ram_gb: 1, storage_gb: 20, storage_type: 'SSD' } });
   await mk('vps', { name: 'HostB', status: 'Ending', price: 48, currency: 'USD', cycle: 'annual', last_renewed: day(-304), extra: { purpose: '建站', locations: ['洛杉矶'], routes: ['9929'], cores: 2, ram_gb: 4, storage_gb: 60 } });
   await mk('vps', { name: 'HostC', status: 'Active', price: 320, currency: 'CNY', cycle: 'triennial', last_renewed: day(-60), extra: { purpose: '任务', locations: ['香港', '东京'], routes: ['CMI'], cores: 4, ram_gb: 8, storage_gb: 100 } });
-  await post('/api/media', { kind: '电影', title: '测试电影甲', year: 2019, rating: 4, douban_rating: 8.4, status: '看过', marked_at: '2026-06-01' });
-  await post('/api/media', { kind: '剧集', title: '测试剧集乙', year: 2023, rating: 5, douban_rating: 9.1, status: '在看', marked_at: '2026-07-10' });
-  await post('/api/media', { kind: '游戏', title: '测试游戏丙', year: 2021, rating: 3, status: '想看', marked_at: '2026-05-20', platform: 'Steam' });
+  // 评分是 10 分制（迁移 0019 起）
+  await post('/api/media', { kind: '电影', title: '测试电影甲', year: 2019, rating: 8, douban_rating: 8.4, status: '看过', marked_at: '2026-06-01' });
+  await post('/api/media', { kind: '剧集', title: '测试剧集乙', year: 2023, rating: 10, douban_rating: 9.1, status: '在看', marked_at: '2026-07-10' });
+  await post('/api/media', { kind: '游戏', title: '测试游戏丙', year: 2021, rating: 6, status: '想看', marked_at: '2026-05-20', platform: 'Steam' });
 } else {
   console.log('警告：复用已有数据，断言可能因日期漂移或数据差异失败');
 }
@@ -767,14 +768,15 @@ check('自建库点格即编落库',
 
 /* 12g-3. 多选值里含分隔符（, ， 、 /）：勾选它自己要能筛出自己那行，存回去也不能被拆开 */
 const mf = await post('/api/fields', { tbl: NK, name: '线路', ftype: 'multi' });
-const sf = await post('/api/fields', { tbl: NK, name: '星级', ftype: 'star' });
 await put('/api/fields/options', { tbl: NK, key: mf.key, options: [{ v: 'CN2 GIA/9929' }, { v: '普通' }] });
 const nrows = await (await fetch(`${APP}api/collections/${NK}/items`)).json();
 const slashRow = nrows.find(r => r.name === 'renamed.com') || nrows.find(r => r.name === 'lynthar.com');
 const SLASH_NAME = slashRow.name;
 await patch(`/api/items/${slashRow.id}`, {
-  ...slashRow, extra: { ...(slashRow.extra || {}), [mf.key]: ['CN2 GIA/9929'], [sf.key]: 4 },
+  ...slashRow, extra: { ...(slashRow.extra || {}), [mf.key]: ['CN2 GIA/9929'] },
 });
+// star 类型 2026-08-15 撤掉了：建列时后端要拒，且撤掉之后表格不能因为"认不出的类型"而崩
+check('star 已不是可建的列类型', (await raw('/api/fields', 'POST', { tbl: NK, name: '星级', ftype: 'star' })).status === 400);
 await evl(`loadAll()`);
 await sleep(900);
 await evl(`switchTab('${NK}')`);
@@ -795,7 +797,7 @@ check('勾选含 / 的值能筛出自己那行', await evl(`(async () => {
   return names.some(n => n.includes('${SLASH_NAME}'));
 })()`) === true);
 
-/* 12g-4. 详情表单用真控件：多选是勾选清单、星级是点星；开表单直接保存不得改坏任何值 */
+/* 12g-4. 详情表单用真控件：多选是勾选清单；开表单直接保存不得改坏任何值 */
 await evl(`openItemDialog('${NK}', state['${NK}'].find(r => r.name === '${SLASH_NAME}'))`);
 await sleep(500);
 check('多选字段是勾选清单而非文本框', await evl(
@@ -803,20 +805,13 @@ check('多选字段是勾选清单而非文本框', await evl(
    && !document.querySelector('#item-fields input[data-f="${mf.key}"]')`) === true);
 check('勾选清单带出当前值', await evl(
   `[...document.querySelectorAll('#item-fields [data-mbox="${mf.key}"] input:checked')].map(i => i.value).join('|')`) === 'CN2 GIA/9929');
-check('星级字段是点星控件、已点亮 4 颗', await evl(
-  `document.querySelectorAll('#item-fields .stars button.lit').length`) === 4);
 await shot('15-item-form');
 await evl(`document.querySelector('#form-item').requestSubmit()`);
 await sleep(1000);
 const saved = (await (await fetch(`${APP}api/collections/${NK}/items`)).json()).find(r => r.name === SLASH_NAME);
 check('原样保存不拆坏含 / 的多选值', JSON.stringify(saved.extra?.[mf.key]) === '["CN2 GIA/9929"]', JSON.stringify(saved.extra?.[mf.key]));
-check('原样保存后星级仍是数字', saved.extra?.[sf.key] === 4, JSON.stringify(saved.extra?.[sf.key]));
-// 点星改分同样要落成数字
 await evl(`openItemDialog('${NK}', state['${NK}'].find(r => r.name === '${SLASH_NAME}'))`);
 await sleep(450);
-await evl(`document.querySelector('#item-fields .stars button[data-v="2"]')?.click()`);
-await sleep(150);
-check('点第 2 颗星后只亮 2 颗', await evl(`document.querySelectorAll('#item-fields .stars button.lit').length`) === 2);
 // 勾选框封顶三行内部滚动（长词表不能把费用/到期挤出首屏），「新选项」输入框在滚动框外
 check('勾选框可内部滚动、新选项框在框外', await evl(`(() => {
   const checks = document.querySelector('#item-fields [data-mbox="${mf.key}"]');
@@ -841,9 +836,8 @@ check('回车把新值加成已勾选的选项', await evl(
 check('回车没有顺手提交表单', await evl(`!!document.querySelector('#dlg-item')?.open`) === true);
 await evl(`document.querySelector('#form-item').requestSubmit()`);
 await sleep(1000);
-const restarred = (await (await fetch(`${APP}api/collections/${NK}/items`)).json()).find(r => r.name === SLASH_NAME);
-check('点星改分落库为数字 2', restarred.extra?.[sf.key] === 2, JSON.stringify(restarred.extra?.[sf.key]));
-check('回车加的新选项一并落库', JSON.stringify(restarred.extra?.[mf.key]) === '["CN2 GIA/9929","临时线路"]', JSON.stringify(restarred.extra?.[mf.key]));
+const reopened = (await (await fetch(`${APP}api/collections/${NK}/items`)).json()).find(r => r.name === SLASH_NAME);
+check('回车加的新选项一并落库', JSON.stringify(reopened.extra?.[mf.key]) === '["CN2 GIA/9929","临时线路"]', JSON.stringify(reopened.extra?.[mf.key]));
 
 check('删库', (await fetch(`${APP}api/collections/${nc.id}`, { method: 'DELETE' })).ok);
 await evl(`loadAll()`);
@@ -1394,6 +1388,23 @@ check('类别=剧集 1 行', await evl(`document.querySelectorAll('#m-body tr').
 await evl(`document.querySelector('#m-view-pills .p-filt .x').click()`);
 await sleep(200);
 check('清除类别筛选恢复 3 行', await evl(`document.querySelectorAll('#m-body tr').length`) === 3);
+// 评分是 10 分制的数字 + 一颗蜂蜜金星（迁移 0019 起）：光一列数字看不出是评分，
+// 而 5 颗星又把 10 分制的精度抹掉；数字给精度、星给辨识
+const mrate = (await evl(`[...document.querySelectorAll('#m-body tr td[data-k="rating"]')].map(t => t.textContent.trim()).join('|')`));
+check('我评列显示成「N ★」', /^\d+ ★/.test(mrate.split('|')[0]) && !mrate.includes('★★'), mrate);
+check('评分那颗星用的是蜂蜜金', await evl(
+  `getComputedStyle(document.querySelector('#m-body .rstar')).color`) === 'rgb(237, 164, 18)');
+check('评分列已是数字列（筛选给操作符而不是勾选清单）', await menuClick('#m-tablewrap th[data-k="rating"]', '筛选')
+  && await evl(`(() => {
+    const ops = [...document.querySelectorAll('.filterpop .fp-op option')].map(o => o.value).join(',');
+    const q = document.querySelector('.filterpop .fp-q');
+    return ops.includes('ge') && q?.type === 'number' && !document.querySelector('.filterpop input[type=checkbox]');
+  })()`) === true);
+await evl(`closePop()`);
+check('后端只收 1–10', (await raw('/api/media', 'POST', { title: '越界评分', rating: 11 })).status === 400
+  && (await raw('/api/media', 'POST', { title: '满分', rating: 10 })).ok);
+await evl(`loadAll()`);
+await sleep(600);
 await shot('07-media-table');
 
 /* 14. fetch_cover 端点（未配 TMDB Key 的错误路径；游戏拒绝） */

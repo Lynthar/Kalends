@@ -749,17 +749,9 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
   overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
 }
 .card .meta { color: var(--ink-2); font-size: .74rem; display: flex; gap: .5rem; align-items: baseline; }
-.star-row { color: var(--honey); font-size: .78rem; letter-spacing: .06em; }
-.stars { display: inline-flex; align-items: center; }
-.stars button {
-  border: 0; background: none; font-size: 1.35rem; color: var(--line);
-  cursor: pointer; padding: 0 .08rem; line-height: 1;
-  transition: transform .3s var(--spring), color .15s;
-}
-.stars button:hover { transform: scale(1.28) rotate(8deg); }
-.stars button:active { transform: scale(.85); }
-.stars button.lit { color: var(--honey); }
-.stars .star-clear { font-size: .72rem; color: var(--ink-2); margin-left: .4rem; }
+/* 评分数字后面那颗星：只是个「这是评分」的标识，用既有的蜂蜜金，别抢数字的位置。
+   （5 星制的整套 .stars/.star-row 样式随 star 类型于 2026-08-15 一并撤掉） */
+.rstar { color: var(--honey); font-size: .88em; }
 .fold { border: 1px solid var(--line); border-radius: 12px; margin-top: .8rem; padding: .5rem .8rem .7rem; }
 .fold summary { cursor: pointer; font-size: .8rem; font-weight: 650; color: var(--ink-2); letter-spacing: .05em; transition: color .2s; }
 .fold summary:hover { color: var(--aqua-deep); }

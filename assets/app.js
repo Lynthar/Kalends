@@ -328,9 +328,12 @@ const ST_CLASS = {
 const stPill = v => v ? `<span class="st${ST_CLASS[v] ? ' ' + ST_CLASS[v] : ''}">${esc(v)}</span>` : '';
 
 /* 字段类型（Notion 式）：每列必属其一，驱动表头图标、排序、筛选操作符与单元格造型。
-   勾选列表型（sel/multi/status/star）筛选存已选值数组；操作符型（text/num/date）存 {op, q}。 */
-const TYPE_LABEL = { text: '文本', num: '数字', sel: '单选', multi: '多选', status: '状态', date: '日期', star: '星级', tel: '电话', url: '网址', email: '邮箱' };
-const LIST_TYPES = ['sel', 'multi', 'status', 'star'];
+   勾选列表型（sel/multi/status）筛选存已选值数组；操作符型（text/num/date）存 {op, q}。
+
+   **认不出的类型一律当 text**（`colType` 的兜底）：漏接一种类型此前的表现是筛选浮层
+   直接 TypeError、无任何提示（R4-#2），有了兜底就退化成"当普通文本用"，不至于打不开。 */
+const TYPE_LABEL = { text: '文本', num: '数字', sel: '单选', multi: '多选', status: '状态', date: '日期', tel: '电话', url: '网址', email: '邮箱' };
+const LIST_TYPES = ['sel', 'multi', 'status'];
 // 拨号链接只留 + 与数字：href 里带空格/横杠时部分客户端会拨错
 const telHref = v => 'tel:' + String(v).replace(/[^\d+]/g, '');
 // 位数太少多半是只填了国家码这类残缺值。这里只标不拦——存量数据里就有，
@@ -339,7 +342,14 @@ const telSuspect = v => (String(v).match(/\d/g) || []).length < 5;
 // 网址在格子里只显示域名：原始串常是带一长串查询参数的登录页，铺开会把整列撑爆
 const urlHost = v => String(v).replace(/^[a-z]+:\/\//i, '').split(/[/?#]/)[0].replace(/^www\./, '');
 const CONV_TYPES = ['text', 'sel', 'multi']; // 纯文本值列可在这三种呈现间切换
-const colType = (tab, k) => views[tab].types?.[k] || COLS[tab][k].t;
+/* 认不出的类型一律当文本。触发它的有两种情形：漏接了一种新类型（R4-#2 那次筛选浮层
+   直接 TypeError），或者某种类型被撤掉而库里还留着旧字段（`star` 就是 2026-08-15 撤的）。
+   退化成"当普通文本用"总好过表头画出个 undefined、或者浮层根本打不开。
+   注意 `tpl` 到不了这里——`colFromField` 早把它映射成 text 了。 */
+const colType = (tab, k) => {
+  const t = views[tab].types?.[k] || COLS[tab][k].t;
+  return TYPE_LABEL[t] ? t : 'text';
+};
 
 // t：字段类型；conv=1 允许切换呈现类型；ord：勾选列表按词表序（默认按中文序）；
 // val：取排序值（str=1 按中文串比较，否则按数值）；fvals：取筛选值列表（无值行归入 BLANK）
@@ -349,7 +359,8 @@ const COLS = {
     title: { t: 'text', val: r => r.title, str: 1, fvals: r => [r.title, r.orig_title].filter(Boolean) },
     kind: { t: 'sel', conv: 1, ord: M_KINDS, val: ordVal(M_KINDS, r => r.kind), fvals: r => r.kind ? [r.kind] : [] },
     year: { t: 'num', val: r => r.year },
-    rating: { t: 'star', ord: ['1', '2', '3', '4', '5'], val: r => r.rating, fvals: r => r.rating ? [String(r.rating)] : [] },
+    // 10 分制（迁移 0019 起），与豆瓣评分同一把尺；筛选因此从「勾 1–5」变成 ≥8 这类操作符
+    rating: { t: 'num', val: r => r.rating },
     douban: { t: 'num', val: r => r.douban_rating },
     status: { t: 'status', ord: M_STATUSES, val: ordVal(M_STATUSES, r => r.status), fvals: r => r.status ? [r.status] : [] },
     marked: { t: 'date', val: r => r.marked_at, str: 1 },
@@ -389,7 +400,6 @@ function cellVal(tab, k, v) {
   const t = colType(tab, k);
   if (t === 'multi') return tagsFor(tab, k, Array.isArray(v) ? v : splitVals(v));
   if (t === 'sel') return tagFor(tab, k, v);
-  if (t === 'star') return starRow(+v);
   if (t === 'url') {
     const href = safeUrl(v);
     return href ? `<a href="${esc(href)}" target="_blank" rel="noreferrer">${esc(urlHost(v))} ↗</a>` : esc(String(v));
@@ -420,11 +430,11 @@ function injectCustomCols(tab) {
   for (const f of customFields(tab)) {
     const k = FKEY(f);
     const cv = r => (r.extra || {})[k];
-    const numeric = f.ftype === 'num' || f.ftype === 'star';
+    const numeric = f.ftype === 'num';
     cols[k] = {
       t: f.ftype, custom: f.id,
       conv: CONV_TYPES.includes(f.ftype) ? 1 : 0,
-      ord: f.ftype === 'star' ? ['1', '2', '3', '4', '5'] : null,
+      ord: null,
       str: numeric ? 0 : 1,
       val: numeric ? r => { const v = cv(r); return v == null || v === '' ? null : +v; } : cv,
       fvals: r => { const v = cv(r); return v == null || v === '' ? [] : Array.isArray(v) ? v.map(String) : [String(v)]; },
@@ -599,7 +609,6 @@ const TYPE_ICON = {
   sel: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6"/><path d="M5.6 7l2.4 2.4L10.4 7"/></svg>',
   multi: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5.5 4h8M5.5 8h8M5.5 12h8"/><circle cx="2.4" cy="4" r=".95" fill="currentColor" stroke="none"/><circle cx="2.4" cy="8" r=".95" fill="currentColor" stroke="none"/><circle cx="2.4" cy="12" r=".95" fill="currentColor" stroke="none"/></svg>',
   date: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="3.5" width="11" height="10" rx="1.6"/><path d="M2.5 6.8h11M5.6 2v2.6M10.4 2v2.6"/></svg>',
-  star: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.8l1.9 3.9 4.3.6-3.1 3 .7 4.2L8 11.5l-3.8 2 .7-4.2-3.1-3 4.3-.6z"/></svg>',
   tel: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M5.2 2.4 6.6 5 5.3 6.6c.8 1.7 2.4 3.3 4.1 4.1L11 9.4l2.6 1.4v2.4c0 .5-.4.9-.9.8C7.2 13.5 2.5 8.8 1.8 3.3c-.1-.5.3-.9.8-.9z"/></svg>',
   url: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M6.6 9.4a2.6 2.6 0 0 0 3.7 0l2.1-2.1a2.6 2.6 0 0 0-3.7-3.7l-.9.9"/><path d="M9.4 6.6a2.6 2.6 0 0 0-3.7 0L3.6 8.7a2.6 2.6 0 0 0 3.7 3.7l.9-.9"/></svg>',
   email: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><rect x="2" y="3.6" width="12" height="8.8" rx="1.4"/><path d="m2.6 4.4 5.4 4 5.4-4"/></svg>',
@@ -1284,7 +1293,7 @@ function opFilterBody(tab, k, t) {
   return wrap;
 }
 
-// 勾选列表型筛选（sel/multi/status/star）：值 + 计数，多选并集
+// 勾选列表型筛选（sel/multi/status）：值 + 计数，多选并集
 function listFilterBody(tab, k, t) {
   const col = COLS[tab][k];
   const counts = new Map();
@@ -1307,7 +1316,6 @@ function listFilterBody(tab, k, t) {
     l.className = 'check fp-item';
     const shown = x === BLANK ? esc(x)
       : t === 'status' ? stPill(x)
-      : t === 'star' ? `<span class="star-row">${'★'.repeat(+x || 0)}</span>`
       : tagFor(tab, k, x);
     l.innerHTML = `<input type="checkbox" value="${esc(x)}"${sel.includes(x) ? ' checked' : ''}><span class="fp-v">${shown}</span><i>${counts.get(x)}</i>`;
     wrap.appendChild(l);
@@ -1551,7 +1559,7 @@ function openNewColPop(tab, anchor) {
   popEl.innerHTML = `<div class="fp-head"><b>新建列</b></div>
     <div class="fp-form"><input class="fp-q" data-name placeholder="列名"></div>
     <div class="fp-form"><select class="mini-select fp-op" data-type>
-      ${['text', 'num', 'sel', 'multi', 'date', 'star', 'tel', 'url', 'email'].map(t => `<option value="${t}">${TYPE_LABEL[t]}</option>`).join('')}
+      ${['text', 'num', 'sel', 'multi', 'date', 'tel', 'url', 'email'].map(t => `<option value="${t}">${TYPE_LABEL[t]}</option>`).join('')}
     </select><button type="button" class="btn primary mini" data-go>创建</button></div>`;
   const go = async () => {
     const name = popEl.querySelector('[data-name]').value.trim();
@@ -1929,29 +1937,6 @@ function multiEditor(tab, it, td, k, save) {
   placePop(box, td);
 }
 
-// 星级：点星即存
-function starEditor(tab, it, td, k, save) {
-  const cur = +((k in it ? it[k] : (it.extra || {})[k]) || 0);
-  const box = cellPopShell(td, null);
-  const row = document.createElement('span');
-  row.className = 'stars';
-  for (let n = 1; n <= 5; n++) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = '★';
-    if (n <= cur) b.classList.add('lit');
-    b.onclick = () => { closePop(); save(n); };
-    row.appendChild(b);
-  }
-  const clear = document.createElement('button');
-  clear.type = 'button';
-  clear.className = 'star-clear';
-  clear.textContent = '清除';
-  clear.onclick = () => { closePop(); save(null); };
-  row.appendChild(clear);
-  box.appendChild(row);
-  placePop(box, td);
-}
 
 // 周期编辑：付费周期下拉 + 按天数时的天数输入（订阅周期列 / VPS 周期列共用）
 function cycleEditor(tab, it, td) {
@@ -2105,7 +2090,6 @@ function openCellPop(tab, it, k, td) {
   const save = v => patchRow(tab, it, toExtra ? extraPatch(it, k, v) : { [spec.f || k]: v });
   if (spec.inputs) return inputsEditor(tab, it, td, spec.inputs, patch => patchRow(tab, it, patch));
   if (t === 'sel' || t === 'status') return pickEditor(tab, it, td, k, save);
-  if (t === 'star') return starEditor(tab, it, td, k, save);
   if (t === 'multi') {
     return multiEditor(tab, it, td, k, sel => {
       if (toExtra) return patchRow(tab, it, extraPatch(it, k, sel));
@@ -2302,7 +2286,6 @@ const M_STR = ['kind', 'title', 'orig_title', 'status', 'marked_at', 'started_at
 const M_INT = ['year', 'rating', 'douban_votes', 'tmdb_id', 'steam_appid'];
 const M_REAL = ['douban_rating', 'playtime_hours'];
 
-const starRow = n => n ? `<span class="star-row">${'★'.repeat(n)}</span>` : '';
 
 // 海报墙沿用类别/状态 chips；表格视图交给列筛选（applyView），互不影响
 function mediaRows() {
@@ -2392,7 +2375,7 @@ function renderMedia() {
       card.innerHTML = `
         <div class="cov">${cov}${badge}</div>
         <div class="t">${esc(it.title)}</div>
-        <div class="meta"><span>${esc(String(it.year || ''))}</span>${starRow(it.rating)}${it.douban_rating ? `<span>豆 ${it.douban_rating}</span>` : ''}</div>`;
+        <div class="meta"><span>${esc(String(it.year || ''))}</span>${it.rating ? `<span>${ratingView(it.rating)}</span>` : ''}${it.douban_rating ? `<span>豆 ${it.douban_rating}</span>` : ''}</div>`;
       card.onclick = () => openMediaDialog(it);
       wall.appendChild(card);
     });
@@ -2406,7 +2389,7 @@ function renderMedia() {
         <td>${nameCell(it.title)}<button class="rowopen" data-open type="button" title="打开详情">⤢</button>${it.orig_title ? `<div class="muted" style="font-size:.75rem">${esc(it.orig_title)}</div>` : ''}</td>
         <td>${cellVal('media', 'kind', it.kind)}</td>
         <td class="cdate">${esc(String(it.year || ''))}</td>
-        <td>${starRow(it.rating)}</td>
+        <td class="amt">${ratingView(it.rating)}</td>
         <td class="amt">${it.douban_rating ?? ''}</td>
         <td>${stPill(it.status)}</td>
         <td class="cdate">${esc(it.marked_at || '')}</td>
@@ -2420,15 +2403,9 @@ function renderMedia() {
 
 let editingMedia = null;
 
-// 星串点亮到第 n 颗（「清除」钮的 data-v 为空，不参与点亮）
-const litStars = (el, n) => el.querySelectorAll('button[data-v]').forEach(b => {
-  if (b.dataset.v) b.classList.toggle('lit', +b.dataset.v <= n);
-});
-
-function setStars(v) {
-  $('#form-media').elements.rating.value = v || '';
-  litStars($('#m-stars'), +v || 0);
-}
+/* 我的评分：10 分制的数字 + 一颗蜂蜜金星。光一列数字看不出这是评分（旁边就是豆瓣评分，
+   两列纯数字会糊成一片），而星串又恰恰把 10 分制的精度抹掉——数字给精度，星给辨识。 */
+const ratingView = n => (n ? `${n} <span class="rstar">★</span>` : '');
 
 function openMediaDialog(it) {
   editingMedia = it || null;
@@ -2440,10 +2417,7 @@ function openMediaDialog(it) {
   const f = form.elements;
   if (it) {
     for (const k of M_STR) f[k].value = it[k] ?? '';
-    for (const k of [...M_INT, ...M_REAL]) f[k].value = it[k] ?? '';
-    setStars(it.rating);
-  } else {
-    setStars('');
+    for (const k of [...M_INT, ...M_REAL]) f[k].value = it[k] ?? ''; // 评分也在 M_INT 里
   }
   // 自定义列此前只有表格里点格能改，海报墙用户等于没有入口
   const ex = $('#m-extra-fields');
@@ -2501,11 +2475,6 @@ $('#m-covers').onclick = async () => {
   }
   await loadAll();
 };
-
-$('#m-stars').addEventListener('click', e => {
-  const b = e.target.closest('button[data-v]');
-  if (b) setStars(b.dataset.v);
-});
 
 $('#form-media').elements.kind.addEventListener('change', e => {
   $('#m-game-fold').open = e.target.value === '游戏';
@@ -2751,13 +2720,13 @@ function tplText(f, r) {
 // 字段 → COLS 条目（类型驱动排序/筛选，与内置列同权）
 function colFromField(key, f) {
   const t = f.ftype === 'tpl' ? 'text' : f.ftype;
-  const numeric = t === 'num' || t === 'star';
+  const numeric = t === 'num';
   const isCycle = f.src === 'col' && f.key === 'cycle';
   const get = r => fieldVal(f, r);
   return {
     t, fkey: f.key, src: f.src, custom: f.builtin ? 0 : f.id,
     conv: CONV_TYPES.includes(t) ? 1 : 0,
-    ord: f.key === 'status' ? statusOrder(key) : (t === 'star' ? ['1', '2', '3', '4', '5'] : null),
+    ord: f.key === 'status' ? statusOrder(key) : null,
     str: numeric || isCycle ? 0 : 1,
     val: f.key === 'status' ? ordVal(statusOrder(key), r => r.status)
       : isCycle ? cycleRank
@@ -3132,14 +3101,6 @@ function fieldControl(key, f, it) {
         `<label class="check"><input type="checkbox" value="${esc(o)}"${cur.has(o) ? ' checked' : ''}><span>${esc(o)}</span></label>`
       ).join('')}</span><input class="mopt-add" placeholder="新选项，回车加入"></span>`;
     initMoptAdd(lab.querySelector('.mopt-add'));
-  } else if (f.ftype === 'star') {
-    const n = +val || 0;
-    lab.innerHTML = `<span>${esc(f.name || f.key)}</span>
-      <span class="stars">${[1, 2, 3, 4, 5].map(i =>
-        // 五颗一模一样的 ★ 读出来是五个"星号按钮"，必须自报第几颗
-        `<button type="button" data-v="${i}" aria-label="${i} 星"${i <= n ? ' class="lit"' : ''}>★</button>`).join('')
-      }<button type="button" class="star-clear" data-v="">清除</button></span>
-      <input type="hidden" data-f="${esc(f.key)}" value="${n || ''}">`;
   } else if (f.ftype === 'sel') {
     const cur = val === '' ? '' : String(val);
     const sel = `<select data-f="${esc(f.key)}"><option value=""></option>${selOptions(key, f, cur).map(o =>
@@ -3271,7 +3232,7 @@ function logoRow(it) {
 
 /* fieldControl 的反向：从表单里读回一个字段的值。控件不在场时给 NO_CONTROL，
    调用方一律要跳过而不是当成空值——把"没这个控件"当成"用户清空了"，就是整行 PUT
-   语义下把字段清掉的那类事故。multi 与 star 没有单一的 [data-f]，所以要分支读。 */
+   语义下把字段清掉的那类事故。multi 没有单一的 [data-f]，所以要分支读。 */
 const NO_CONTROL = Symbol('no-control');
 function readFieldControl(scope, f) {
   if (f.ftype === 'multi') {
@@ -3285,7 +3246,7 @@ function readFieldControl(scope, f) {
   const v = el.value.trim();
   // 数字/星级清空给 null 而不是 undefined：这个值会直接进 PATCH 体，而 JSON.stringify
   // 会把 undefined 连键一起丢掉——键缺席在那套语义里是"保持原值"，清空就失效了
-  return f.ftype === 'num' || f.ftype === 'star' ? (v === '' ? null : Number(v)) : v;
+  return f.ftype === 'num' ? (v === '' ? null : Number(v)) : v;
 }
 
 // 表单 → PATCH/POST 的体：只装这张表单读得到的字段，其余交给"缺席即保持"
@@ -3309,16 +3270,6 @@ function itemBody(key, row) {
   // 不必再按 items 的真列全集铺一遍底——那份铺底代码正是全量替换语义逼出来的
   return patch;
 }
-
-// 详情表单里的星级：点星写进隐藏输入（与就地编辑的 starEditor 同一套呈现）
-document.addEventListener('click', e => {
-  // 两张表单都可能有星级字段（媒体的自定义列走 #m-extra-fields），别只认库那一张
-  const b = e.target.closest('#item-fields .stars button[data-v], #m-extra-fields .stars button[data-v]');
-  if (!b) return;
-  const n = +b.dataset.v || 0;
-  b.closest('label').querySelector('input[data-f]').value = n || '';
-  litStars(b.closest('.stars'), n);
-});
 
 document.addEventListener('submit', async e => {
   if (e.target.id !== 'form-item') return;

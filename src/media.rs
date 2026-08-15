@@ -38,10 +38,11 @@ pub fn router() -> Router<App> {
 fn normalized(conn: &Connection, mut b: Value) -> Result<Value, ApiError> {
     // 空标题是允许的：表尾「＋ 新建」直接插一行空行、就地填（与库那侧同款）。
     // title 有 NOT NULL 约束，所以 values_of 会把它写成空串而不是 NULL。
-    // 评分越界会一路渲染到界面上（99 星把整行撑爆）；不填＝没评分，那是允许的
+    // 评分是 10 分制（迁移 0019 起，与 douban_rating 同一把尺）；不填＝没评分，那是允许的。
+    // 范围仍要在写入口卡住：越界的数字会一路渲染到界面上，也会让排序与筛选失去意义
     if let Some(r) = i(&b, "rating") {
-        if !(1..=5).contains(&r) {
-            return Err(bad("评分只能是 1–5 星").into());
+        if !(1..=10).contains(&r) {
+            return Err(bad("评分只能是 1–10").into());
         }
     }
     if s(&b, "kind").is_none() {

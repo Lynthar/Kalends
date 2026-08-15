@@ -183,13 +183,7 @@
       <label class="span2">标题 *<input name="title" required></label>
       <label class="span2">又名 / 原文名<input name="orig_title"></label>
       <label>年份<input name="year" type="number" min="1870" max="2100"></label>
-      <label>我的评分
-        <span class="stars" id="m-stars">
-          <button type="button" data-v="1" aria-label="1 星">★</button><button type="button" data-v="2" aria-label="2 星">★</button><button type="button" data-v="3" aria-label="3 星">★</button><button type="button" data-v="4" aria-label="4 星">★</button><button type="button" data-v="5" aria-label="5 星">★</button>
-          <button type="button" class="star-clear" data-v="">清除</button>
-        </span>
-        <input type="hidden" name="rating">
-      </label>
+      <label>我的评分（1–10，留空＝没评分）<input name="rating" type="number" min="1" max="10" step="1" inputmode="numeric"></label>
       <label>标记日期<input name="marked_at" type="date"></label>
       <label>开始日期<input name="started_at" type="date"></label>
       <label class="span2">我的短评<textarea name="review" rows="2"></textarea></label>

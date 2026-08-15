@@ -22,6 +22,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0016_spec_shows_port_and_traffic.sql"),
     include_str!("../migrations/0017_split_renew_from_due_anchor.sql"),
     include_str!("../migrations/0018_ledger_keeps_its_own_names.sql"),
+    include_str!("../migrations/0019_rating_out_of_ten.sql"),
 ];
 
 /// 一个跑完全部迁移的内存库，等价于"全新安装"。只给测试用。
