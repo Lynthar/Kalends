@@ -1713,9 +1713,15 @@ await sleep(700);
    键盘用户全够不着；`.rowopen` 平时 opacity:0，不给 focus 态的话焦点环画在透明元素上。 */
 await evl(`switchTab('subs')`);
 await sleep(300);
-check('表头可聚焦且有按钮语义', await evl(`(() => {
+check('表头可聚焦、带弹出菜单语义，且**没有**被 role=button 盖掉列头身份', await evl(`(() => {
   const th = document.querySelector('#view-subs thead th[data-k="name"]');
-  return th.tabIndex === 0 && th.getAttribute('role') === 'button';
+  // role=button 会盖掉 th 原生的 columnheader，而 aria-sort 只对列头有意义——
+  // 盖掉之后"当前按这列升序排着"读屏永远读不出来
+  return th.tabIndex === 0 && th.getAttribute('aria-haspopup') === 'menu' && !th.getAttribute('role');
+})()`) === true);
+check('排序状态挂在列头上（aria-sort）', await evl(`(() => {
+  const th = document.querySelector('#view-subs thead th[data-k="name"]');
+  return ['ascending', 'descending', 'none'].includes(th.getAttribute('aria-sort'));
 })()`) === true);
 // 真键盘事件：合成的 KeyboardEvent 走不到浏览器默认行为，也测不出 preventDefault
 await evl(`document.querySelector('#view-subs thead th[data-k="status"]').focus()`);
@@ -2712,6 +2718,51 @@ check('浅色 --ink-2 在三种底上都过 WCAG AA 的 4.5', await evl(`(() => 
   const ratio = b => { const [hi, lo] = [L(ink), L(parse(cs.getPropertyValue(b)))].sort((x, y) => y - x);
     return (hi + 0.05) / (lo + 0.05); };
   return ['--bg', '--surface', '--surface-2'].every(b => ratio(b) >= 4.5);
+})()`) === true);
+
+/* 17.33. 写入口的日期与币种校验；媒体排序下拉只属于海报墙；库设置只留齿轮。 */
+// 界面挡得住（原生 date 控件 / 币种下拉），接口挡不住——而写坏的后果都不出声：
+// 坏日期让条目掉出到期时间线，坏币种让那笔钱永远不进支出统计
+const vRow = (await (await fetch(`${APP}api/collections/subs/items`)).json())[0];
+check('接口写不进坏日期', (await raw(`/api/items/${vRow.id}`, 'PATCH', { next_renewal: '明天' })).status === 400);
+check('接口写不进坏币种', (await raw(`/api/items/${vRow.id}`, 'PATCH', { currency: '这不是ISO码' })).status === 400);
+check('认得出的松散日期补齐成标准形状，不是拒掉', await (async () => {
+  await patch(`/api/items/${vRow.id}`, { next_renewal: '2026-9-5' });
+  const r = (await (await fetch(`${APP}api/collections/subs/items`)).json()).find(x => x.id === vRow.id);
+  await patch(`/api/items/${vRow.id}`, { next_renewal: vRow.next_renewal });
+  return r.next_renewal;
+})() === '2026-09-05');
+check('币种统一存大写，四位的也进得来', await (async () => {
+  await patch(`/api/items/${vRow.id}`, { currency: 'usdt' });
+  const r = (await (await fetch(`${APP}api/collections/subs/items`)).json()).find(x => x.id === vRow.id);
+  await patch(`/api/items/${vRow.id}`, { currency: vRow.currency });
+  return r.currency;
+})() === 'USDT');
+await evl(`loadAll()`);
+await sleep(700);
+// 排序下拉：海报墙没有表头可点，它是唯一入口；表格视图里点表头就能排，两个入口管同一个状态
+await evl(`(() => { state.page = 'media'; document.querySelector('#page-renewals').hidden = true;
+  document.querySelector('#page-media').hidden = false; views.media.view = 'wall'; renderMedia(); })()`);
+await sleep(400);
+check('海报墙里排序下拉在', await evl(`!document.querySelector('#m-sort').hidden`) === true);
+await evl(`(() => { views.media.view = 'table'; renderMedia(); })()`);
+await sleep(400);
+check('表格视图里排序下拉收起（点表头就能排）', await evl(
+  `getComputedStyle(document.querySelector('#m-sort')).display`) === 'none');
+await evl(`(() => { views.media.view = 'wall'; state.page = 'renewals';
+  document.querySelector('#page-media').hidden = true; document.querySelector('#page-renewals').hidden = false; })()`);
+await sleep(250);
+// 库设置只剩齿轮：右键那个入口不看文档发现不了，撤掉
+check('右键库标签不再开设置', await evl(`(() => {
+  const tab = document.querySelector('.tab[data-tab="subs"]');
+  tab.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+  return !document.querySelector('#dlg-coll')?.open;
+})()`) === true);
+check('齿轮仍能开库设置', await evl(`(() => {
+  document.querySelector('#coll-settings').click();
+  const open = !!document.querySelector('#dlg-coll')?.open;
+  document.querySelector('#dlg-coll')?.close();
+  return open;
 })()`) === true);
 
 /* 18. 库删光也不能把界面打崩。放在最后跑——这一段会把预置库连数据一起删掉。

@@ -678,7 +678,9 @@ function initHead(tab) {
     // 属性菜单是排序/筛选/改列/删列的唯一入口，只挂 click 就等于键盘用户全够不着。
     // th 不是原生可聚焦元素，得自己给 tabindex 与语义，并把回车/空格接成"点一下"
     th.tabIndex = 0;
-    th.setAttribute('role', 'button');
+    // **别给它 role="button"**：那会盖掉 th 原生的 columnheader 角色，而 `aria-sort`
+    // 只对列头有意义——读屏于是永远读不出"当前按这一列升序排着"。
+    // 可聚焦 + aria-haspopup + 回车/空格 已经够让键盘用户打开属性菜单了
     th.setAttribute('aria-haspopup', 'menu');
     th.addEventListener('keydown', e => {
       if (e.key !== 'Enter' && e.key !== ' ') return;
@@ -2349,6 +2351,9 @@ function renderMedia() {
   $('#m-tablewrap').hidden = isWall;
   $('#m-kind-chips').hidden = !isWall; // 表格视图的类别/状态走列筛选，chips 只属于海报墙
   $('#m-status-row').hidden = !isWall;
+  // 排序下拉同理：海报墙没有表头可点，它是唯一入口；表格视图里点表头就能排，
+  // 两个控件管同一个状态只会让人犯嘀咕"我刚才是从哪儿改的"
+  $('#m-sort').hidden = !isWall;
   $('#m-view-toggle').textContent = isWall ? '表格' : '海报墙';
   if (isWall) {
     $('#m-body').innerHTML = ''; // 清掉表格视图的残留行，避免列序重排作用在旧行上
@@ -2814,11 +2819,11 @@ function ensureCollDom(c) {
     $('#coll-settings').before(btn);
   }
   // 三个预置库的标签写在 index.html 里，不走上面的新建分支——事件一律在这儿绑，
-  // 否则它们既拖不动也右键不开设置（真踩过）
+  // 否则它们连拖都拖不动（真踩过）。
+  // **右键开库设置已于 2026-08-15 撤掉**：不看文档发现不了，而齿轮就在旁边，同一件事两个入口
   if (!btn.dataset.wired) {
     btn.dataset.wired = '1';
     btn.onclick = () => switchTab(key);
-    btn.oncontextmenu = e => { e.preventDefault(); openCollDialog(collOf(key)); };
     initTabDrag(btn, key);
   }
   btn.textContent = label;

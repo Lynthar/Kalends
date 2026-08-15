@@ -921,8 +921,36 @@ pub fn normalize_shaped(ftype: &str, raw: &str) -> anyhow::Result<String> {
             }
             Ok(full)
         }
+        "date" => {
+            // 界面用的是原生 <input type=date>，写不出别的形状；但接口与导入脚本能——
+            // 而一个写坏的日期会让条目**掉出到期时间线、不再提醒**（首页的 undated 会点名它，
+            // 所以不是全无声息，但等你看见已经过去几天了）。
+            //
+            // **认得出就补齐成标准形状，而不是拒掉**：`2026-8-15` chrono 本来就认，
+            // 可这些日期是当字符串排序与比较的（`2026-8-15` 会排到 `2026-12-01` 后面），
+            // 存回标准形状才对。与 tel 折叠空白、url 补协议同一条路子。
+            let d = NaiveDate::parse_from_str(t, "%Y-%m-%d")
+                .map_err(|_| bad(format!("日期要写成 2026-08-15 这样的形状：{t}")))?;
+            Ok(d.format("%Y-%m-%d").to_string())
+        }
         _ => Ok(t.to_string()),
     }
+}
+
+/// 币种：2–6 位字母，统一存大写。
+///
+/// **不卡死三位 ISO 码**：那今天不会误伤任何东西（生产在用的是 USD/CNY/EUR），但哪天要记
+/// `USDT` 这类四位的就被自己的校验挡在门外了。这里要拦的是「这不是ISO码」那种一眼可辨的
+/// 垃圾——它一旦落库，那笔钱就永远不进支出统计（汇率表查不到，只能单独占一行）。
+pub fn normalize_currency(raw: &str) -> anyhow::Result<String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(String::new());
+    }
+    if !(2..=6).contains(&t.chars().count()) || !t.chars().all(|c| c.is_ascii_alphabetic()) {
+        return Err(bad(format!("币种要写成 USD 这样的字母代码：{t}")));
+    }
+    Ok(t.to_uppercase())
 }
 
 /// 域名部分：url 值渲染与取图标都用它（`https://a.com/x?y` → `a.com`）。
@@ -940,7 +968,7 @@ pub fn url_host(raw: &str) -> Option<String> {
 /// 它的自定义列也能选 tel/url/email（"新建列"的类型下拉对两侧一视同仁）。
 pub fn normalize_shaped_in(conn: &Connection, tbl: &str, b: &mut Value) -> anyhow::Result<()> {
     let mut stmt =
-        conn.prepare("SELECT key, ftype FROM fields WHERE tbl=?1 AND ftype IN ('tel','url','email')")?;
+        conn.prepare("SELECT key, ftype FROM fields WHERE tbl=?1 AND ftype IN ('tel','url','email','date')")?;
     let cols: Vec<(String, String)> = stmt
         .query_map([tbl], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
@@ -962,6 +990,10 @@ fn normalize_shaped_fields(conn: &Connection, coll: i64, b: &mut Value) -> anyho
     let key: String = conn.query_row("SELECT key FROM collections WHERE id=?1", [coll], |r| {
         r.get(0)
     })?;
+    // 币种自迁移 0013 起不是注册字段（并进了费用格），注册表那圈循环读不到它
+    if let Some(c) = b.get("currency").and_then(|v| v.as_str()) {
+        b["currency"] = json!(normalize_currency(c)?);
+    }
     normalize_shaped_in(conn, &key, b)
 }
 
@@ -1786,6 +1818,28 @@ async fn logo_file(State(app): State<App>, Path(name): Path<String>) -> Result<R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 有形状的类型里，日期与币种是 2026-08-15 补的：界面挡得住（原生 date 控件、币种下拉），
+    /// 接口与导入脚本挡不住，而写坏的后果都不出声——坏日期让条目掉出到期时间线、
+    /// 坏币种让那笔钱永远不进支出统计。
+    #[test]
+    fn dates_and_currencies_are_shaped_at_the_write_entry() {
+        // 日期：只认 ISO 形状，空值仍然放行（不填＝没这个日期）
+        assert_eq!(normalize_shaped("date", "2026-08-15").unwrap(), "2026-08-15");
+        assert_eq!(normalize_shaped("date", "  ").unwrap(), "");
+        // 认得出的松散写法补齐成标准形状——这些日期是当字符串排序的，没补零会排错位
+        assert_eq!(normalize_shaped("date", "2026-8-5").unwrap(), "2026-08-05");
+        for bad_one in ["2026/08/15", "明天", "2026-13-01", "20260815", "2026-02-30"] {
+            assert!(normalize_shaped("date", bad_one).is_err(), "{bad_one} 不该放行");
+        }
+        // 币种：统一大写，两到六位字母
+        assert_eq!(normalize_currency(" usd ").unwrap(), "USD");
+        assert_eq!(normalize_currency("USDT").unwrap(), "USDT"); // 四位的也得进得来
+        assert_eq!(normalize_currency("").unwrap(), "");
+        for bad_one in ["这不是ISO码", "US1", "U", "TOOLONGCODE", "US$"] {
+            assert!(normalize_currency(bad_one).is_err(), "{bad_one} 不该放行");
+        }
+    }
 
     /// 局部更新的合并规则：缺席即保持、出现即写入、`""` 与 `null` 都是清空、
     /// `extra` 作为一个整体值。这条规则是整个写入协议的地基——它一松，前端就得重新
