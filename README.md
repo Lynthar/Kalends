@@ -110,7 +110,7 @@ SQLite 文件务必放本地磁盘，SMB / NFS 的文件锁不够可靠，别拿
 ```
 src/            axum 服务、到期引擎、通知、备份、TMDB 客户端
 migrations/     数据库迁移（编译期嵌入，PRAGMA user_version 记版本）
-assets/         前端（原生 JS，无构建步骤，编译期嵌入二进制；js/ 下拆成七份按序加载）
+assets/         前端（原生 JS，无构建步骤，编译期嵌入二进制；js/ 下拆成八份按序加载）
 scripts/        Notion 迁移脚本、前端端到端验证、迁移演练与接口对拍
 deploy/         Docker Compose 与部署文档
 ```
