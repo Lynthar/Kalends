@@ -323,16 +323,11 @@ function openCellPop(tab, it, k, td) {
   if (k === 'price' && col.src === 'col') return priceEditor(tab, it, td);
   const save = v => patchRow(tab, it, toExtra ? extraPatch(it, k, v) : { [spec.f || k]: v });
   if (spec.inputs) return inputsEditor(tab, it, td, spec.inputs, patch => patchRow(tab, it, patch));
-  if (t === 'sel' || t === 'status') return pickEditor(tab, it, td, k, save);
-  if (t === 'multi') {
-    return multiEditor(tab, it, td, k, sel => {
-      if (toExtra) return patchRow(tab, it, extraPatch(it, k, sel));
-      if (col.src === 'col') return patchRow(tab, it, { [k]: sel });
-      return patchRow(tab, it, { [k]: sel.join(', ') }); // 文本列的多选呈现：拼回字符串
-    });
-  }
+  // 这一类型专属的编辑器（单选/状态点值即存、多选勾选即存）由类型表给；没有就落到下面的通用框
+  const own = TYPES[t]?.editor;
+  if (own) return own({ tab, it, td, k, col, toExtra, save });
   const f = spec.f || k;
-  const type = t === 'num' ? 'number' : t === 'date' ? 'date' : t === 'tel' ? 'tel' : t === 'url' ? 'url' : t === 'email' ? 'email' : 'text';
+  const type = TYPES[t]?.input || 'text';
   return inputsEditor(tab, it, td, [[f, colLabel(tab, k), type]], patch => {
     if (toExtra) return patchRow(tab, it, extraPatch(it, k, patch[f] ?? ''));
     return patchRow(tab, it, patch);

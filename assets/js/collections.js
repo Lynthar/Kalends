@@ -77,7 +77,7 @@ function tplText(f, r) {
 // 字段 → COLS 条目（类型驱动排序/筛选，与内置列同权）
 function colFromField(key, f) {
   const t = f.ftype === 'tpl' ? 'text' : f.ftype;
-  const numeric = t === 'num';
+  const numeric = !!TYPES[t]?.numeric;
   const isCycle = f.src === 'col' && f.key === 'cycle';
   const get = r => fieldVal(f, r);
   return {
@@ -295,13 +295,11 @@ function renderColl(key) {
         return `<td class="amt">${esc(main)}${note ? `<div class="muted" style="font-size:.72rem">${esc(note)}</div>` : ''}</td>`;
       }
       // 有形状的三类的渲染在 cellVal 里（媒体的自定义列共用同一份，别在这儿另写一遍）
-      if (f.ftype === 'url' || f.ftype === 'email') return `<td class="clip">${cellVal(key, f.key, v)}</td>`;
-      if (f.ftype === 'tel') return `<td class="cdate">${cellVal(key, f.key, v)}</td>`;
-      if (f.ftype === 'date') return `<td class="cdate">${esc(v || '')}</td>`;
+      // 模板列单列一支：它在 COLS 里被映射成 text，走 cellVal 会连带吃到"文本列可切换呈现"
       if (f.ftype === 'tpl') return `<td class="cdate">${esc(v || '')}</td>`;
-      if (f.ftype === 'text') return `<td class="muted clip" title="${esc(v ?? '')}">${cellVal(key, f.key, v)}</td>`;
-      if (f.ftype === 'num') return `<td class="amt">${v == null || v === '' ? '' : esc(String(v))}</td>`;
-      return `<td>${cellVal(key, f.key, v)}</td>`;
+      // 其余一律：class 与要不要 title 由类型表说了算，内容一律交给 cellVal
+      const ts = TYPES[f.ftype] || {};
+      return `<td${ts.td ? ` class="${ts.td}"` : ''}${ts.title ? ` title="${esc(v ?? '')}"` : ''}>${cellVal(key, f.key, v)}</td>`;
     }).join('');
     const sem = semOf(key, it.status);
     const canRenew = sem.timeline && (c.due_anchor === 'last' || it.next_renewal);
@@ -450,7 +448,7 @@ let grpSeq = 0;
 function fieldControl(key, f, it) {
   const v = it ? fieldRaw(f, it) : ''; // 编辑值，不是格子里那份呈现
   const val = Array.isArray(v) ? v.join(', ') : (v ?? '');
-  const grouped = f.ftype === 'multi'; // 里面是一串控件，不是单独一枚
+  const grouped = !!TYPES[f.ftype]?.group; // 里面是一串控件，不是单独一枚
   const lab = document.createElement(grouped ? 'div' : 'label');
   if (grouped) {
     const gid = `grp-${++grpSeq}`;
@@ -494,7 +492,7 @@ function fieldControl(key, f, it) {
       ${currencyPicker(key, cur, 'data-f="currency"')}</span>`;
     initSoptAdd(lab.querySelector('.cur-add'), fxCode);
   } else {
-    const type = f.ftype === 'num' ? 'number' : f.ftype === 'date' ? 'date' : f.ftype === 'tel' ? 'tel' : f.ftype === 'url' ? 'url' : f.ftype === 'email' ? 'email' : 'text';
+    const type = TYPES[f.ftype]?.input || 'text';
     // 标出网址输入框：「从网站取图标」认这个标记，所以自建的网址列同样能用
     const mark = f.ftype === 'url' ? ' data-urlfield' : '';
     lab.innerHTML = `<span>${esc(f.name || f.key)}</span><input type="${type}"${type === 'number' ? ' step="any"' : ''} data-f="${esc(f.key)}"${mark} value="${esc(val)}">`;
@@ -622,7 +620,7 @@ function readFieldControl(scope, f) {
   const v = el.value.trim();
   // 数字/星级清空给 null 而不是 undefined：这个值会直接进 PATCH 体，而 JSON.stringify
   // 会把 undefined 连键一起丢掉——键缺席在那套语义里是"保持原值"，清空就失效了
-  return f.ftype === 'num' ? (v === '' ? null : Number(v)) : v;
+  return TYPES[f.ftype]?.numeric ? (v === '' ? null : Number(v)) : v;
 }
 
 // 表单 → PATCH/POST 的体：只装这张表单读得到的字段，其余交给"缺席即保持"

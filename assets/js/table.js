@@ -43,8 +43,6 @@ const stPill = v => v ? `<span class="st${ST_CLASS[v] ? ' ' + ST_CLASS[v] : ''}"
 
    **认不出的类型一律当 text**（`colType` 的兜底）：漏接一种类型此前的表现是筛选浮层
    直接 TypeError、无任何提示（R4-#2），有了兜底就退化成"当普通文本用"，不至于打不开。 */
-const TYPE_LABEL = { text: '文本', num: '数字', sel: '单选', multi: '多选', status: '状态', date: '日期', tel: '电话', url: '网址', email: '邮箱' };
-const LIST_TYPES = ['sel', 'multi', 'status'];
 // 拨号链接只留 + 与数字：href 里带空格/横杠时部分客户端会拨错
 const telHref = v => 'tel:' + String(v).replace(/[^\d+]/g, '');
 // 位数太少多半是只填了国家码这类残缺值。这里只标不拦——存量数据里就有，
@@ -52,14 +50,13 @@ const telHref = v => 'tel:' + String(v).replace(/[^\d+]/g, '');
 const telSuspect = v => (String(v).match(/\d/g) || []).length < 5;
 // 网址在格子里只显示域名：原始串常是带一长串查询参数的登录页，铺开会把整列撑爆
 const urlHost = v => String(v).replace(/^[a-z]+:\/\//i, '').split(/[/?#]/)[0].replace(/^www\./, '');
-const CONV_TYPES = ['text', 'sel', 'multi']; // 纯文本值列可在这三种呈现间切换
 /* 认不出的类型一律当文本。触发它的有两种情形：漏接了一种新类型（R4-#2 那次筛选浮层
    直接 TypeError），或者某种类型被撤掉而库里还留着旧字段（`star` 就是 2026-08-15 撤的）。
    退化成"当普通文本用"总好过表头画出个 undefined、或者浮层根本打不开。
    注意 `tpl` 到不了这里——`colFromField` 早把它映射成 text 了。 */
 const colType = (tab, k) => {
   const t = views[tab].types?.[k] || COLS[tab][k].t;
-  return TYPE_LABEL[t] ? t : 'text';
+  return TYPES[t] ? t : 'text';
 };
 
 // t：字段类型；conv=1 允许切换呈现类型；ord：勾选列表按词表序（默认按中文序）；
@@ -106,21 +103,12 @@ function sanitizeFilters(tab) {
    **tel/url/email 的渲染必须写在这里而不是各渲染器里**：库那侧 renderColl 走它，
    媒体的自定义列走 customTds → cellVal，两处写两份就会出现"同名同类型的列在媒体表
    是灰色纯文本、在续费库是可点链接"这种类型承诺只兑现一半的事。 */
+// 单元格渲染**只此一处**（媒体的自定义列也走它）：写成两份的下场是同名同类型的列
+// 在两张表里长得不一样。具体怎么渲染由类型表的 cell 说了算，没写就是纯文本
 function cellVal(tab, k, v) {
   if (v == null || v === '') return '';
-  const t = colType(tab, k);
-  if (t === 'multi') return tagsFor(tab, k, Array.isArray(v) ? v : splitVals(v));
-  if (t === 'sel') return tagFor(tab, k, v);
-  if (t === 'url') {
-    const href = safeUrl(v);
-    return href ? `<a href="${esc(href)}" target="_blank" rel="noreferrer">${esc(urlHost(v))} ↗</a>` : esc(String(v));
-  }
-  if (t === 'email') return `<a href="mailto:${esc(v)}">${esc(v)}</a>`;
-  if (t === 'tel') {
-    return `<a class="tel" href="${esc(telHref(v))}">${esc(v)}</a>`
-      + (telSuspect(v) ? '<span class="tel-warn" title="位数偏少，可能只填了国家码">?</span>' : '');
-  }
-  return esc(String(v));
+  const cell = TYPES[colType(tab, k)]?.cell;
+  return cell ? cell(v, tab, k) : esc(String(v));
 }
 
 /* ── 自定义列（/api/fields，值挂在行的 extra JSON，键 c<id>）── */
@@ -315,17 +303,6 @@ function colLabel(tab, k) {
 const FUNNEL_SVG = '<svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true"><path d="M1.4 1.6h9.2L7.4 5.9v3.4l-2.8 1.1V5.9L1.4 1.6Z"/></svg>';
 
 // 表头属性类型图标（Notion 式：Aa 文本 / # 数字 / ⊙ 单选 / ≔ 多选 / ◐ 状态 / 日历 / 星）
-const TYPE_ICON = {
-  status: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.6" opacity=".35"/><path d="M8 2.4a5.6 5.6 0 0 1 5.6 5.6"/></svg>',
-  text: '<svg viewBox="0 0 16 16"><text x="1.2" y="12" font-size="11" font-weight="600" fill="currentColor">Aa</text></svg>',
-  num: '<svg viewBox="0 0 16 16"><text x="4" y="12.6" font-size="12.5" font-weight="600" fill="currentColor">#</text></svg>',
-  sel: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6"/><path d="M5.6 7l2.4 2.4L10.4 7"/></svg>',
-  multi: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5.5 4h8M5.5 8h8M5.5 12h8"/><circle cx="2.4" cy="4" r=".95" fill="currentColor" stroke="none"/><circle cx="2.4" cy="8" r=".95" fill="currentColor" stroke="none"/><circle cx="2.4" cy="12" r=".95" fill="currentColor" stroke="none"/></svg>',
-  date: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="3.5" width="11" height="10" rx="1.6"/><path d="M2.5 6.8h11M5.6 2v2.6M10.4 2v2.6"/></svg>',
-  tel: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M5.2 2.4 6.6 5 5.3 6.6c.8 1.7 2.4 3.3 4.1 4.1L11 9.4l2.6 1.4v2.4c0 .5-.4.9-.9.8C7.2 13.5 2.5 8.8 1.8 3.3c-.1-.5.3-.9.8-.9z"/></svg>',
-  url: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M6.6 9.4a2.6 2.6 0 0 0 3.7 0l2.1-2.1a2.6 2.6 0 0 0-3.7-3.7l-.9.9"/><path d="M9.4 6.6a2.6 2.6 0 0 0-3.7 0L3.6 8.7a2.6 2.6 0 0 0 3.7 3.7l.9-.9"/></svg>',
-  email: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><rect x="2" y="3.6" width="12" height="8.8" rx="1.4"/><path d="m2.6 4.4 5.4 4 5.4-4"/></svg>',
-};
 
 // 各表列键的模板序快照（tbody 渲染恒为模板序，td 定位靠它；列序重排只动 thead/td 的 DOM 序）
 const TKEYS = {};
@@ -383,7 +360,7 @@ function initHead(tab) {
     }
     const ic = document.createElement('span');
     ic.className = 'ticon';
-    ic.innerHTML = TYPE_ICON[colType(tab, th.dataset.k)];
+    ic.innerHTML = TYPES[colType(tab, th.dataset.k)].icon;
     th.prepend(ic);
     initColDrag(tab, th);
     initColResize(tab, th);
@@ -930,7 +907,7 @@ function syncHeads(tab) {
       th.setAttribute('aria-sort', on ? (s.dir === 1 ? 'ascending' : 'descending') : 'none');
     }
     const ic = th.querySelector('.ticon');
-    if (ic) ic.innerHTML = TYPE_ICON[colType(tab, th.dataset.k)]; // 图标随有效类型
+    if (ic) ic.innerHTML = TYPES[colType(tab, th.dataset.k)].icon; // 图标随有效类型
   });
 }
 
@@ -979,7 +956,7 @@ const OP_MENU = {
    `OP_MENU[t][0][0]` 当场 TypeError——浮层不出现、无任何提示，而排序还照常，
    于是「所有列都可排序可筛选」这条不变量对新类型静默失守。filterPred 那侧一直是兜底
    走文本分支的，所以只差这一层映射。 */
-const opKind = t => (t === 'num' || t === 'date' ? t : 'text');
+const opKind = t => (TYPES[t]?.filter === 'num' || TYPES[t]?.filter === 'date' ? TYPES[t].filter : 'text');
 
 function opFilterBody(tab, k, t) {
   const cur = views[tab].filters[k];

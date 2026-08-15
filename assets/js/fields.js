@@ -223,7 +223,7 @@ function openNewColPop(tab, anchor) {
   popEl.innerHTML = `<div class="fp-head"><b>新建列</b></div>
     <div class="fp-form"><input class="fp-q" data-name placeholder="列名"></div>
     <div class="fp-form"><select class="mini-select fp-op" data-type>
-      ${['text', 'num', 'sel', 'multi', 'date', 'tel', 'url', 'email'].map(t => `<option value="${t}">${TYPE_LABEL[t]}</option>`).join('')}
+      ${Object.entries(TYPES).map(([t, s]) => `<option value="${t}">${s.label}</option>`).join('')}
     </select><button type="button" class="btn primary mini" data-go>创建</button></div>`;
   const go = async () => {
     const name = popEl.querySelector('[data-name]').value.trim();
@@ -273,7 +273,7 @@ function openTypeMenu(tab, th) {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'mi';
-    b.innerHTML = `<span class="ticon">${TYPE_ICON[t]}</span>${esc(TYPE_LABEL[t])}${t === cur ? '<span class="mon">✓</span>' : ''}`;
+    b.innerHTML = `<span class="ticon">${TYPES[t].icon}</span>${esc(TYPES[t].label)}${t === cur ? '<span class="mon">✓</span>' : ''}`;
     b.onclick = () => {
       closePop();
       const v = views[tab];
@@ -301,7 +301,7 @@ function openHeadMenu(tab, th) {
   const here = !!cur && cur.key === k;
   const items = [];
   items.push({
-    ticon: TYPE_ICON[t], t: `类型 · ${TYPE_LABEL[t]}`,
+    ticon: TYPES[t].icon, t: `类型 · ${TYPES[t].label}`,
     inert: !COLS[tab][k].conv,
     act: () => openTypeMenu(tab, th), keepPop: true,
   });

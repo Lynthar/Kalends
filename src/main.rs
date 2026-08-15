@@ -166,6 +166,7 @@ async fn index() -> Html<&'static str> {
 async fn js_file(Path(name): Path<String>) -> Response {
     let body = match name.as_str() {
         "core.js" => include_str!("../assets/js/core.js"),
+        "types.js" => include_str!("../assets/js/types.js"),
         "table.js" => include_str!("../assets/js/table.js"),
         "fields.js" => include_str!("../assets/js/fields.js"),
         "editors.js" => include_str!("../assets/js/editors.js"),

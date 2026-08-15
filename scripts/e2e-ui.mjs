@@ -2658,6 +2658,25 @@ await evl(`document.querySelector('#dlg-media').close(); state.page = 'renewals'
   document.querySelector('#page-media').hidden = true; document.querySelector('#page-renewals').hidden = false;`);
 await sleep(300);
 
+/* 17.31b. 属性内核：一种类型的行为集中在 TYPES 一张表里。这几条守的是"单一真源"本身——
+   以后再长出散落的 if，这里不会响；但表里少接一样（漏了筛选组、漏了图标）当场就翻。 */
+check('内核里每种类型都接齐了：名字 / 图标 / 筛选组', await evl(`(() => {
+  const ts = Object.entries(TYPES);
+  return ts.length >= 9 && ts.every(([t, s]) =>
+    !!s.label && !!s.icon && ['list', 'text', 'num', 'date'].includes(s.filter));
+})()`) === true);
+check('筛选分派与内核一致（勾选清单 vs 三组操作符，没有落空的）', await evl(`(() => {
+  return Object.keys(TYPES).every(t => TYPES[t].filter === 'list'
+    ? LIST_TYPES.includes(t)
+    : ['text', 'num', 'date'].includes(opKind(t)));
+})()`) === true);
+check('「新建列」下拉列的正是内核里那几种', await evl(`(() => {
+  openNewColPop('subs', document.querySelector('#view-subs th.ops'));
+  const opts = [...document.querySelectorAll('.optpop [data-type] option')].map(o => o.value).join(',');
+  closePop();
+  return opts === Object.keys(TYPES).join(',');
+})()`) === true);
+
 /* 17.32. 无障碍收尾与对比度：这批的价值不在"合规"，在于当前态与控件名字此前**只存在于视觉里**。
    刻意**不认领 role=tab**——那等于向读屏承诺方向键能在标签间移动，而我们没有那套键盘模型。 */
 await evl(`switchTab('subs')`);
