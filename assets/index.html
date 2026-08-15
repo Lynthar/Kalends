@@ -36,7 +36,7 @@
       <span class="brand-sub">朔日台账</span>
     </div>
   </div>
-  <nav class="nav">
+  <nav class="nav" aria-label="模块">
     <button class="nav-tab on" data-page="renewals" type="button">续费中心</button>
     <button class="nav-tab" data-page="media" type="button">媒体库</button>
   </nav>
@@ -50,7 +50,7 @@
       <button id="up-toggle" class="chev-btn" type="button" aria-expanded="true" aria-controls="up-body" title="折叠 / 展开"><span class="chev"></span></button>
       <h2 class="rubric" id="up-title">即将到期</h2>
       <span id="up-summary" class="up-summary" hidden></span>
-      <select id="up-window" class="mini-select tiny" title="显示窗口">
+      <select id="up-window" class="mini-select tiny" title="显示窗口" aria-label="到期显示窗口">
         <option value="7">7 天内</option>
         <option value="14">14 天内</option>
         <option value="30" selected>30 天内</option>
@@ -82,14 +82,14 @@
 
   <section class="panel">
     <div class="tabbar">
-      <div class="tabs">
+      <div class="tabs" role="group" aria-label="库">
         <button class="tab on" data-tab="subs" type="button">订阅</button>
         <button class="tab" data-tab="sims" type="button">SIM 卡</button>
         <button class="tab" data-tab="vps" type="button">VPS</button>
         <button id="coll-settings" class="tab tab-add" type="button" title="当前库的设置：改名 / 图标 / 到期模型 / 字段顺序">⚙</button>
       </div>
       <div class="tab-actions">
-        <input id="t-search" class="searchbox slim" placeholder="搜索本表…">
+        <input id="t-search" class="searchbox slim" placeholder="搜索本表…" aria-label="在当前库里搜索">
         <button id="coll-add" class="btn primary" type="button" title="建一个新库">＋ 新增库</button>
       </div>
     </div>
@@ -123,8 +123,8 @@
     <div class="tabbar">
       <div id="m-kind-chips" class="chips"></div>
       <div class="tab-actions">
-        <input id="m-search" class="searchbox" placeholder="搜标题 / 短评 / 导演 / 主演">
-        <select id="m-sort" class="mini-select">
+        <input id="m-search" class="searchbox" placeholder="搜标题 / 短评 / 导演 / 主演" aria-label="搜索媒体库">
+        <select id="m-sort" class="mini-select" aria-label="媒体排序方式">
           <option value="pos">手动</option>
           <option value="marked">标记日期</option>
           <option value="year">年份</option>

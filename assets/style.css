@@ -5,7 +5,7 @@
   --surface: #ffffff;
   --surface-2: #ecf6f1;
   --ink: #0e3833;
-  --ink-2: #5b7d76;
+  --ink-2: #56766f; /* 4.70/4.98/4.51:1，都过 WCAG AA 小字的 4.5（原 #5b7d76 是 4.27/4.53/4.10） */
   --line: #d9ebe4;
   --aqua: #0db09f;
   --aqua-deep: #067f72;
@@ -654,7 +654,7 @@ dialog h3 {
   border-bottom: 1px solid var(--line); padding-bottom: .55rem;
 }
 .fgrid { display: grid; grid-template-columns: 1fr 1fr; gap: .7rem .9rem; }
-.fgrid label { display: flex; flex-direction: column; gap: .27rem; font-size: .76rem; font-weight: 600; color: var(--ink-2); letter-spacing: .03em; }
+.fgrid label, .fgrid .field { display: flex; flex-direction: column; gap: .27rem; font-size: .76rem; font-weight: 600; color: var(--ink-2); letter-spacing: .03em; }
 .fgrid .span2 { grid-column: span 2; }
 .fgrid input, .fgrid select, .fgrid textarea, .ics-row input {
   font: inherit; font-size: .92rem; font-weight: 500; color: var(--ink);

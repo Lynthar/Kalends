@@ -1978,9 +1978,11 @@ function currencyOptions(tab, cur) {
    而全 iOS 都是 WebKit，嗅探不掉。同一个问题在这个项目里已经有惯用解，就别造第二种。 */
 function currencyPicker(tab, cur, attrs) {
   const opts = currencyOptions(tab, cur);
-  return `<span class="sopts"><select class="mini-select" ${attrs}><option value="">—</option>${
+  // 费用格是「金额 + 币种」两枚控件共一个 label，而 label 只关联第一枚——币种得自报名字
+  return `<span class="sopts"><select class="mini-select" aria-label="币种" ${attrs}><option value="">—</option>${
     opts.map(c => `<option value="${esc(c)}"${c === cur ? ' selected' : ''}>${esc(c)}</option>`).join('')
-  }</select><input class="sopt-add cur-add" placeholder="新币种，回车加入" maxlength="8"></span>`;
+  }</select><input class="sopt-add cur-add" placeholder="新币种，回车加入" maxlength="8"
+    aria-label="加一个新币种，回车加入"></span>`;
 }
 
 /* 费用格是复合格：金额 + 币种（币种不再单独占一列，2026-08-07 合并）。
@@ -2566,7 +2568,13 @@ document.querySelectorAll('.nav-tab[data-page]').forEach(b => b.onclick = () => 
   state.page = b.dataset.page;
   closePop();
   clearAllSel(); // 选区跟着看得见的那张表走，换页就散掉，免得批量删到看不见的表里
-  document.querySelectorAll('.nav-tab[data-page]').forEach(x => x.classList.toggle('on', x === b));
+  document.querySelectorAll('.nav-tab[data-page]').forEach(x => {
+    x.classList.toggle('on', x === b);
+    // 「当前在哪一页」此前只有那条水色下划线表达，读屏完全听不出来。
+    // **不认领 role=tab**：那等于向读屏承诺方向键能在标签间移动，而我们没有那套键盘模型，
+    // 半套的 tablist 比不做更糟（用户按了方向键没反应，只会以为页面坏了）
+    if (x === b) x.setAttribute('aria-current', 'page'); else x.removeAttribute('aria-current');
+  });
   $('#page-renewals').hidden = state.page !== 'renewals';
   $('#page-media').hidden = state.page !== 'media';
   applyWidths(state.page === 'media' ? 'media' : state.tab); // 隐藏页里量不到自然宽，可见了补排
@@ -2588,6 +2596,8 @@ document.querySelectorAll('.nav-tab[data-page]').forEach(b => b.onclick = () => 
     $('#page-media').hidden = false;
   }
   if (!(hasR && hasM)) document.querySelector('.nav').hidden = true;
+  // 首屏也要标一次「当前页」——上面那两个 classList 只改了视觉
+  document.querySelector('.nav-tab.on')?.setAttribute('aria-current', 'page');
 })();
 
 $('#btn-settings').onclick = openSettings;
@@ -2597,7 +2607,11 @@ function switchTab(key) {
   closePop();
   clearAllSel(); // 同上：选区不跨表带走
   $('#t-search').value = views[key]?.q || '';
-  document.querySelectorAll('.tab[data-tab]').forEach(x => x.classList.toggle('on', x.dataset.tab === key));
+  document.querySelectorAll('.tab[data-tab]').forEach(x => {
+    const on = x.dataset.tab === key;
+    x.classList.toggle('on', on);
+    if (on) x.setAttribute('aria-current', 'true'); else x.removeAttribute('aria-current');
+  });
   document.querySelectorAll('.tablewrap[data-tab]').forEach(w => { w.hidden = w.dataset.tab !== key; });
   applyWidths(key); // 隐藏页里量不到自然宽，可见了补排
   renderViewPills(key); // 共用的胶囊行切到当前表
@@ -3083,23 +3097,37 @@ function openItemDialog(key, it) {
 }
 
 /* 一个字段 → 一枚表单控件。库的详情表单与媒体表单的自定义列共用这一份，
-   免得多选/星级/单选这几种非平凡控件各写一遍、各漏一处。 */
+   免得多选/单选这几种非平凡控件各写一遍、各漏一处。
+
+   **一个 `<label>` 只配一枚控件**：多选是一串各带自己 label 的勾选框，外层再套 label 就是
+   嵌套（规范不允许，读屏读出的关联也是错的），所以那一支用 `div[role=group]` +
+   `aria-labelledby` —— 拿到的可访问性结果一样，还不用背 fieldset 的默认边框与
+   grid 里 `min-width:auto` 那些包袱。栅格样式因此要认 `.field`（见 `.fgrid label, .fgrid .field`）。 */
+let grpSeq = 0;
 function fieldControl(key, f, it) {
   const v = it ? fieldRaw(f, it) : ''; // 编辑值，不是格子里那份呈现
   const val = Array.isArray(v) ? v.join(', ') : (v ?? '');
-  const lab = document.createElement('label');
+  const grouped = f.ftype === 'multi'; // 里面是一串控件，不是单独一枚
+  const lab = document.createElement(grouped ? 'div' : 'label');
+  if (grouped) {
+    const gid = `grp-${++grpSeq}`;
+    lab.className = 'field';
+    lab.setAttribute('role', 'group');
+    lab.setAttribute('aria-labelledby', gid);
+    lab.dataset.gid = gid;
+  }
   if (f.ftype === 'multi') {
     // 勾选清单，不是逗号分隔的文本框——值里含 , ， 、 / 时，文本框存回去会把它拆成两个
     const cur = new Set(Array.isArray(v) ? v.map(String) : v ? [String(v)] : []);
     const opts = fieldOptions(key, f);
     for (const x of cur) if (!opts.includes(x)) opts.push(x);
-    lab.className = 'span2';
+    lab.className = 'field span2';
     // 勾选框超过三行就在自己的框里滚（长词表如 VPS 地点有 19 个值，否则把费用/到期挤出首屏）；
     // 「新选项」输入框留在滚动框外，不然想加值得先滚到底
-    lab.innerHTML = `<span>${esc(f.name || f.key)}</span>
+    lab.innerHTML = `<span id="${lab.dataset.gid}">${esc(f.name || f.key)}</span>
       <span class="mopts"><span class="mchecks" data-mbox="${esc(f.key)}">${opts.map(o =>
         `<label class="check"><input type="checkbox" value="${esc(o)}"${cur.has(o) ? ' checked' : ''}><span>${esc(o)}</span></label>`
-      ).join('')}</span><input class="mopt-add" placeholder="新选项，回车加入"></span>`;
+      ).join('')}</span><input class="mopt-add" placeholder="新选项，回车加入" aria-label="给「${esc(f.name || f.key)}」加一个新选项，回车加入"></span>`;
     initMoptAdd(lab.querySelector('.mopt-add'));
   } else if (f.ftype === 'sel') {
     const cur = val === '' ? '' : String(val);
@@ -3107,7 +3135,8 @@ function fieldControl(key, f, it) {
       `<option value="${esc(o.v)}"${o.v === cur ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}</select>`;
     // 开放词表配一个「新选项」输入框，不然空库首装时这一栏是个填不出东西的死胡同
     lab.innerHTML = `<span>${esc(f.name || f.key)}</span>`
-      + (fixedVocab(f) ? sel : `<span class="sopts">${sel}<input class="sopt-add" placeholder="新选项，回车加入"></span>`);
+      + (fixedVocab(f) ? sel : `<span class="sopts">${sel}<input class="sopt-add" placeholder="新选项，回车加入"
+          aria-label="给「${esc(f.name || f.key)}」加一个新选项，回车加入"></span>`);
     if (!fixedVocab(f)) initSoptAdd(lab.querySelector('.sopt-add'));
   } else if (f.ftype === 'status') {
     const opts = statusOrder(key);
@@ -3169,9 +3198,13 @@ function syncGrabBtn() {
    （全量替换那会儿必须把 editingItem.row.logo 同步回去，否则紧接着按「保存」就把刚传的
    图标清掉了；现在 paint() 仍然同步它，是为了让表单里的预览与本次上传一致。） */
 function logoRow(it) {
-  const lab = document.createElement('label');
-  lab.className = 'span2';
-  lab.innerHTML = `<span>图标</span>
+  // 里面是三颗按钮加一个文件选择框，不是单独一枚控件——用 group 而不是 label：
+  // 套在 label 里的话它会关联到那个隐藏的 file input，点按钮还可能顺带触发一次文件选择
+  const lab = document.createElement('div');
+  lab.className = 'field span2';
+  lab.setAttribute('role', 'group');
+  lab.setAttribute('aria-labelledby', 'logo-row-label');
+  lab.innerHTML = `<span id="logo-row-label">图标</span>
     <span class="logo-row">
       <span class="logo-prev"></span>
       <button type="button" class="btn ghost mini" data-logo-pick>选择图片</button>
