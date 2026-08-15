@@ -2658,6 +2658,49 @@ await evl(`document.querySelector('#dlg-media').close(); state.page = 'renewals'
   document.querySelector('#page-media').hidden = true; document.querySelector('#page-renewals').hidden = false;`);
 await sleep(300);
 
+/* 17.31a. schema 与 view 是两层：字段序与「上表」跟着账本走（服务端 fields），
+   列宽/列序/隐藏/排序/筛选各设备各记（本机 views）。两层唯一会打架的是列序——
+   本机那份覆写会盖住刚在库设置里排好的字段序，**由 settleView 自动结算**，
+   而不是靠调用方"记得"清一次（从前那句手动清就住在字段面板的保存回调里）。 */
+await evl(`switchTab('subs')`);
+await sleep(300);
+const svKeys = await evl(`TKEYS.subs.slice(0, 3).join(',')`);
+// 先在本机拖出一份列序覆写
+await evl(`(() => { const o = [...TKEYS.subs]; o.unshift(o.splice(o.indexOf('status'), 1)[0]);
+  views.subs.order = o; saveViews(); renderColl('subs'); })()`);
+await sleep(300);
+check('本机列序覆写生效（状态被拖到最前）', await evl(
+  `document.querySelector('#view-subs thead th').dataset.k`) === 'status');
+// 服务端改字段序：列集没变、只是换了次序
+const svFields = (await (await fetch(APP + 'api/fields')).json()).filter(f => f.tbl === 'subs').sort((a, b) => a.pos - b.pos);
+const svOrder = svFields.map(f => f.key);
+await put('/api/fields/order', { tbl: 'subs', keys: [...svOrder.slice(1), svOrder[0]] });
+await evl(`loadAll()`);
+await sleep(900);
+check('服务端字段序一变，本机那份过期的列序覆写自动作废', await evl(`views.subs.order`) === null);
+await put('/api/fields/order', { tbl: 'subs', keys: svOrder }); // 还原
+await evl(`loadAll()`);
+await sleep(800);
+check('两层的边界在界面上说得出来', await evl(`(() => {
+  const note = document.querySelector('#coll-fields-box .fp-note')?.textContent || '';
+  return note.includes('所有设备一致');
+})()`) === true || await evl(`(() => {
+  openCollDialog(collOf('subs'));
+  const note = document.querySelector('#coll-fields-box .fp-note')?.textContent || '';
+  document.querySelector('#dlg-coll').close();
+  return note.includes('所有设备一致');
+})()`) === true);
+// 「还原列宽」只在真有手动列宽时才出现——先把那个前提造出来，否则这条断言没有区分度
+check('表头菜单里的本机项标了「仅本机」', await evl(`(() => {
+  views.subs.widths = { ...views.subs.widths, notes: 180 };
+  document.querySelector('#view-subs thead th[data-k="notes"]').click();
+  const txt = [...document.querySelectorAll('.thmenu .mi')].map(x => x.textContent).join('|');
+  closePop();
+  views.subs.widths = {};
+  saveViews();
+  return txt.includes('隐藏此列（仅本机）') && txt.includes('还原列宽（仅本机）');
+})()`) === true);
+
 /* 17.31b. 属性内核：一种类型的行为集中在 TYPES 一张表里。这几条守的是"单一真源"本身——
    以后再长出散落的 if，这里不会响；但表里少接一样（漏了筛选组、漏了图标）当场就翻。 */
 check('内核里每种类型都接齐了：名字 / 图标 / 筛选组', await evl(`(() => {

@@ -690,7 +690,8 @@ function collDialog() {
         <label><span>到期动作说法</span><input data-c="verb" placeholder="续费"></label>
       </div>
       <div id="coll-fields-box" hidden>
-        <div class="fp-note">字段：拖动调序（对所有设备生效），关掉「上表」的只留在详情表单里</div>
+        <div class="fp-note">字段是这个库自己的属性：拖动调序、关掉「上表」都<b>跟着账本走、所有设备一致</b>。
+          列宽 / 列序 / 隐藏 / 排序 / 筛选是每台设备各自记的，改这里会把本机那份列序覆写作废。</div>
         <div id="coll-fields" class="fpanel"></div>
       </div>
       <footer>
@@ -735,8 +736,11 @@ function pickTpl(d, t) {
   fillTplChips(d);
 }
 
-/* 字段面板：库级的字段顺序与「上不上表」。顺序落 fields.pos，对所有设备生效，
-   所以调完顺手清掉本机那份列序覆写，否则用户看不到自己刚排的结果。 */
+/* 字段面板：库级的字段顺序与「上不上表」。**这一层是账本自己的属性**（落 `fields.pos`/`shown`），
+   跟着库走、所有设备一致；而「列宽 / 列序 / 隐藏列 / 排序 / 筛选」是**本机视图**，各设备各记各的
+   （CLAUDE.md 有明文，手机和电脑本就该能各看各的）。两层的边界只有一处会打架：本机列序覆写
+   会盖住这里刚排好的字段序——**那件事由 `settleView` 自动结算**（服务端序一变，过期的本机覆写
+   就丢掉），这里不必也不该再手动清一次。 */
 function fillCollFields(c) {
   const box = $('#coll-fields-box');
   box.hidden = !c;
@@ -747,9 +751,7 @@ function fillCollFields(c) {
   const apply = async body => {
     try {
       await api('/api/fields/order', { method: 'PUT', body: JSON.stringify(body) });
-      views[c.key].order = null;
-      saveViews();
-      await rebuildHead(c.key);
+      await rebuildHead(c.key); // 本机那份过期的列序覆写由 settleView 结算，见上方注释
       fillCollFields(c);
     } catch (err) { toast(err.message, true); }
   };

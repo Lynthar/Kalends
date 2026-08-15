@@ -322,14 +322,14 @@ function openHeadMenu(tab, th) {
   // 名称列不给隐藏：行的 ⤢ 详情入口与子行折叠钮都长在这一格里，撤掉它整库就没了全表单入口。
   // 后端 PUT /api/fields/{id} 同样拒绝把它设成 shown=0，这里是本机视图那条口子。
   if (k !== 'name') {
-    items.push({ ic: '⊘', t: '隐藏此列', act: () => {
+    items.push({ ic: '⊘', t: '隐藏此列（仅本机）', act: () => {
       v.hiddenCols = [...(v.hiddenCols || []), k];
       saveViews();
       RENDER[tab]();
     } });
   }
   if (Object.keys(v.widths || {}).length) {
-    items.push({ ic: '⟺', t: '还原列宽', act: () => { v.widths = {}; saveViews(); applyWidths(tab); } });
+    items.push({ ic: '⟺', t: '还原列宽（仅本机）', act: () => { v.widths = {}; saveViews(); applyWidths(tab); } });
   }
   // 值挂在 extra 里的列都归用户管——手加的自定义列，以及建库时按模板播下来的域字段。
   // 判据用 src 而不是 builtin：预置库的分类/地点/规格参数一样是域字段，凭什么不能改名删除；

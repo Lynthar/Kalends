@@ -325,6 +325,11 @@ function settleView(tab, keys) {
     // 列集变了（加删列等）：温和迁移——只丢消失列的偏好，新列插到操作列前
     for (const k of Object.keys(v.widths)) if (!keys.includes(k)) delete v.widths[k];
     v.hiddenCols = v.hiddenCols.filter(k => keys.includes(k));
+    // **服务端字段序变了（列集没增没减、只是换了次序）⇒ 本机这份列序覆写已经过期**：
+    // 它是针对旧序说的，留着就等于"在库设置里排完序，表格纹丝不动"。
+    // 这条规则从前住在字段面板的保存回调里（那里要"记得"清一次），搬到这儿之后
+    // 无论从哪个入口改的序都自动结算——两处管同一件事时，判定要放在结算的地方
+    if (v.keys.length === keys.length && v.keys.every(k => keys.includes(k))) v.order = null;
     if (v.order) {
       const o = v.order.filter(k => keys.includes(k));
       const fresh = keys.filter(k => !o.includes(k) && k !== 'ops');
