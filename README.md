@@ -47,7 +47,7 @@ cargo run     # http://127.0.0.1:4180, data in ./data/
 
 TMDB lookups need a free API key, entered on the settings page. On a phone, "add to home screen" gives you a full-screen app.
 
-For a real deployment (Docker Compose, reverse proxy, single-module setups) see [deploy/DEPLOY.md](deploy/DEPLOY.md). Environment variables: `KALENDS_ADDR` (default `127.0.0.1:4180`), `KALENDS_DATA` (default `./data`), `KALENDS_MODULES` (default `renewals,media`).
+For a real deployment (Docker Compose, reverse proxy, single-module setups) see [docs/user-guide.md](docs/user-guide.md). Environment variables: `KALENDS_ADDR` (default `127.0.0.1:4180`), `KALENDS_DATA` (default `./data`), `KALENDS_MODULES` (default `renewals,media`).
 
 Behind a restrictive network, the settings page has one shared outbound proxy covering TMDB lookups, exchange-rate refreshes and favicon fetches; Telegram gets its own proxy field.
 
@@ -105,7 +105,7 @@ cargo run    # http://127.0.0.1:4180，数据在 ./data/
 
 TMDB 抓取要先在设置页填一个免费申请的 API key。手机上「添加到主屏幕」可以全屏运行。
 
-生产部署（Docker Compose、反向代理、单模块开关）见 [deploy/DEPLOY.md](deploy/DEPLOY.md)。环境变量：`KALENDS_ADDR`（默认 `127.0.0.1:4180`）、`KALENDS_DATA`（默认 `./data`）、`KALENDS_MODULES`（默认 `renewals,media`）。
+生产部署（Docker Compose、反向代理、单模块开关）见 [docs/user-guide.md](docs/user-guide.md)。环境变量：`KALENDS_ADDR`（默认 `127.0.0.1:4180`）、`KALENDS_DATA`（默认 `./data`）、`KALENDS_MODULES`（默认 `renewals,media`）。
 
 SQLite 文件务必放本地磁盘，SMB / NFS 的文件锁不够可靠，别拿账本去赌。被墙的网络环境里，设置页有一个共用的出网代理（管 TMDB、汇率、取图标），Telegram 另有自己的一格。
 
