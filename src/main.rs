@@ -129,7 +129,18 @@ async fn pin_gate(State(app): State<App>, req: Request, next: Next) -> Response 
     }
     let required = {
         let conn = app.db.lock().unwrap();
-        db::get_setting(&conn, "auth.pin").unwrap_or_default()
+        // 读不出设置 ≠ 没设 PIN：把数据库故障折成空串，门会在最不该开的时候敞开
+        match db::get_setting_checked(&conn, "auth.pin") {
+            Ok(v) => v.unwrap_or_default(),
+            Err(e) => {
+                tracing::error!("pin gate cannot read settings: {e}");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "error": "设置读不出来，先检查数据库" })),
+                )
+                    .into_response();
+            }
+        }
     };
     if required.is_empty() {
         return next.run(req).await;
@@ -233,4 +244,58 @@ async fn shutdown() {
     #[cfg(not(unix))]
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::util::ServiceExt;
+
+    fn gated_app(conn: rusqlite::Connection) -> Router {
+        let app = App {
+            db: Arc::new(Mutex::new(conn)),
+            data_dir: PathBuf::from("."),
+            modules: Vec::new(),
+        };
+        Router::new()
+            .route("/api/ping", get(|| async { "pong" }))
+            .with_state(app.clone())
+            .layer(middleware::from_fn_with_state(app, pin_gate))
+    }
+
+    async fn status_of(app: Router, req: Request<Body>) -> StatusCode {
+        app.oneshot(req).await.unwrap().status()
+    }
+
+    /// PIN 门必须**故障即关死**：把"读不出设置"折成"没设 PIN"，settings 表一坏，
+    /// 受保护的接口就从 401 变成 200——修复前这条测试的观测值正是 200。
+    #[tokio::test]
+    async fn the_pin_gate_fails_closed_when_settings_cannot_be_read() {
+        let ping = || Request::get("/api/ping").body(Body::empty()).unwrap();
+        // 没设 PIN：放行
+        let conn = db::fresh_in_memory().unwrap();
+        assert_eq!(status_of(gated_app(conn), ping()).await, StatusCode::OK);
+
+        // 设了 PIN：不带凭据 401，带对了放行
+        let conn = db::fresh_in_memory().unwrap();
+        conn.execute("INSERT INTO settings(key,value) VALUES('auth.pin','1234')", [])
+            .unwrap();
+        let app = gated_app(conn);
+        assert_eq!(status_of(app.clone(), ping()).await, StatusCode::UNAUTHORIZED);
+        let with_pin = Request::get("/api/ping")
+            .header("x-kalends-pin", "1234")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(status_of(app, with_pin).await, StatusCode::OK);
+
+        // settings 表读不出来：503，绝不能放行
+        let conn = db::fresh_in_memory().unwrap();
+        conn.execute_batch("DROP TABLE settings").unwrap();
+        assert_eq!(
+            status_of(gated_app(conn), ping()).await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
 }

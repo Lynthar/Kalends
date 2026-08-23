@@ -12,10 +12,12 @@ use std::collections::HashMap;
 use crate::api::{bad, f, i, missing, s, ApiError, R};
 use crate::{db, tmdb, App};
 
+// cover 不在可写列里：文件名由服务端生成、删条目按行内名字删文件——放开它就能把 A 的
+// 海报名写进 B，删 B 时连 A 的海报一起删掉。TMDB 建档与补抓各有专用端点。
 const STR_FIELDS: &[&str] = &[
     "kind", "title", "orig_title", "status", "marked_at", "started_at", "review",
     "others_reviews", "genres", "directors", "writers", "actors", "countries", "languages",
-    "runtime", "release_date", "douban_id", "douban_url", "imdb_id", "platform", "cover", "notes",
+    "runtime", "release_date", "douban_id", "douban_url", "imdb_id", "platform", "notes",
 ];
 const INT_FIELDS: &[&str] = &["year", "rating", "douban_votes", "tmdb_id", "steam_appid"];
 const REAL_FIELDS: &[&str] = &["douban_rating", "playtime_hours"];
@@ -35,32 +37,21 @@ pub fn router() -> Router<App> {
         .route("/covers/{name}", get(cover_file))
 }
 
-/// 请求里出现的数字键必须真的是数字。`values_of` 读不出来就写 NULL，而键明明在请求里——
-/// 「出现即写入」的协议下那是一次静默清空（评分填 8.5 就这样把分数丢过，还回 200）。
-/// `""` 与 `null` 仍按协议表示清空。
-fn check_numbers(b: &Value) -> Result<(), ApiError> {
-    let clearing = |v: &&Value| v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty());
-    for k in INT_FIELDS {
-        if let Some(v) = b.get(*k).filter(|v| !clearing(v)) {
-            if v.as_i64().is_none() {
-                return Err(bad(format!("{k} 要写成整数")).into());
-            }
-        }
+/// 请求里出现的键必须是它该有的类型（共享 `api::check_shape`）。`values_of` 读不出来
+/// 就写 NULL，而键明明在请求里——「出现即写入」的协议下那是一次静默清空
+/// （标题传成数字就这样变空串，还回 200）。`""` 与 `null` 仍按协议表示清空。
+fn check_incoming(b: &Value) -> Result<(), ApiError> {
+    if b.get("cover").is_some_and(|v| !(v.is_null() || v.as_str() == Some(""))) {
+        return Err(bad("封面不走这里：TMDB 建档与补抓各有专用端点").into());
     }
-    for k in REAL_FIELDS {
-        if let Some(v) = b.get(*k).filter(|v| !clearing(v)) {
-            if v.as_f64().is_none() {
-                return Err(bad(format!("{k} 要写成数字")).into());
-            }
-        }
-    }
+    crate::api::check_shape(b, STR_FIELDS, INT_FIELDS, REAL_FIELDS)?;
     Ok(())
 }
 
 /// 写入口的校验与规范化，**只作用在这次请求带来的键上**：缺席的键在局部更新里来自库中
 /// 现值，拿它去过校验等于让一个陈年坏值把整行锁死（与 `collections::update_item` 同款）。
 fn shape_incoming(conn: &Connection, b: &mut Value) -> Result<(), ApiError> {
-    check_numbers(b)?;
+    check_incoming(b)?;
     // 评分 1–10（迁移 0019）；不填＝没评分是允许的，填了就得在范围内——
     // 越界的数字会一路渲染到界面，也让排序筛选失去意义
     if let Some(r) = i(b, "rating") {
@@ -395,6 +386,9 @@ async fn from_tmdb(State(app): State<App>, Json(b): Json<Value>) -> R {
         shape_incoming(&conn, &mut fields)?;
         insert(&conn, &with_defaults(fields))?
     };
+    // 海报是否真的落了盘要如实报出去：只回 id 的话，前端只能一律提示"海报已缓存"，
+    // 下载失败时用户看到的是一句假话
+    let mut poster_ok = false;
     if let Some(p) = poster {
         match client.poster(&p).await {
             Ok(bytes) => {
@@ -407,11 +401,12 @@ async fn from_tmdb(State(app): State<App>, Json(b): Json<Value>) -> R {
                     "UPDATE media_items SET cover=?1 WHERE id=?2",
                     params![name, id],
                 )?;
+                poster_ok = true;
             }
             Err(e) => tracing::warn!("poster download failed for {id}: {e:#}"),
         }
     }
-    Ok(Json(json!({ "id": id })))
+    Ok(Json(json!({ "id": id, "poster": poster_ok })))
 }
 
 /// 去掉"第N季"式后缀，剧集每季一条时用底本剧名去 TMDB 搜索。
@@ -515,22 +510,29 @@ async fn cover_file(
 mod tests {
     use super::*;
 
-    /// 出现在请求里的数字键读不出来时必须报错，不能悄悄写成 NULL：
-    /// 「出现即写入」的协议下那是一次静默清空——评分填 8.5 就这样把分数丢过，
-    /// 而界面上看到的是保存成功。
+    /// 出现在请求里的键读不出来时必须报错，不能悄悄写成 NULL / 空串：
+    /// 「出现即写入」的协议下那是一次静默清空——评分填 8.5、标题传成数字，
+    /// 都这样把值丢掉，而界面上看到的是保存成功。
     #[test]
-    fn a_number_that_cannot_be_read_is_refused_not_silently_dropped() {
-        assert!(check_numbers(&json!({ "rating": 8 })).is_ok());
-        assert!(check_numbers(&json!({ "rating": 8.5 })).is_err());
-        assert!(check_numbers(&json!({ "year": 2026.5 })).is_err());
-        assert!(check_numbers(&json!({ "rating": "八分" })).is_err());
+    fn a_value_that_cannot_be_read_is_refused_not_silently_dropped() {
+        assert!(check_incoming(&json!({ "rating": 8 })).is_ok());
+        assert!(check_incoming(&json!({ "rating": 8.5 })).is_err());
+        assert!(check_incoming(&json!({ "year": 2026.5 })).is_err());
+        assert!(check_incoming(&json!({ "rating": "八分" })).is_err());
         // 小数列照收小数，字符串仍然不行
-        assert!(check_numbers(&json!({ "douban_rating": 8.4 })).is_ok());
-        assert!(check_numbers(&json!({ "douban_rating": "高" })).is_err());
+        assert!(check_incoming(&json!({ "douban_rating": 8.4 })).is_ok());
+        assert!(check_incoming(&json!({ "douban_rating": "高" })).is_err());
+        // 字符串列传成数字/数组同样拒；extra 必须是对象
+        assert!(check_incoming(&json!({ "title": 123 })).is_err());
+        assert!(check_incoming(&json!({ "review": ["数组"] })).is_err());
+        assert!(check_incoming(&json!({ "extra": "不是对象" })).is_err());
+        // 封面不走通用写入口（与条目 logo 同一条归属防线）；null 按「不在可写集」忽略
+        assert!(check_incoming(&json!({ "cover": "1.jpg" })).is_err());
+        assert!(check_incoming(&json!({ "cover": null, "review": "行" })).is_ok());
         // 清空按协议来：`null` 与空串都算，缺席更不必说
-        assert!(check_numbers(&json!({ "rating": null })).is_ok());
-        assert!(check_numbers(&json!({ "rating": "" })).is_ok());
-        assert!(check_numbers(&json!({ "title": "只改标题" })).is_ok());
+        assert!(check_incoming(&json!({ "rating": null })).is_ok());
+        assert!(check_incoming(&json!({ "rating": "" })).is_ok());
+        assert!(check_incoming(&json!({ "title": "只改标题" })).is_ok());
 
         // 光有这个纯函数不算数，写入口得真的调它——下面这几条走的是 update 的那条路
         let conn = crate::db::fresh_in_memory().unwrap();
@@ -550,6 +552,20 @@ mod tests {
             .query_row("SELECT rating FROM media_items WHERE id=?1", [id], |r| r.get(0))
             .unwrap();
         assert_eq!(cleared, None);
+        // 字符串列同一条路：标题传成数字被拒，存的值原样
+        assert!(update_row(&conn, id, json!({ "title": 123 })).is_err());
+        let title: String = conn
+            .query_row("SELECT title FROM media_items WHERE id=?1", [id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(title, "打过分的片");
+        // cover 不在可写集：PATCH 带值被拒，专用端点写进去的值 PATCH 不碰
+        conn.execute("UPDATE media_items SET cover='1.jpg' WHERE id=?1", [id]).unwrap();
+        assert!(update_row(&conn, id, json!({ "cover": "2.jpg" })).is_err());
+        update_row(&conn, id, json!({ "review": "改短评" })).unwrap();
+        let cover: Option<String> = conn
+            .query_row("SELECT cover FROM media_items WHERE id=?1", [id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cover.as_deref(), Some("1.jpg"), "PATCH 不该碰 cover");
     }
 
     /// 缺省值只能补在合并之后：补在请求上，「只改一个键」的 PATCH 会把库里存着的

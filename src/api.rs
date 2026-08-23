@@ -113,23 +113,68 @@ pub fn extra_json(text: Option<String>) -> Value {
         .unwrap_or_else(|| json!({}))
 }
 
-async fn health(State(app): State<App>) -> R {
-    let conn = app.db.lock().unwrap();
-    let count = |table: &str| -> i64 {
-        conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
-            .unwrap_or(-1)
-    };
-    Ok(Json(json!({
-        "ok": true,
-        "version": env!("CARGO_PKG_VERSION"),
-        "modules": app.modules,
-        "counts": {
-            "collections": count("collections"),
-            "items": count("items"),
-            "media_items": count("media_items"),
-            "renewal_ledger": count("renewal_ledger"),
+/// 类型校验，**只作用于这次请求里出现的键**：取值函数（`s`/`f`/`i`）读不出来就给 None，
+/// 「出现即写入」的协议下那是一次静默清空，还回 200。`""` 与 `null` 仍按协议表示清空；
+/// `extra` 出现时必须是对象（`""`/`null` 同样算清空）。
+pub fn check_shape(b: &Value, strs: &[&str], ints: &[&str], reals: &[&str]) -> anyhow::Result<()> {
+    let clearing = |v: &&Value| v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty());
+    for k in strs {
+        if let Some(v) = b.get(*k).filter(|v| !clearing(v)) {
+            if !v.is_string() {
+                return Err(bad(format!("{k} 要写成文本")));
+            }
         }
-    })))
+    }
+    for k in ints {
+        if let Some(v) = b.get(*k).filter(|v| !clearing(v)) {
+            if v.as_i64().is_none() {
+                return Err(bad(format!("{k} 要写成整数")));
+            }
+        }
+    }
+    for k in reals {
+        if let Some(v) = b.get(*k).filter(|v| !clearing(v)) {
+            if v.as_f64().is_none() {
+                return Err(bad(format!("{k} 要写成数字")));
+            }
+        }
+    }
+    if let Some(v) = b.get("extra").filter(|v| !clearing(v)) {
+        if !v.is_object() {
+            return Err(bad("extra 要是对象"));
+        }
+    }
+    Ok(())
+}
+
+/// 健康详情。任何一张表读不出来就 ok=false——状态码必须跟着变：容器探针与监控只看
+/// 状态码，200 + ok:true 会把缺表的实例标成健康（`--health` 的判据是 <500，PIN 的 401 仍算活）。
+pub(crate) fn health_payload(conn: &rusqlite::Connection, modules: &[String]) -> (bool, Value) {
+    let count = |table: &str| -> Option<i64> {
+        conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .ok()
+    };
+    let tables = ["collections", "items", "media_items", "renewal_ledger"];
+    let counts: Vec<(&str, Option<i64>)> = tables.iter().map(|t| (*t, count(t))).collect();
+    let ok = counts.iter().all(|(_, n)| n.is_some());
+    let counts: serde_json::Map<String, Value> = counts
+        .into_iter()
+        .map(|(t, n)| (t.to_string(), json!(n.unwrap_or(-1))))
+        .collect();
+    let payload = json!({
+        "ok": ok,
+        "version": env!("CARGO_PKG_VERSION"),
+        "modules": modules,
+        "counts": counts,
+    });
+    (ok, payload)
+}
+
+async fn health(State(app): State<App>) -> Response {
+    let conn = app.db.lock().unwrap();
+    let (ok, payload) = health_payload(&conn, &app.modules);
+    let status = if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    (status, Json(payload)).into_response()
 }
 
 async fn overview(State(app): State<App>) -> R {
@@ -271,4 +316,47 @@ async fn calendar(
         body,
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 传错类型必须报错，不能落成 None 再被写成 NULL——「出现即写入」的协议下
+    /// 那是一次静默清空，界面上还显示保存成功。
+    #[test]
+    fn a_wrongly_typed_key_is_refused_not_read_as_absent() {
+        let strs = ["name"];
+        let ints = ["cycle_days"];
+        let reals = ["price"];
+        let chk = |b: &Value| check_shape(b, &strs, &ints, &reals);
+        assert!(chk(&json!({ "name": "文本", "cycle_days": 30, "price": 9.5 })).is_ok());
+        assert!(chk(&json!({ "name": 123 })).is_err());
+        assert!(chk(&json!({ "cycle_days": "三十" })).is_err());
+        assert!(chk(&json!({ "cycle_days": 2.5 })).is_err());
+        assert!(chk(&json!({ "price": "不是数字" })).is_err());
+        assert!(chk(&json!({ "extra": ["不是对象"] })).is_err());
+        assert!(chk(&json!({ "extra": "也不是" })).is_err());
+        // 清空按协议来：null 与空串都算；缺席的键与未列出的键都不校验
+        assert!(chk(&json!({ "name": null, "cycle_days": "", "price": null, "extra": null })).is_ok());
+        assert!(chk(&json!({ "due": "只读键随便传" })).is_ok());
+        assert!(chk(&json!({})).is_ok());
+    }
+
+    /// 缺表时 ok 必须翻假（状态码随之 503）：200 + ok:true 会让容器探针把
+    /// 结构损坏的实例标成健康，监控与自动发布全被骗过。
+    #[test]
+    fn health_reports_false_when_a_table_cannot_be_read() {
+        let conn = crate::db::fresh_in_memory().unwrap();
+        let modules = vec!["renewals".to_string()];
+        let (ok, payload) = health_payload(&conn, &modules);
+        assert!(ok);
+        assert!(payload["counts"]["items"].as_i64().unwrap() >= 0);
+
+        conn.execute_batch("DROP TABLE items").unwrap();
+        let (ok, payload) = health_payload(&conn, &modules);
+        assert!(!ok, "缺表还报健康就是骗探针");
+        assert_eq!(payload["ok"], json!(false));
+        assert_eq!(payload["counts"]["items"], json!(-1));
+    }
 }

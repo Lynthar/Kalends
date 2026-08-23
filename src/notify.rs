@@ -43,7 +43,8 @@ pub fn email_cfg(conn: &Connection) -> Option<EmailCfg> {
     }
     let cfg = EmailCfg {
         host: v["host"].as_str().unwrap_or("").trim().to_string(),
-        port: v["port"].as_u64().unwrap_or(465) as u16,
+        // 超出 u16 的端口按没填算，回落默认——`as u16` 会环绕成一个没人配过的端口号
+        port: v["port"].as_u64().and_then(|p| u16::try_from(p).ok()).unwrap_or(465),
         starttls: v["starttls"].as_bool().unwrap_or(false),
         username: v["username"].as_str().unwrap_or("").trim().to_string(),
         password: v["password"].as_str().unwrap_or("").to_string(),
@@ -100,7 +101,8 @@ pub async fn body_capped(resp: reqwest::Response, limit: usize) -> Result<Vec<u8
     }
     let mut resp = resp;
     let mut out = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("读取失败：{e}"))? {
+    // 错误里的网址要摘掉：Telegram 的网址带着 bot token，而这串文案会进错误链
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("读取失败：{}", e.without_url()))? {
         if out.len() + chunk.len() > limit {
             return Err(too_big());
         }
@@ -109,22 +111,60 @@ pub async fn body_capped(resp: reqwest::Response, limit: usize) -> Result<Vec<u8
     Ok(out)
 }
 
+/// Telegram sendMessage 的上限是 4096 字符；留余量按 3500 切，摘要条目多时才用得上。
+const TG_CHUNK: usize = 3500;
+
+/// 按行拼片，每片不超过 `limit` 个字符（按字符数不按字节——上限是字符计的，
+/// 中文按字节切会把限额缩成三分之一）；单行超限时按字符硬切。
+fn chunk_text(text: &str, limit: usize) -> Vec<String> {
+    let mut pieces: Vec<String> = Vec::new();
+    for line in text.split('\n') {
+        let chars: Vec<char> = line.chars().collect();
+        if chars.len() <= limit {
+            pieces.push(line.to_string());
+        } else {
+            pieces.extend(chars.chunks(limit).map(|c| c.iter().collect::<String>()));
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut used = 0usize;
+    for p in pieces {
+        let n = p.chars().count();
+        if used > 0 && used + 1 + n > limit {
+            out.push(std::mem::take(&mut cur));
+            used = 0;
+        }
+        if used > 0 {
+            cur.push('\n');
+            used += 1;
+        }
+        cur.push_str(&p);
+        used += n;
+    }
+    out.push(cur);
+    out
+}
+
 pub async fn send_telegram(cfg: &TelegramCfg, text: &str) -> Result<()> {
     let client = http_client(&cfg.proxy)?;
-    let resp = client
-        .post(format!(
-            "https://api.telegram.org/bot{}/sendMessage",
-            cfg.bot_token
-        ))
-        .json(&serde_json::json!({ "chat_id": cfg.chat_id, "text": text }))
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        return Err(anyhow!(
-            "telegram {}: {}",
-            resp.status(),
-            resp.text().await.unwrap_or_default()
-        ));
+    for part in chunk_text(text, TG_CHUNK) {
+        let resp = client
+            .post(format!(
+                "https://api.telegram.org/bot{}/sendMessage",
+                cfg.bot_token
+            ))
+            .json(&serde_json::json!({ "chat_id": cfg.chat_id, "text": part }))
+            .send()
+            .await
+            // 网址里带着 bot token，reqwest 的错误又会把网址原样带出来，而错误链
+            // 会进 500 响应体与日志——先把网址摘掉再进链
+            .map_err(|e| anyhow::Error::new(e.without_url()).context("telegram 请求失败"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = body_capped(resp, 64 << 10).await.unwrap_or_else(|e| e.into_bytes());
+            return Err(anyhow!("telegram {status}: {}", String::from_utf8_lossy(&body)));
+        }
     }
     Ok(())
 }
@@ -425,7 +465,6 @@ pub async fn tick(db: &Db) -> Result<()> {
         (pendings, tg, mail)
     };
 
-    let mut results = Vec::new();
     for p in pendings {
         // 渠道配置在决策之前就取好了，这里的 None 不可能发生；即便如此也别 unwrap——
         // 后台任务里的 panic 会静默掐掉整个调度循环，记一条失败日志便宜得多
@@ -439,11 +478,8 @@ pub async fn tick(db: &Db) -> Result<()> {
                 None => Err(anyhow!("email 渠道未配置")),
             },
         };
-        results.push((p, res));
-    }
-
-    let conn = db.lock().unwrap();
-    for (p, res) in results {
+        // 发一条落一条，不攒到整批发完：批发完再统一落库的话，中途被硬杀
+        //（OOM / docker stop 到点）会让已发出的那几条没有记录，下一轮全部重发
         let (ok, err) = match &res {
             Ok(()) => (1i64, None),
             Err(e) => (0i64, Some(format!("{e:#}"))),
@@ -452,7 +488,8 @@ pub async fn tick(db: &Db) -> Result<()> {
         if let Err(e) = &res {
             tracing::warn!("notify {channel} failed: {e:#}");
         }
-        // 主行与它折叠掉的那几档是一件事：只落了主行就被硬杀（OOM / docker stop 到点升级），
+        let conn = db.lock().unwrap();
+        // 主行与它折叠掉的那几档是一件事：只落了主行就被硬杀，
         // 下一轮 plan 会发现那几档"没发过"，把一条已经折叠进去的提醒再发一遍
         let tx = conn.unchecked_transaction()?;
         tx.execute(
@@ -702,6 +739,30 @@ mod tests {
         assert!("09:00" >= at.as_str());
         assert!("23:59" >= at.as_str());
         assert!("08:59" < at.as_str());
+    }
+
+    /// Telegram 的 4096 上限按字符计：条目一多摘要就会稳定超限，每轮重试每轮失败，
+    /// 日志之外看不出任何异常。分片按行切、单行超限按字符硬切，拼回去要还原成原文。
+    #[test]
+    fn long_telegram_text_is_chunked_at_line_boundaries() {
+        // 短文本原样一片
+        assert_eq!(chunk_text("短消息", 100), vec!["短消息"]);
+        assert_eq!(chunk_text("", 100), vec![""]);
+        // 多行超限：按行拆片，每片不超限，拼回去还原
+        let lines: Vec<String> = (0..40).map(|i| format!("· 条目{i}：三十天后到期")).collect();
+        let text = lines.join("\n");
+        let parts = chunk_text(&text, 100);
+        assert!(parts.len() > 1);
+        for p in &parts {
+            assert!(p.chars().count() <= 100, "{} 字符的片没切：{p}", p.chars().count());
+        }
+        assert_eq!(parts.join("\n"), text, "拼回去对不上原文");
+        // 单行超限：按字符硬切（不能按字节——中文按字节切会切碎字符或缩水限额）
+        let long = "朔".repeat(250);
+        let parts = chunk_text(&long, 100);
+        assert_eq!(parts.len(), 3);
+        assert!(parts.iter().all(|p| p.chars().count() <= 100));
+        assert_eq!(parts.concat(), long);
     }
 
     #[test]

@@ -417,7 +417,8 @@ async function tmdbSearch() {
             body: JSON.stringify({ tmdb_id: h.tmdb_id, kind: form.kind.value, status: form.status.value }),
           });
           $('#dlg-media').close();
-          toast('已建档，海报已缓存到本地');
+          // 海报是否真的落了盘由后端如实报（r.poster）——下载失败还说"已缓存"就是假话
+          toast(r.poster ? '已建档，海报已缓存到本地' : '已建档（海报没取到，可稍后在条目里补抓）');
           await loadAll();
           const created = state.media.find(x => x.id === r.id);
           if (created) openMediaDialog(created);

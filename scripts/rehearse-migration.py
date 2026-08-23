@@ -58,10 +58,34 @@ def load(conn, table, rows, log):
     log(f'  {table}: {n} 行')
 
 
+# 演练目录的标记文件：只有带它的目录才允许被整个清空重建
+SENTINEL = '.kalends-rehearsal'
+
+
+def claim_outdir(outdir):
+    """校验并清空 outdir。误传路径（HOME、仓库、生产数据目录……）会被整树删掉，
+    所以只清「不存在 / 空 / 带上一轮演练标记」的目录，其余一律拒绝。"""
+    out = os.path.realpath(outdir)
+    home = os.path.realpath(os.path.expanduser('~'))
+    repo = os.path.realpath(REPO)
+    for fatal in (os.path.sep, home, repo):
+        if out == fatal or fatal.startswith(out + os.path.sep):
+            sys.exit(f'不清空 {out}：那是根 / HOME / 仓库，或它们的上级')
+    if os.path.exists(out):
+        if not os.path.isdir(out):
+            sys.exit(f'{out} 不是目录')
+        if os.listdir(out) and not os.path.exists(os.path.join(out, SENTINEL)):
+            sys.exit(f'{out} 已有内容且缺 {SENTINEL} 标记（不像上一轮演练目录），拒绝清空；换个新路径')
+    shutil.rmtree(out, ignore_errors=True)
+    os.makedirs(out)
+    open(os.path.join(out, SENTINEL), 'w').close()
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('source', help='源实例的基地址，例如 http://127.0.0.1:4180')
-    ap.add_argument('outdir', help='副本数据目录（会被清空重建）')
+    ap.add_argument('outdir', help='副本数据目录（不存在、为空或带演练标记时清空重建）')
     ap.add_argument('--upto', type=int, required=True,
                     help='重建到第几号迁移为止（待演练的那个迁移号减一）')
     a = ap.parse_args()
@@ -71,9 +95,8 @@ def main():
     if a.upto < 1 or a.upto > len(files):
         sys.exit(f'--upto 应在 1..{len(files)} 之间，实到 {a.upto}')
 
-    shutil.rmtree(a.outdir, ignore_errors=True)
-    os.makedirs(a.outdir)
-    db = os.path.join(a.outdir, 'kalends.db')
+    outdir = claim_outdir(a.outdir)
+    db = os.path.join(outdir, 'kalends.db')
     conn = sqlite3.connect(db)
     log(f'按仓库里的迁移文件建到第 {a.upto} 号：')
     for f in files[:a.upto]:

@@ -2,7 +2,10 @@ use chrono::Utc;
 use serde_json::Value;
 
 fn esc(s: &str) -> String {
-    s.replace('\\', "\\\\")
+    // \r 先归一成 \n：接口写进来的文本可能带 \r\n，孤立的 CR 会把内容行掰成两行
+    s.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\\', "\\\\")
         .replace(';', "\\;")
         .replace(',', "\\,")
         .replace('\n', "\\n")
@@ -65,7 +68,9 @@ pub fn calendar(items: &[Value]) -> String {
             }
         }
         put(&mut out, "BEGIN:VEVENT");
-        put(&mut out, &format!("UID:kalends-{kind}-{id}-{date}"));
+        // UID 是事件的持久身份（RFC 5545），不掺到期日：掺了的话每次续费都是"新事件"，
+        // 下载后导入的日历会攒出一堆重复
+        put(&mut out, &format!("UID:kalends-{kind}-{id}"));
         put(&mut out, &format!("DTSTAMP:{stamp}"));
         put(&mut out, &format!("DTSTART;VALUE=DATE:{date}"));
         put(&mut out, &format!("SUMMARY:{}", esc(&summary)));
@@ -92,6 +97,20 @@ mod tests {
         assert_eq!(esc("A, B; C"), "A\\, B\\; C");
         assert_eq!(esc("第一行\n第二行"), "第一行\\n第二行");
         assert_eq!(esc(r"C:\path"), r"C:\\path");
+        // \r 也不能漏：孤立的 CR 会把内容行掰成两行，解析器眼里就是坏文件
+        assert_eq!(esc("a\r\nb"), "a\\nb");
+        assert_eq!(esc("a\rb"), "a\\nb");
+    }
+
+    /// UID 是事件的持久身份：跟着到期日走的话，每次续费在导入方眼里都是新事件，
+    /// 日历里攒出一堆重复。
+    #[test]
+    fn the_uid_survives_a_renewal() {
+        let event = |due: &str| {
+            calendar(&[json!({ "kind": "subs", "id": 7, "due": due, "name": "x" })])
+        };
+        assert!(event("2026-08-01").contains("UID:kalends-subs-7\r\n"));
+        assert!(event("2026-09-01").contains("UID:kalends-subs-7\r\n"));
     }
 
     #[test]
@@ -103,7 +122,7 @@ mod tests {
         })]);
         assert!(ics.starts_with("BEGIN:VCALENDAR\r\n") && ics.ends_with("END:VCALENDAR\r\n"));
         assert_eq!(ics.matches("BEGIN:VEVENT").count(), 1);
-        assert!(ics.contains("UID:kalends-subs-7-20260801"));
+        assert!(ics.contains("UID:kalends-subs-7\r\n"));
         assert!(ics.contains("DTSTART;VALUE=DATE:20260801"));
         assert!(ics.contains("SUMMARY:续费：Netflix\\, 家庭版"));
         assert!(ics.contains("DESCRIPTION:USD 15.50"));

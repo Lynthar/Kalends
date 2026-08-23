@@ -116,7 +116,11 @@ pub async fn refresh(conn: &crate::Db) -> Result<Value> {
     if !resp.status().is_success() {
         anyhow::bail!("汇率接口返回 {}", resp.status());
     }
-    let body: Value = resp.json().await?;
+    // 与 TMDB 同一条规矩：出网响应体一律封顶，超时管不住"读多少"
+    let bytes = crate::notify::body_capped(resp, 1 << 20)
+        .await
+        .map_err(|e| anyhow::anyhow!("汇率接口{e}"))?;
+    let body: Value = serde_json::from_slice(&bytes)?;
     let mut map = Map::new();
     // 接口给的是「1 USD = N 单位」，与内置表同一形状；USD 自己不在 rates 里
     map.insert("USD".into(), json!(1.0));

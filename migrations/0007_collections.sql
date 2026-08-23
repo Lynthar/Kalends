@@ -1,8 +1,6 @@
 -- 库泛化：订阅 / SIM / VPS 三张固化表 → collections（库）+ items（条目）。
--- 引擎要用的字段留真列（status/price/currency/cycle/cycle_days/next_renewal/last_renewed/
--- name/parent_id/url/notes/logo），域字段进 extra JSON、键沿用原列名，与自定义列同一套机制。
--- 旧三表原样留着不删：部署后未录入新数据前，回滚旧二进制无损。
--- price_history 仍挂在旧 subscriptions(id) 上（当前无读取方），不随之重指。
+-- 引擎要用的字段留真列，域字段进 extra JSON、键沿用原列名，与自定义列同一套机制。
+-- 旧三表原样留着不删（回滚窗口），price_history 不随之重指——两者分别由 0011 / 0010 收尾。
 
 CREATE TABLE collections (
   id         INTEGER PRIMARY KEY,

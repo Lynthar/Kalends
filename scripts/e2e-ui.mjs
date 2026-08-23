@@ -1752,12 +1752,8 @@ if ((await (await fetch(APP + 'api/settings')).json())['meta.tmdb_key']) {
     `${thumbNoKey.status} ${JSON.stringify(thumbNoKeyBody)}`);
 }
 
-/* 17.14. 媒体的自定义列此前只有表格里点格能改，海报墙用户等于没有入口；更要命的是
-   媒体表单的提交体压根不带 extra，而后端 `values_of` 恒写 extra——用详情表单存一次
-   就把自定义列的值全清了（实测坐实过）。 */
-// 加列走的是接口而不是界面：等同于「别处（另一台设备/另一个标签页）加了列」。
-// 媒体的 COLS 此前只在 boot 与 rebuildHead 各注入一次，而 loadAll 每次都刷字段注册表，
-// 于是这边会拿着旧 COLS 去渲染新字段，colType 读到 undefined 把整个 renderAll 打断。
+/* 17.14. 媒体自定义列：加列走接口而不是界面，等同于「别处（另一台设备/另一个标签页）加了列」——
+   本地 COLS 会拿旧的去渲染新字段，colType 读到 undefined 打断整个 renderAll。 */
 const mfield = await post('/api/fields', { tbl: 'media', name: '片源', ftype: 'text' });
 const mrow = (await (await fetch(APP + 'api/media')).json())[0];
 await patch(`/api/media/${mrow.id}`, { ...mrow, extra: { [mfield.key]: 'BD 原盘' } });
@@ -2967,6 +2963,43 @@ await fetch(`${APP}api/fields/${mnum.id}`, { method: 'DELETE' });
 await evl(`(() => { views.media.view = 'wall'; saveViews(); })()`);
 await evl(`loadAll()`);
 await sleep(900);
+
+/* 17.35. 写入口的类型契约：出现的键必须是它该有的类型。取值函数读不出来就当缺席，
+   「出现即写入」的协议下那是一次静默清空——价格传成字符串，响应 200，价格却成 NULL。
+   logo/cover 另有归属防线：文件名由服务端生成、删条目按行内名字删文件，
+   放开通用写入就能把 A 的文件名写进 B、删 B 连 A 的图一起删。 */
+const tv_item = await mk('subs', { name: '类型契约', status: 'Active', price: 12.5, currency: 'USD', extra: { note: '甲' } });
+check('PATCH price 传字符串 → 400', (await raw(`/api/items/${tv_item.id}`, 'PATCH', { price: '不是数字' })).status === 400);
+check('PATCH extra 传数组 → 400', (await raw(`/api/items/${tv_item.id}`, 'PATCH', { extra: ['不是对象'] })).status === 400);
+check('PATCH name 传数字 → 400', (await raw(`/api/items/${tv_item.id}`, 'PATCH', { name: 123 })).status === 400);
+const tv_after = (await (await fetch(APP + 'api/collections/subs/items')).json()).find(x => x.id === tv_item.id);
+check('被拒的请求一字未动', tv_after.price === 12.5 && tv_after.extra?.note === '甲' && tv_after.name === '类型契约',
+  JSON.stringify([tv_after.price, tv_after.extra, tv_after.name]));
+check('PATCH 带非空 logo → 400', (await raw(`/api/items/${tv_item.id}`, 'PATCH', { logo: 'item-1-1.png' })).status === 400);
+check('整行回读的 logo:null 不挡道', (await raw(`/api/items/${tv_item.id}`, 'PATCH', { logo: null, notes: '行' })).ok);
+const tv_m = await post('/api/media', { title: '类型契约片', kind: '电影', status: '看过' });
+check('媒体 PATCH title 传数字 → 400', (await raw(`/api/media/${tv_m.id}`, 'PATCH', { title: 123 })).status === 400);
+check('媒体 PATCH extra 传字符串 → 400', (await raw(`/api/media/${tv_m.id}`, 'PATCH', { extra: '不是对象' })).status === 400);
+check('媒体 PATCH 带非空 cover → 400', (await raw(`/api/media/${tv_m.id}`, 'PATCH', { cover: '1.jpg' })).status === 400);
+const tv_m2 = (await (await fetch(APP + 'api/media')).json()).find(x => x.id === tv_m.id);
+check('媒体被拒后标题原样', tv_m2.title === '类型契约片', tv_m2.title);
+await fetch(`${APP}api/items/${tv_item.id}`, { method: 'DELETE' });
+await fetch(`${APP}api/media/${tv_m.id}`, { method: 'DELETE' });
+
+/* 17.36. 渠道密钥不得进错误链：Telegram 的网址带着 bot token，而错误链会进 500
+   响应体与 warn 日志——粘错误信息去 issue 的人不该顺手把 token 也贴出去。
+   代理指到不可达端口让发送立刻失败，断言错误文本里没有金丝雀 token。 */
+const NT_CANARY = 'CANARYTOKEN1234567890';
+await put('/api/settings', {
+  'notify.telegram': JSON.stringify({ enabled: true, bot_token: NT_CANARY, chat_id: '1', proxy: 'http://127.0.0.1:9' }),
+});
+const nt_resp = await raw('/api/notify/test', 'POST', { channel: 'telegram' });
+const nt_body = await nt_resp.text();
+check('发送失败是 500（配置在、网络不通不是客户端的锅）', nt_resp.status === 500, String(nt_resp.status));
+check('错误响应里没有 bot token', !nt_body.includes(NT_CANARY), nt_body.slice(0, 160));
+await put('/api/settings', {
+  'notify.telegram': JSON.stringify({ enabled: false, bot_token: '', chat_id: '', proxy: '' }),
+});
 
 /* 18. 库删光也不能把界面打崩。放在最后跑——这一段会把预置库连数据一起删掉。
    预置库过去在界面上删不掉（后端一直放行、文档也写着可删），而新库的表格容器

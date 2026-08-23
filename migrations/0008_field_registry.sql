@@ -1,11 +1,5 @@
--- 字段注册表补全：让"库有哪些列、什么类型、值在哪、默认是否上表"成为数据而不是代码。
--- 前端的 COLS / thead / 详情表单在切片 B2 里都改由这张表生成。
---
--- src  = 值存在哪：col（items 的真列）/ extra（items.extra JSON）/ calc（服务端算出，只读）
--- shown = 默认是否作为表格列出现（0 = 只在详情表单里出现）；用户仍可用视图偏好自行隐藏/恢复
--- config = 类型专属配置的 JSON，目前只有 tpl 类型用它的 {"tpl": "..."}
---
--- 本次注册的字段一律 builtin=1：旧前端把 builtin=0 的当自定义列，置 1 可保证部署后界面不变。
+-- 字段注册表补全：让"库有哪些列、什么类型、值在哪（src）、默认是否上表（shown）"成为数据而不是代码。
+-- 本次注册的字段一律 builtin=1——旧前端把 builtin=0 的当自定义列，置 1 才能保证部署后界面不变。
 
 ALTER TABLE fields ADD COLUMN src TEXT NOT NULL DEFAULT 'extra';
 ALTER TABLE fields ADD COLUMN shown INTEGER NOT NULL DEFAULT 1;

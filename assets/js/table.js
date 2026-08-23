@@ -832,9 +832,11 @@ $('#bulk-del').onclick = async () => {
   if (!confirm(`删除选中的 ${ids.length} 项？此操作不可撤销。`)) return;
   const path = tab === 'media' ? '/api/media/bulk_delete' : '/api/items/bulk_delete';
   try {
-    await api(path, { method: 'POST', body: JSON.stringify({ ids }) });
+    const r = await api(path, { method: 'POST', body: JSON.stringify({ ids }) });
     selOf(tab).clear();
-    toast(`已删除 ${ids.length} 项`);
+    // 报后端真删掉的数，不是选区大小——另一个标签页可能已经删过其中几行
+    const gone = r.deleted ?? ids.length;
+    toast(gone === ids.length ? `已删除 ${gone} 项` : `已删除 ${gone} 项（${ids.length - gone} 项已不存在）`);
     await loadAll();
   } catch (e) { toast(e.message, true); }
 };

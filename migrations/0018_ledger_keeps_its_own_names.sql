@@ -1,7 +1,5 @@
--- 台账要能自证：一笔账记下的是"当时付的是哪个库的哪一条"，不该在条目改名或删除之后
--- 变成别的东西。items.id 没带 AUTOINCREMENT，SQLite 会把删掉的号捡回来复用，于是
--- 「删掉旧条目、在同一个库里再建一条」就让旧账挂到了新条目名下（实测复现过）。
--- 写入时把名字钉进台账，显示就不再依赖当前条目。
+-- 台账要能自证：写入时把库名与条目名钉进 renewal_ledger，显示不再依赖当前条目。
+-- items.id 没带 AUTOINCREMENT，SQLite 会复用删掉的号——回查当前条目会让旧账挂到新条目名下。
 ALTER TABLE renewal_ledger ADD COLUMN item_name TEXT;
 ALTER TABLE renewal_ledger ADD COLUMN coll_name TEXT;
 

@@ -27,10 +27,9 @@ function semOf(key, status) {
 }
 const statusOrder = key => (fieldOf(key, 'status')?.options || []).map(o => o.v);
 
-/* **显示值与编辑值必须分开**：表格与筛选读 fieldVal，表单与编辑器一律读 fieldRaw。
-   周期是唯一「存储键≠呈现文案」的字段（monthly ↔ Monthly），拿显示值当表单初值、
-   保存就把文案写回 items.cycle——周期格变空、支出漏算、整条掉出时间线与 ICS。 */
-// 编辑值：真列直接读、extra 读挂载点、calc 由服务端或模板算出
+/* **显示值与编辑值必须分开**：表格与筛选读 fieldVal，表单与编辑器一律读 fieldRaw。周期是唯一
+   「存储键≠呈现文案」的字段（monthly ↔ Monthly）——拿显示值当表单初值，保存就把文案写回
+   items.cycle，于是周期格变空、支出漏算、整条掉出时间线与 ICS。 */
 function fieldRaw(f, r) {
   if (f.src === 'col') return r[f.key];
   if (f.src === 'extra') return (r.extra || {})[f.key];

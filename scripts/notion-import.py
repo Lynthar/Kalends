@@ -43,7 +43,7 @@ def clean(d):
 
 # ── 条目的形状：引擎要用的字段是 items 的真列，域字段一律进 extra（键即字段键）──
 REAL_COLS = {'name', 'parent_id', 'status', 'price', 'currency', 'cycle', 'cycle_days',
-             'next_renewal', 'last_renewed', 'url', 'notes', 'logo'}
+             'next_renewal', 'last_renewed', 'url', 'notes'}
 # 三个续费库的状态词表 2026-07 起统一为英文（迁移 0006）；Notion 导出里还是中文
 STATUS_EN = {'启用': 'Active', '准备': 'Planned', '未启用': 'Unused',
              '预结束': 'Ending', '已结束': 'Ended'}

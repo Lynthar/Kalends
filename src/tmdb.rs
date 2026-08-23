@@ -43,15 +43,23 @@ impl Tmdb {
         } else {
             req = req.query(&[("api_key", self.key.as_str())]);
         }
-        let resp = req.send().await?;
+        // v3 key 在查询参数里，reqwest 的错误会把整个网址带出来——错误链会进
+        // 500 响应体与日志，先把网址摘掉；响应体照图片那条路封顶，别信代理后面的上游
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| anyhow::Error::new(e.without_url()).context("TMDB 请求失败"))?;
         if !resp.status().is_success() {
-            return Err(anyhow!(
-                "TMDB {}: {}",
-                resp.status(),
-                resp.text().await.unwrap_or_default()
-            ));
+            let status = resp.status();
+            let body = crate::notify::body_capped(resp, 64 << 10)
+                .await
+                .unwrap_or_else(|e| e.into_bytes());
+            return Err(anyhow!("TMDB {status}: {}", String::from_utf8_lossy(&body)));
         }
-        Ok(resp.json().await?)
+        let bytes = crate::notify::body_capped(resp, 2 << 20)
+            .await
+            .map_err(|e| anyhow!("TMDB {e}"))?;
+        Ok(serde_json::from_slice(&bytes)?)
     }
 
     pub async fn search(&self, tv: bool, q: &str) -> Result<Vec<Value>> {

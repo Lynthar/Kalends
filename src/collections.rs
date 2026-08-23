@@ -107,6 +107,8 @@ fn next_coll_key(conn: &Connection) -> rusqlite::Result<String> {
 }
 
 async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
+    // 传错类型的键会被 `s()` 当成缺席、静默落回模板值——先把形状卡住
+    crate::api::check_shape(&b, &["template", "name", "due_anchor", "renew_from", "icon", "verb"], &[], &[])?;
     let tpl = match s(&b, "template") {
         Some(id) => Some(template(&id).ok_or_else(|| bad(format!("未知模板：{id}")))?),
         None => None,
@@ -666,6 +668,13 @@ fn seed_fields(
 }
 
 async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value>) -> R {
+    // 传错类型的键会被 `pick`/`take` 当成缺席、静默保持原值——先把形状卡住
+    crate::api::check_shape(
+        &b,
+        &["name", "icon", "due_anchor", "renew_from", "subtitle", "subline", "verb", "note_field"],
+        &["pos"],
+        &[],
+    )?;
     let conn = app.db.lock().unwrap();
     let cur = conn
         .query_row(
@@ -734,14 +743,7 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
 // 库顺序：整份 id 序落成 pos，决定标签行的排列。
 // 路由排在 `/api/collections/{id}` 之前——静态段优先于路径参数，"order" 不会被当成 id。
 async fn set_order(State(app): State<App>, Json(b): Json<Value>) -> R {
-    let ids: Vec<i64> = b
-        .get("ids")
-        .and_then(|x| x.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_i64()).collect())
-        .unwrap_or_default();
-    if ids.is_empty() {
-        return Err(bad("缺少 ids").into());
-    }
+    let ids = id_list(&b)?;
     let conn = app.db.lock().unwrap();
     let tx = conn.unchecked_transaction()?;
     for (n, id) in ids.iter().enumerate() {
@@ -987,13 +989,28 @@ fn item_values(b: &Value) -> anyhow::Result<Vec<rusqlite::types::Value>> {
         s(b, "last_renewed").map(V::from).unwrap_or(V::Null),
         s(b, "url").map(V::from).unwrap_or(V::Null),
         s(b, "notes").map(V::from).unwrap_or(V::Null),
-        s(b, "logo").map(V::from).unwrap_or(V::Null),
         extra_str(b).map(V::from).unwrap_or(V::Null),
     ])
 }
 
+// logo 不在可写列里：文件名由服务端生成、删条目按行内名字删文件——放开它就能把 A 的
+// 文件名写进 B，删 B 时连 A 的图标一起删掉。上传/抓取/清除各有专用端点。
 const WRITE_COLS: &str = "name,parent_id,status,price,currency,cycle,cycle_days,\
-                          next_renewal,last_renewed,url,notes,logo,extra";
+                          next_renewal,last_renewed,url,notes,extra";
+
+/// 条目写入口的校验：出现的键必须是它该有的类型（`api::check_shape`），logo 带非空值
+/// 直接拒——`null`/`""` 按「不在可写集」忽略，整行回读再 PATCH 回来的用法才过得去。
+fn check_item_shape(b: &Value) -> anyhow::Result<()> {
+    if b.get("logo").is_some_and(|v| !(v.is_null() || v.as_str() == Some(""))) {
+        return Err(bad("图标不走这里：上传/抓取/清除各有专用端点"));
+    }
+    crate::api::check_shape(
+        b,
+        &["name", "status", "currency", "cycle", "next_renewal", "last_renewed", "url", "notes"],
+        &["parent_id", "cycle_days"],
+        &["price"],
+    )
+}
 
 /// 子行只有两层（服务 → 档位）：父行自己不能再有父行，本条目已有子行时也不能再挂到别人下面。
 /// 表格的渲染只下探一层，三层的孙行会既不在顶层也不被渲染——静默从界面消失，所以在写入口拦住。
@@ -1026,6 +1043,7 @@ fn check_parent(conn: &Connection, coll: i64, id: Option<i64>, parent: Option<i6
 }
 
 pub fn insert_item(conn: &Connection, coll: i64, b: &Value) -> anyhow::Result<i64> {
+    check_item_shape(b)?;
     check_parent(conn, coll, None, i(b, "parent_id"))?;
     let mut b = b.clone();
     normalize_shaped_fields(conn, coll, &mut b)?;
@@ -1073,6 +1091,7 @@ pub fn merge_over(cur: &Value, b: &Value, cols: impl Iterator<Item = &'static st
 }
 
 pub fn update_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<()> {
+    check_item_shape(b)?;
     let cur = conn
         .query_row(&format!("SELECT {ITEM_COLS} FROM items WHERE id=?1"), [id], item_row)
         .map_err(|_| missing("条目不存在"))?;
@@ -1131,13 +1150,14 @@ async fn items_delete(State(app): State<App>, Path(id): Path<i64>) -> R {
     Ok(Json(json!({ "ok": true })))
 }
 
-/// 批量端点的 ids 数组（库与媒体共用）。
+/// 批量端点的 ids 数组（库与媒体共用）。掺了非整数就整体拒：静默滤掉等于
+/// 「说删 5 个、实际删 3 个」还不吭声。
 pub fn id_list(b: &Value) -> anyhow::Result<Vec<i64>> {
-    let ids: Vec<i64> = b
-        .get("ids")
-        .and_then(|x| x.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_i64()).collect())
-        .unwrap_or_default();
+    let arr = b.get("ids").and_then(|x| x.as_array()).ok_or_else(|| bad("缺少 ids"))?;
+    let ids: Vec<i64> = arr
+        .iter()
+        .map(|x| x.as_i64().ok_or_else(|| bad("ids 要是整数数组")))
+        .collect::<anyhow::Result<_>>()?;
     if ids.is_empty() {
         return Err(bad("缺少 ids"));
     }
@@ -1201,6 +1221,8 @@ type RenewRow = (
 );
 
 pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value> {
+    // amount 传错类型会被 `f()` 当成缺席、静默回落到条目价格——台账会记下一个没人填过的数
+    crate::api::check_shape(b, &["currency", "note"], &[], &["amount"])?;
     let row: Option<RenewRow> = conn
         .query_row(
             "SELECT c.key, c.due_anchor, c.renew_from, i.price, i.currency,
@@ -1824,6 +1846,69 @@ mod tests {
             })
             .unwrap();
         assert_eq!((currency.as_str(), due.as_str()), ("CNY", "2026-08-05"));
+    }
+
+    /// 传错类型的键必须 400 且一字不动：取值函数读不出来就给 None，「出现即写入」的
+    /// 协议下那是一次静默清空——价格传成字符串，响应还是 200，价格却成了 NULL。
+    #[test]
+    fn a_wrongly_typed_value_is_refused_and_the_row_is_untouched() {
+        let conn = crate::db::fresh_in_memory().unwrap();
+        let coll: i64 = conn
+            .query_row("SELECT id FROM collections WHERE key='subs'", [], |r| r.get(0))
+            .unwrap();
+        let id = insert_item(
+            &conn,
+            coll,
+            &json!({ "name": "类型校验", "price": 12.5, "currency": "USD", "extra": { "a": "甲" } }),
+        )
+        .unwrap();
+        for bad_body in [
+            json!({ "price": "不是数字" }),
+            json!({ "extra": ["不是对象"] }),
+            json!({ "extra": "也不是" }),
+            json!({ "name": 123 }),
+            json!({ "cycle_days": 2.5 }),
+            json!({ "parent_id": "5" }),
+        ] {
+            assert!(update_item(&conn, id, &bad_body).is_err(), "{bad_body} 不该放行");
+        }
+        let (price, extra): (Option<f64>, String) = conn
+            .query_row("SELECT price, extra FROM items WHERE id=?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(price, Some(12.5), "被拒的请求不能碰行数据");
+        assert!(extra.contains("甲"), "{extra}");
+        // 清空按协议仍然走：null 与空串都行
+        update_item(&conn, id, &json!({ "price": null, "extra": null })).unwrap();
+        let (price, extra): (Option<f64>, Option<String>) = conn
+            .query_row("SELECT price, extra FROM items WHERE id=?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((price, extra), (None, None));
+    }
+
+    /// logo 不是通用可写列：文件名由服务端生成、删条目按行内名字删文件——放开它
+    /// 就能把 A 的文件名写进 B，删 B 时连 A 的图标一起删掉。
+    #[test]
+    fn the_logo_column_cannot_be_written_through_the_generic_patch() {
+        let conn = crate::db::fresh_in_memory().unwrap();
+        let coll: i64 = conn
+            .query_row("SELECT id FROM collections WHERE key='subs'", [], |r| r.get(0))
+            .unwrap();
+        let id = insert_item(&conn, coll, &json!({ "name": "甲" })).unwrap();
+        assert!(update_item(&conn, id, &json!({ "logo": "item-9-9.png" })).is_err());
+        assert!(insert_item(&conn, coll, &json!({ "name": "乙", "logo": "item-9-9.png" })).is_err());
+        // 整行回读再 PATCH 回来的形状（logo:null）要能过：它按「不在可写集」忽略
+        update_item(&conn, id, &json!({ "logo": null, "notes": "改备注" })).unwrap();
+        let (logo, notes): (Option<String>, String) = conn
+            .query_row("SELECT logo, notes FROM items WHERE id=?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(logo, None);
+        assert_eq!(notes, "改备注");
     }
 
     /// 局部更新的合并规则：缺席即保持、出现即写入、`""` 与 `null` 都是清空、
