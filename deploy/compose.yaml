@@ -6,7 +6,8 @@ services:
     ports:
       - "127.0.0.1:4180:4180"
     volumes:
-      - /srv/appdata/kalends:/data
+      # 换成你自己的数据目录；容器以 uid/gid 10001 运行，先 chown -R 10001:10001
+      - /path/to/appdata/kalends:/data
     environment:
       TZ: Asia/Shanghai
       # 模块开关（默认全开）：只要续费中心改为 "renewals"，只要媒体库改为 "media"
