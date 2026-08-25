@@ -64,7 +64,7 @@ function openSettings() {
   f.em_to.value = em.to || '';
   $('#ics-url').value = `${location.origin}/calendar.ics?token=${st['ics.token'] || ''}`;
   $('#dlg-settings').showModal();
-  if (MODULES.includes('renewals')) loadLedger(); // 不挡对话框，读回来再填
+  if (MODULES.includes('renewals')) { loadLedger(); loadNotifyLog(); } // 不挡对话框，读回来再填
 }
 
 // 续费台账的只读列表：条目或库删掉之后旧账仍在（那是历史），名字取不到就回落到编号
@@ -93,6 +93,47 @@ async function loadLedger() {
     box.className = 'ledger-log note';
     box.textContent = '台账读取失败：' + e.message;
   }
+}
+
+// 通知投递记录的只读列表：投递失败的原因要在界面上看得见，不能只活在服务端日志里。
+// covered 是折叠档位的记账行、不是一次真实投递，列出来只会把一次提醒显示成好几条。
+async function loadNotifyLog() {
+  const box = $('#notify-log');
+  box.textContent = '读取中…';
+  box.className = 'ledger-log note';
+  try {
+    const rows = (await api('/api/notify/log')).filter(r => r.error !== 'covered');
+    box.className = 'ledger-log';
+    if (!rows.length) {
+      box.className = 'ledger-log note';
+      box.textContent = '还没有发过通知——开渠道后每次投递都会在这里记一条';
+      return;
+    }
+    box.innerHTML = '';
+    for (const r of rows) {
+      const div = document.createElement('div');
+      div.className = 'lg-row';
+      const what = r.kind === 'digest' ? '每日摘要' : esc(r.item_name || `#${r.item_id}`);
+      const when = r.threshold_days == null ? '' : (r.threshold_days === 0 ? '当天' : `提前${r.threshold_days}天`);
+      const status = r.ok ? '<span class="lg-a">已发</span>'
+        : `<span class="lg-a lg-bad" title="${esc(r.error || '')}">失败</span>`;
+      div.innerHTML = `<span class="lg-d">${esc(localTime(r.sent_at))}</span>
+        <span class="lg-n">${what}<small>${esc([r.channel, when].filter(Boolean).join(' · '))}</small></span>
+        ${status}`;
+      box.appendChild(div);
+    }
+  } catch (e) {
+    box.className = 'ledger-log note';
+    box.textContent = '发送记录读取失败：' + e.message;
+  }
+}
+
+// sent_at 是 SQLite 的 UTC datetime；按本地时区显示，解析不动就原样给
+function localTime(s) {
+  const d = new Date(String(s).replace(' ', 'T') + 'Z');
+  if (Number.isNaN(d.getTime())) return s;
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 function settingsBody() {

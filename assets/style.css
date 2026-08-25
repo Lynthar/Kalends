@@ -686,6 +686,7 @@ dialog h3 {
 .lg-n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lg-n small { color: var(--ink-2); margin-left: .45rem; font-size: .72rem; }
 .lg-a { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.lg-a.lg-bad { color: var(--coral); }
 .chanset { border: 1px solid var(--line); border-radius: 12px; padding: .7rem .8rem .8rem; margin-top: 1rem; }
 .chanset .btn { margin-top: .7rem; }
 .ics-row { display: flex; gap: .5rem; }

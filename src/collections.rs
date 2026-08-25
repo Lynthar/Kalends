@@ -1784,6 +1784,36 @@ async fn logo_file(State(app): State<App>, Path(name): Path<String>) -> Result<R
 mod tests {
     use super::*;
 
+    /// 新条目可能捡到复用的 id（items.id 不带 AUTOINCREMENT）：旧号的通知日志会让新条目
+    /// 被判成「已发过」而静默漏提醒。落地即清掉该 (kind,id) 的日志，别的条目的不许波及。
+    #[test]
+    fn a_new_item_wipes_notification_history_left_by_its_recycled_id() {
+        let conn = crate::db::fresh_in_memory().unwrap();
+        let coll: i64 = conn
+            .query_row("SELECT id FROM collections WHERE key='subs'", [], |r| r.get(0))
+            .unwrap();
+        let old = insert_item(&conn, coll, &serde_json::json!({ "name": "Old" })).unwrap();
+        conn.execute("DELETE FROM items WHERE id=?1", [old]).unwrap();
+        let seed = |item: i64| {
+            conn.execute(
+                "INSERT INTO notification_log(kind,item_id,channel,threshold_days,due_date,ok)
+                 VALUES('subs',?1,'telegram',7,'2026-01-01',1)",
+                [item],
+            )
+            .unwrap();
+        };
+        seed(old);
+        seed(9999);
+        let new = insert_item(&conn, coll, &serde_json::json!({ "name": "New" })).unwrap();
+        assert_eq!(new, old, "SQLite 没复用 id，测试前提没立住");
+        let count = |item: i64| -> i64 {
+            conn.query_row("SELECT count(*) FROM notification_log WHERE item_id=?1", [item], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(count(new), 0, "复用 id 的旧日志必须清干净");
+        assert_eq!(count(9999), 1, "别的条目的日志不能被波及");
+    }
+
     /// 日期与币种：界面挡得住（原生 date 控件、币种下拉），接口与导入脚本挡不住，
     /// 而写坏的后果都不出声——坏日期掉出到期时间线、坏币种进不了支出统计。
     #[test]

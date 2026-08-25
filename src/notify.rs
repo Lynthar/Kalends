@@ -273,8 +273,8 @@ struct SentLog {
 }
 
 impl SentLog {
-    /// `since` 是本轮关心的最早日期。**不能图省事全表载入**：`notification_log` 既没有
-    /// 清理逻辑也没有读接口，只会随部署时间一直长。
+    /// `since` 是本轮关心的最早日期。**不能图省事全表载入**：`ok=1` 行是永不清理的
+    /// 去重记忆（保留策略只清陈年失败行），随部署时间一直长。
     fn load(conn: &Connection, since: &str) -> Result<Self> {
         let mut out = Self::default();
         let mut st = conn.prepare(
@@ -424,9 +424,20 @@ fn plan(inp: &TickInput) -> Vec<Pending> {
 }
 
 /// 检查一轮：读数据 → `plan` 决策 → 发送 → 落库。
+/// 失败行只是排障线索，30 天后清掉——15 分钟一轮的重试会让它无界累积。
+/// `ok=1` 行是去重记忆，**永不按日期清**：清了它，逾期项每轮重发一遍。
+pub fn prune_failed(conn: &Connection) -> Result<usize> {
+    Ok(conn.execute(
+        "DELETE FROM notification_log WHERE ok=0 AND sent_at < datetime('now','-30 days')",
+        [],
+    )?)
+}
+
 pub async fn tick(db: &Db) -> Result<()> {
     let (pendings, tg, mail) = {
         let conn = db.lock().unwrap();
+        // 渠道关着也要清：留下的失败行正是渠道坏掉那段时间攒的
+        prune_failed(&conn)?;
         let tg = telegram_cfg(&conn);
         let mail = email_cfg(&conn);
         let mut channels: Vec<Channel> = Vec::new();
@@ -792,5 +803,30 @@ mod tests {
         assert!(line(&full).contains("USD 15.50"));
         let half = json!({ "days_left": 1, "name": "x", "due": "2026-08-01", "price": 15.5 });
         assert!(!line(&half).contains("15.50"));
+    }
+
+    /// 保留策略走 tick 本体（渠道全关也要清）：过 30 天的 ok=0 清、没过的留；
+    /// ok=1 是去重记忆，多老都不清——清了逾期项每轮重发。
+    #[tokio::test]
+    async fn a_tick_prunes_stale_failures_even_with_channels_off() {
+        let conn = crate::db::fresh_in_memory().unwrap();
+        let ins = |ok: i64, age: &str| {
+            conn.execute(
+                "INSERT INTO notification_log(kind,item_id,channel,threshold_days,due_date,sent_at,ok,error)
+                 VALUES('subs',1,'telegram',7,'2026-01-01',datetime('now',?1),?2,'x')",
+                params![age, ok],
+            )
+            .unwrap();
+        };
+        ins(0, "-40 days");
+        ins(0, "-1 day");
+        ins(1, "-400 days");
+        let db: crate::Db = std::sync::Arc::new(std::sync::Mutex::new(conn));
+        tick(&db).await.unwrap();
+        let conn = db.lock().unwrap();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("SELECT count(*) FROM notification_log"), 2);
+        assert_eq!(count("SELECT count(*) FROM notification_log WHERE ok=0"), 1);
+        assert_eq!(count("SELECT count(*) FROM notification_log WHERE ok=1"), 1);
     }
 }

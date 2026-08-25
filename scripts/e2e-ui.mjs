@@ -1509,6 +1509,11 @@ check('设置页里列出了这笔台账', await evl(
 check('台账行带上了金额', await evl(
   `[...document.querySelectorAll('#ledger-list .lg-row')].find(r => r.textContent.includes('Netflix'))?.querySelector('.lg-a').textContent`
 ) === 'USD 15.49');
+// 通知发送记录：notification_log 的唯一读路径。渠道没开过的一次性实例里必须是空态文案，
+// 接口也应答空数组——这一步同时验了端点挂载与界面落位。
+check('通知记录接口可读且为空', (await (await fetch(APP + 'api/notify/log')).json()).length === 0);
+check('设置页给出发送记录的空态', await evl(
+  `document.querySelector('#notify-log').textContent`) === '还没有发过通知——开渠道后每次投递都会在这里记一条');
 await evl(`document.querySelector('#ledger-list').scrollIntoView({ block: 'center' })`);
 await sleep(400);
 await shot('12-ledger');

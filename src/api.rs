@@ -75,6 +75,7 @@ pub fn renewals_router() -> Router<App> {
         .route("/api/fx", get(fx_get))
         .route("/api/fx/refresh", post(fx_refresh))
         .route("/api/ledger", get(ledger_list))
+        .route("/api/notify/log", get(notify_log))
         .route("/api/notify/test", post(notify_test))
         .route("/calendar.ics", get(calendar))
         .merge(crate::collections::router())
@@ -234,6 +235,40 @@ async fn ledger_list(State(app): State<App>) -> R {
     Ok(Json(json!(rows)))
 }
 
+/// 通知投递记录（最新 200 条），notification_log 唯一的读路径。covered 记账行原样吐出——
+/// 去重语义的核对要靠这里看到全部行，过滤是呈现层的事；条目名回查当前条目，删了就取不到。
+pub(crate) fn notify_log_rows(conn: &rusqlite::Connection) -> anyhow::Result<Vec<Value>> {
+    let mut stmt = conn.prepare(
+        "SELECT l.id, l.kind, l.item_id, l.channel, l.threshold_days, l.due_date, l.sent_at, l.ok, l.error,
+                (SELECT i.name FROM items i JOIN collections c ON c.id = i.collection_id
+                  WHERE i.id = l.item_id AND c.key = l.kind)
+         FROM notification_log l
+         ORDER BY l.sent_at DESC, l.id DESC LIMIT 200",
+    )?;
+    let rows: Vec<Value> = stmt
+        .query_map([], |r| {
+            Ok(json!({
+                "id": r.get::<_, i64>(0)?,
+                "kind": r.get::<_, String>(1)?,
+                "item_id": r.get::<_, Option<i64>>(2)?,
+                "channel": r.get::<_, String>(3)?,
+                "threshold_days": r.get::<_, Option<i64>>(4)?,
+                "due_date": r.get::<_, String>(5)?,
+                "sent_at": r.get::<_, String>(6)?,
+                "ok": r.get::<_, i64>(7)? == 1,
+                "error": r.get::<_, Option<String>>(8)?,
+                "item_name": r.get::<_, Option<String>>(9)?,
+            }))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
+async fn notify_log(State(app): State<App>) -> R {
+    let conn = app.db.lock().unwrap();
+    Ok(Json(json!(notify_log_rows(&conn)?)))
+}
+
 async fn settings_get(State(app): State<App>) -> R {
     let conn = app.db.lock().unwrap();
     let mut stmt = conn.prepare("SELECT key,value FROM settings")?;
@@ -341,6 +376,31 @@ mod tests {
         assert!(chk(&json!({ "name": null, "cycle_days": "", "price": null, "extra": null })).is_ok());
         assert!(chk(&json!({ "due": "只读键随便传" })).is_ok());
         assert!(chk(&json!({})).is_ok());
+    }
+
+    /// 通知记录是 notification_log 唯一的读路径：最新在前、covered 行不缺席、
+    /// 条目名回查得到就带上；条目删了名字取不到，回落为 null 而不是错行。
+    #[test]
+    fn the_notify_log_reads_back_everything_including_covered_rows() {
+        let conn = crate::db::fresh_in_memory().unwrap();
+        let coll: i64 = conn
+            .query_row("SELECT id FROM collections WHERE key='subs'", [], |r| r.get(0))
+            .unwrap();
+        let id = crate::collections::insert_item(&conn, coll, &json!({ "name": "Example" })).unwrap();
+        conn.execute_batch(&format!(
+            "INSERT INTO notification_log(kind,item_id,channel,threshold_days,due_date,sent_at,ok,error) VALUES
+               ('subs',{id},'telegram',7,'2026-09-01','2026-08-25 01:00:00',1,NULL),
+               ('subs',{id},'telegram',14,'2026-09-01','2026-08-25 01:00:00',1,'covered'),
+               ('subs',999,'telegram',3,'2026-09-01','2026-08-25 02:00:00',0,'boom')"
+        ))
+        .unwrap();
+        let rows = notify_log_rows(&conn).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["ok"], json!(false)); // 最新在前
+        assert_eq!(rows[0]["error"], json!("boom"));
+        assert_eq!(rows[0]["item_name"], json!(null)); // 查无此条目
+        assert!(rows.iter().any(|r| r["error"] == json!("covered")));
+        assert!(rows.iter().any(|r| r["item_name"] == json!("Example")));
     }
 
     /// 缺表时 ok 必须翻假（状态码随之 503）：200 + ok:true 会让容器探针把
