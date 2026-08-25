@@ -44,6 +44,18 @@ KALENDS_DATA=/path/to/data ./target/release/kalends
 
 环境变量：`KALENDS_ADDR`（默认 `127.0.0.1:4180`）、`KALENDS_DATA`（默认 `./data`）、`KALENDS_MODULES`。
 
+## 恢复 / Restore
+
+数据目录里 `backups/` 存着每晚的快照（保留 14 份）。恢复用内置命令，装配并当场验证一个全新数据目录：
+
+```bash
+kalends restore --from /path/to/data/backups/snapshot-2026-01-01.db --to /path/to/data-restored
+```
+
+命令会复制快照、做 `integrity_check`、从原数据目录把 `covers/` 与 `logos/` 一并带上，并核对条目引用的图标/海报是否在位；之后把 `KALENDS_DATA`（或 compose 的数据卷）指向新目录即可。退出码 `0` 为完整恢复；`1` 表示数据库完好但有引用文件缺失（会逐个列出）。目标目录必须为空——恢复永不覆盖在用数据。
+
+升级版本时，应用会在跑数据库迁移之前自动往 `backups/` 落一份 `pre-migration-v<N>.db`；落不下去（如磁盘满）会拒绝启动。回滚部署或迁移出问题时，从这份快照恢复。
+
 ## 注意
 
 - **SQLite 数据文件必须在本地磁盘**，不要放 SMB/NFS 网络挂载路径（网络文件系统的锁不可靠）。

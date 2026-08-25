@@ -53,8 +53,58 @@ async fn health_probe() -> ! {
     std::process::exit(if alive { 0 } else { 1 });
 }
 
+/// `kalends restore --from <快照> --to <新目录>`：装配并验证一个新数据目录。
+/// 退出码：0=完整；1=失败或引用文件缺失（数据库本身完好，但图标/海报会缺）；2=用法错误。
+fn restore_cli(rest: &[String]) -> ! {
+    fn usage() -> ! {
+        eprintln!("用法：kalends restore --from <backups/snapshot-日期.db> --to <新数据目录>");
+        std::process::exit(2);
+    }
+    let (mut from, mut to) = (None, None);
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--from" => from = it.next().cloned(),
+            "--to" => to = it.next().cloned(),
+            _ => usage(),
+        }
+    }
+    let (Some(from), Some(to)) = (from, to) else { usage() };
+    match backup::restore(std::path::Path::new(&from), std::path::Path::new(&to)) {
+        Ok(r) => {
+            let staleness = if r.pending > 0 {
+                format!("启动时将自动迁移 {} 步", r.pending)
+            } else {
+                "已是当前版本".into()
+            };
+            println!("已恢复 {to}/kalends.db：integrity_check ok，user_version {}（{staleness}）", r.user_version);
+            match &r.assets_from {
+                Some(src) => println!("已从 {} 复制 covers/logos 共 {} 个文件", src.display(), r.assets_copied),
+                None => println!("快照不在标准 backups/ 布局里，未能定位原数据目录：请手动复制 covers/ 与 logos/"),
+            }
+            if r.missing.is_empty() {
+                println!("引用核对：条目引用的图标与海报全部在位（孤儿文件 {} 个，无碍）", r.orphans);
+                std::process::exit(0);
+            }
+            println!("引用核对：{} 个引用文件缺失——数据库完好，但这些条目的图标/海报会缺：", r.missing.len());
+            for m in &r.missing {
+                println!("  {m}");
+            }
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("恢复失败：{e:#}");
+            std::process::exit(1);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("restore") {
+        let rest: Vec<String> = std::env::args().skip(2).collect();
+        restore_cli(&rest);
+    }
     if std::env::args().any(|a| a == "--health") {
         health_probe().await;
     }

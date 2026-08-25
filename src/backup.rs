@@ -97,6 +97,123 @@ pub fn run(conn: &Connection, data_dir: &Path) -> Result<Report> {
     })
 }
 
+/* ── 恢复：把快照装配成一个全新数据目录并当场验证 ─────────────────── */
+
+#[derive(Debug)]
+pub struct RestoreReport {
+    pub user_version: i64,
+    pub pending: i64,
+    pub assets_from: Option<PathBuf>,
+    pub assets_copied: usize,
+    pub missing: Vec<String>,
+    pub orphans: usize,
+}
+
+/// `to` 必须不存在或为空目录：恢复只装配新目录，绝不覆盖在用数据。
+/// 验证三件事：integrity_check（含外键）、user_version 不高于本二进制、covers/logos 引用在位；
+/// 快照在标准 `<数据目录>/backups/` 布局里时，顺带从原数据目录把 covers/logos 复制过来。
+pub fn restore(from: &Path, to: &Path) -> Result<RestoreReport> {
+    if !from.is_file() {
+        anyhow::bail!("快照不存在：{}", from.display());
+    }
+    if let Ok(mut entries) = fs::read_dir(to) {
+        if entries.next().is_some() {
+            anyhow::bail!("目标目录非空：{}（恢复只装配全新目录，不覆盖既有数据）", to.display());
+        }
+    } else {
+        fs::create_dir_all(to)?;
+    }
+    fs::copy(from, to.join("kalends.db"))?;
+
+    let conn = Connection::open_with_flags(
+        to.join("kalends.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let verdict: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+    if verdict != "ok" {
+        anyhow::bail!("integrity_check 未通过（{verdict}）：这份快照已损坏，换更早的一份");
+    }
+    let mut fk = conn.prepare("PRAGMA foreign_key_check")?;
+    if fk.query([])?.next()?.is_some() {
+        anyhow::bail!("foreign_key_check 未通过：这份快照里有悬空外键，换更早的一份");
+    }
+    let user_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let known = crate::db::known_version();
+    if user_version > known {
+        anyhow::bail!("快照的 user_version {user_version} 高于本二进制支持的 {known}：用更新版本的 Kalends 来恢复");
+    }
+
+    // 图标与海报不在快照里：按标准布局回到原数据目录整份带上（含孤儿，恢复求忠实不做清理）
+    let assets_from = from
+        .parent()
+        .filter(|p| p.file_name().is_some_and(|n| n == "backups"))
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+    let mut assets_copied = 0usize;
+    if let Some(src) = &assets_from {
+        for sub in ["covers", "logos"] {
+            let Ok(entries) = fs::read_dir(src.join(sub)) else { continue };
+            fs::create_dir_all(to.join(sub))?;
+            for entry in entries.flatten() {
+                if entry.path().is_file() {
+                    fs::copy(entry.path(), to.join(sub).join(entry.file_name()))?;
+                    assets_copied += 1;
+                }
+            }
+        }
+    }
+
+    // 引用核对：条目引用而磁盘缺失的按缺失报；名字不过 safe_name 的本就永远服务不出来，同报
+    let mut referenced = Vec::new();
+    for (table, col, sub) in [("items", "logo", "logos"), ("media_items", "cover", "covers")] {
+        if !table_exists(&conn, table) {
+            continue; // 老快照可能还没这张表，缺表不等于缺文件
+        }
+        let mut stmt =
+            conn.prepare(&format!("SELECT {col} FROM {table} WHERE {col} IS NOT NULL AND {col} != ''"))?;
+        let names = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for name in names {
+            referenced.push((sub, name?));
+        }
+    }
+    let mut missing = std::collections::BTreeSet::new();
+    let mut present = std::collections::HashSet::new();
+    for (sub, name) in &referenced {
+        if crate::api::safe_name(name) && to.join(sub).join(name).is_file() {
+            present.insert(format!("{sub}/{name}"));
+        } else {
+            missing.insert(format!("{sub}/{name}"));
+        }
+    }
+    let mut orphans = 0usize;
+    for sub in ["covers", "logos"] {
+        let Ok(entries) = fs::read_dir(to.join(sub)) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if entry.path().is_file() && !present.contains(&format!("{sub}/{name}")) {
+                orphans += 1;
+            }
+        }
+    }
+    Ok(RestoreReport {
+        user_version,
+        pending: known - user_version,
+        assets_from,
+        assets_copied,
+        missing: missing.into_iter().collect(),
+        orphans,
+    })
+}
+
+fn table_exists(conn: &Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+        [name],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
 /// 今天的 JSONL 导出是否写好（按序逐张写，最后那张新鲜＝整轮走完）。补跑判据必须
 /// 带上它——只看快照的话，"快照成了、导出才失败"这一路当天不再重试，
 /// 留下一份停在昨天的明文导出。
@@ -129,5 +246,79 @@ pub async fn scheduler(db: crate::Db, data_dir: PathBuf) {
             }
         }
         tokio::time::sleep(std::time::Duration::from_secs(1800)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn one<T: rusqlite::types::FromSql>(conn: &Connection, sql: &str) -> T {
+        conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    /// 恢复演练全流程：备份产出的快照装配成新目录，covers/logos 整份带上、引用核对通过；
+    /// 负向对照：源目录里被引用的文件消失后，恢复必须点名它。
+    #[test]
+    fn a_snapshot_restores_into_a_verified_new_data_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let src = root.path().join("data");
+        let conn = crate::db::open(&src).unwrap();
+        conn.execute(
+            "INSERT INTO items(collection_id,name,logo)
+             VALUES((SELECT id FROM collections WHERE key='subs'),'Example','a.png')",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO media_items(title,cover) VALUES('Example Film','b.jpg')", [])
+            .unwrap();
+        fs::create_dir_all(src.join("logos")).unwrap();
+        fs::create_dir_all(src.join("covers")).unwrap();
+        fs::write(src.join("logos").join("a.png"), b"x").unwrap();
+        fs::write(src.join("covers").join("b.jpg"), b"x").unwrap();
+        fs::write(src.join("covers").join("orphan.jpg"), b"x").unwrap();
+        let snapshot = run(&conn, &src).unwrap().snapshot;
+        drop(conn);
+
+        let to = root.path().join("restored");
+        let r = restore(&snapshot, &to).unwrap();
+        assert!(r.missing.is_empty(), "{:?}", r.missing);
+        assert_eq!((r.pending, r.assets_copied, r.orphans), (0, 3, 1));
+        assert_eq!(r.assets_from.as_deref(), Some(src.as_path()));
+        let restored = Connection::open(to.join("kalends.db")).unwrap();
+        assert_eq!(one::<i64>(&restored, "SELECT count(*) FROM items"), 1);
+
+        fs::remove_file(src.join("logos").join("a.png")).unwrap();
+        let r = restore(&snapshot, &root.path().join("restored2")).unwrap();
+        assert_eq!(r.missing, ["logos/a.png"]);
+    }
+
+    /// 挡得住的三种坏输入：非空目标（防覆盖在用数据）、根本不是数据库的文件、未来版本的快照。
+    #[test]
+    fn restore_refuses_bad_targets_and_bad_snapshots() {
+        let root = tempfile::tempdir().unwrap();
+        let src = root.path().join("data");
+        let conn = crate::db::open(&src).unwrap();
+        let snapshot = run(&conn, &src).unwrap().snapshot;
+        drop(conn);
+
+        let busy = root.path().join("busy");
+        fs::create_dir_all(&busy).unwrap();
+        fs::write(busy.join("x"), b"x").unwrap();
+        let err = restore(&snapshot, &busy).unwrap_err().to_string();
+        assert!(err.contains("非空"), "{err}");
+
+        let garbage = root.path().join("garbage.db");
+        fs::write(&garbage, b"not a database").unwrap();
+        assert!(restore(&garbage, &root.path().join("g")).is_err());
+
+        let newer = root.path().join("newer.db");
+        fs::copy(&snapshot, &newer).unwrap();
+        Connection::open(&newer)
+            .unwrap()
+            .pragma_update(None, "user_version", crate::db::known_version() + 1)
+            .unwrap();
+        let err = restore(&newer, &root.path().join("n")).unwrap_err().to_string();
+        assert!(err.contains("高于本二进制"), "{err}");
     }
 }
