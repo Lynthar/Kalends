@@ -71,7 +71,10 @@ src/            axum server, renewal engine, notifications, backups, TMDB client
 migrations/     database migrations (embedded at compile time, versioned by PRAGMA user_version)
 assets/         frontend (vanilla JS, no build step, embedded at compile time; js/ splits into eight files loaded in order)
 scripts/        Notion migration, frontend end-to-end checks, migration rehearsals and API diffing
-deploy/         Docker Compose and deployment docs
+tests/fixtures/ synthetic data at older schema versions, replayed by the upgrade tests
+docs/           user guide: deployment, restore, upgrade and rollback
+deploy/         Docker Compose file
+.github/        release workflow (tag-triggered; there is deliberately no CI on pull requests)
 ```
 
 Changes under `assets/` need a fresh `cargo build` to take effect.

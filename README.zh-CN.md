@@ -69,7 +69,10 @@ src/            axum 服务、到期引擎、通知、备份、TMDB 客户端
 migrations/     数据库迁移（编译期嵌入，PRAGMA user_version 记版本）
 assets/         前端（原生 JS，无构建步骤，编译期嵌入二进制；js/ 下拆成八份按序加载）
 scripts/        Notion 迁移脚本、前端端到端验证、迁移演练与接口对拍
-deploy/         Docker Compose 与部署文档
+tests/fixtures/ 旧结构版本的合成数据，升级测试拿它们从头迁一遍
+docs/           使用与运维文档：部署、恢复、升级与回滚
+deploy/         Docker Compose 文件
+.github/        发布工作流（tag 触发；有意不设 PR 的 CI）
 ```
 
 改了 `assets/` 要重新 `cargo build` 才生效。
