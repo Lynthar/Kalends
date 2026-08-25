@@ -41,6 +41,15 @@ Telegram Bot 与 SMTP 邮件，提前 N 天逐档提醒加每日摘要，Telegra
 
 ## 快速开始与部署
 
+从 [Releases](https://github.com/Lynthar/Kalends/releases) 取一个二进制——Linux x86_64 或 aarch64，另有静态链接的 musl 版给老发行版：
+
+```bash
+tar xzf kalends-*-x86_64-unknown-linux-gnu.tar.gz
+KALENDS_DATA=./data ./kalends-*/kalends      # http://127.0.0.1:4180
+```
+
+或者从源码跑：
+
 ```bash
 cargo run    # http://127.0.0.1:4180，数据在 ./data/
 ```

@@ -13,7 +13,7 @@ cd /path/to/compose/kalends && docker compose up -d
 curl -sf http://127.0.0.1:4180/api/health
 ```
 
-`compose.yaml` 里按需修改数据卷路径与时区；容器默认只绑 `127.0.0.1:4180`，由你的反向代理对局域网提供访问。
+`compose.yaml` 里按需修改数据卷路径与时区；容器默认只绑 `127.0.0.1:4180`，由你的反向代理对局域网提供访问。**镜像没有发布到任何镜像仓库**——`image: kalends:local` 指的就是上面那条 `docker build` 在本机产出的镜像，不先 build 的话 `compose up` 会去拉一个不存在的镜像。
 
 **从旧版（root 运行的镜像）升级**：换镜像前先在宿主机对既有数据卷执行同一条 `chown -R 10001:10001`，否则新容器写不进 `/data`、起不来（日志会明说）；`chown` 回 root 即可回退旧镜像。基础镜像已钉 digest，升级基础镜像＝显式改 `Dockerfile` 里的 `@sha256:` 值。
 
@@ -39,6 +39,16 @@ curl -sf http://127.0.0.1:4180/api/health
 未选模块整体不存在：接口不挂载（404）、界面无入口、后台任务不启动。随时改回全开重启即可。
 
 ## 裸机运行
+
+取一个预编译二进制（[Releases](https://github.com/Lynthar/Kalends/releases)，Linux x86_64 / aarch64 / 静态 musl），配一个 systemd 单元即可：
+
+```bash
+tar xzf kalends-*-x86_64-unknown-linux-gnu.tar.gz
+sudo install -m755 kalends-*/kalends /usr/local/bin/kalends
+KALENDS_DATA=/path/to/data kalends
+```
+
+发布页附 `SHA256SUMS`，`sha256sum -c SHA256SUMS` 可校验。或者自己编译：
 
 ```bash
 cargo build --release

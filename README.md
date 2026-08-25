@@ -41,6 +41,15 @@ You can ship half of it. `KALENDS_MODULES=renewals` or `=media` removes the othe
 
 ## Quick start
 
+Grab a binary from [Releases](https://github.com/Lynthar/Kalends/releases) — Linux x86_64 or aarch64, plus a statically linked musl build for older distributions:
+
+```bash
+tar xzf kalends-*-x86_64-unknown-linux-gnu.tar.gz
+KALENDS_DATA=./data ./kalends-*/kalends      # http://127.0.0.1:4180
+```
+
+Or from source:
+
 ```bash
 cargo run     # http://127.0.0.1:4180, data in ./data/
 ```

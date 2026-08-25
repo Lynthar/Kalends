@@ -1,0 +1,87 @@
+# 只在推 tag 时跑：本仓库有意不设 PR 必过的 CI，也不跑 cargo fmt（紧凑写法本就不是
+# rustfmt 风格，跑一遍等于全库重排）。这里的门禁只为一件事：不从红树里发出产物。
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:        # 不打 tag 也能试跑构建矩阵，产物只留在 Actions 里
+
+permissions:
+  contents: write           # 建 Release 要写权限，别的都不要
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # tag 与 Cargo.toml 对不上就停：发出去的二进制会把自己报成另一个版本
+      - name: Tag matches Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          crate="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          tag="${GITHUB_REF_NAME#v}"
+          test "$crate" = "$tag" || { echo "Cargo.toml $crate != tag $tag"; exit 1; }
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked
+
+  build:
+    needs: gates
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+      # rusqlite 是 bundled（编译 SQLite 的 C 代码），ring 同样要 C 编译器。
+      # libc6-dev-arm64-cross 必须显式装：--no-install-recommends 会把它丢掉，
+      # 于是交叉 gcc 没有目标 libc 头、退回宿主 /usr/include，ring 编译时报缺
+      # bits/libc-header-start.h（本地 docker 实测过这条失败）
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross musl-tools
+      - run: rustup target add ${{ matrix.target }}
+      - name: Build
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          name="kalends-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/kalends" LICENSE README.md "dist/$name/"
+          tar -C dist -czf "$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: '*.tar.gz'
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { merge-multiple: true, path: dist }
+      - name: Checksums
+        run: cd dist && sha256sum *.tar.gz > SHA256SUMS
+      # gh 是 runner 自带的，不引第三方 action：发布这一步的供应链越短越好。
+      # 发布说明只从 CHANGELOG.md 取（单一真源），那儿没写就停下——宁可不发也别发一份空说明
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          awk -v v="## $GITHUB_REF_NAME" '$0==v{f=1;next} /^## /{f=0} f' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "CHANGELOG.md 里没有 $GITHUB_REF_NAME 这一节"; exit 1; }
+          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file notes.md
