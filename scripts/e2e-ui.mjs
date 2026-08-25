@@ -570,6 +570,13 @@ await evl(`(() => {
 })()`);
 await sleep(600);
 check('拖动后顺序 备用,官方', await optOrder() === '备用,官方', await optOrder());
+// 单指针替代：选项行的 ↑↓ 与拖动写同一份词表（触摸屏拖不动时的出路）
+await evl(`[...document.querySelectorAll('.optpop .opt-row')][1].querySelector('[data-up]').click()`);
+await sleep(500);
+check('选项 ↑ 上移后顺序 官方,备用', await optOrder() === '官方,备用', await optOrder());
+await evl(`[...document.querySelectorAll('.optpop .opt-row')][0].querySelector('[data-dn]').click()`);
+await sleep(500);
+check('选项 ↓ 挪得回来（备用,官方）', await optOrder() === '备用,官方', await optOrder());
 check('筛选浮层跟随手动序', await menuClick(`#view-subs th[data-k="${ckey}"]`, '筛选'));
 check('浮层首项是 备用', await evl(`document.querySelector('.filterpop .fp-item .fp-v')?.textContent`) === '备用');
 await evl(`document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))`);
@@ -1028,6 +1035,15 @@ check('字段面板里名称的「上表」开关是禁用的', await evl(`(() =
   const others = rows.filter(r => r !== nameRow);
   return !!nameRow?.querySelector('input')?.disabled && others.every(r => !r.querySelector('input').disabled);
 })()`) === true);
+// 标签位置按钮：库顺序的单指针替代，与拖标签写同一个 /api/collections/order
+const collOrderNow = async () => (await (await fetch(APP + 'api/collections')).json()).map(c => c.key).join();
+const tOrder0 = await collOrderNow();
+await evl(`document.querySelector('#coll-mv-r').click()`);
+await sleep(900);
+check('「后移 ▶」把库往右挪一位并落库', await collOrderNow() === tOrder0.replace('subs,sims', 'sims,subs'), await collOrderNow());
+await evl(`document.querySelector('#coll-mv-l').click()`);
+await sleep(900);
+check('「◀ 前移」挪得回来', await collOrderNow() === tOrder0, await collOrderNow());
 await evl(`document.querySelector('#dlg-coll').close()`);
 await sleep(200);
 check('预置库的标签也可拖动', await evl(`document.querySelector('.tab[data-tab="subs"]').draggable`) === true);
@@ -1056,6 +1072,17 @@ check('拖字段调序（面板重排）', fa[0] === fb.at(-1), `${fb.at(-1)} �
 const posSorted = (await (await fetch(`${APP}api/fields`)).json())
   .filter(f => f.tbl === BK).sort((a, b) => a.pos - b.pos);
 check('字段顺序落到 fields.pos', posSorted[0].name === fb.at(-1), posSorted.map(f => f.name));
+// 单指针替代：字段行的 ↑↓ 与拖动写同一个 /api/fields/order。只动自建库——
+// settleView 会因 schema 序变化作废本机列序，动 subs 会打掉第 11 段摆好的分类首列
+const bkOrder = async () => (await (await fetch(`${APP}api/fields`)).json())
+  .filter(f => f.tbl === BK).sort((a, b) => a.pos - b.pos).map(f => f.name).join();
+const bo0 = await bkOrder();
+await evl(`[...document.querySelectorAll('#coll-fields .opt-row')][0].querySelector('[data-dn]').click()`);
+await sleep(800);
+check('字段行 ↓ 换了顺序并落库', (await bkOrder()).split(',')[1] === bo0.split(',')[0], `${bo0} → ${await bkOrder()}`);
+await evl(`[...document.querySelectorAll('#coll-fields .opt-row')][1].querySelector('[data-up]').click()`);
+await sleep(800);
+check('字段行 ↑ 挪得回来', await bkOrder() === bo0, await bkOrder());
 
 const bh0 = await evl(`[...document.querySelectorAll('.tablewrap[data-tab="${BK}"] thead th')].map(t => t.dataset.k)`);
 await evl(`(() => {
@@ -1175,6 +1202,34 @@ check('最长的表头菜单整份放得下，不靠内部滚动', menuBox.cut =
 check('菜单也没长出视口', menuBox.bottom <= menuBox.vh, JSON.stringify(menuBox));
 await evl(`closePop()`);
 await sleep(120);
+
+/* 12g2. 移列与调宽子菜单：列序/列宽的单指针替代（WCAG 2.5.7）。写入必须与拖动同一套：
+   列序进 views.order、调宽走拖宽的基线与结算，右边框硬边界那套法则不因入口而异。 */
+const visCols = () => evl(`[...document.querySelectorAll('#view-subs th')]
+  .filter(t => t.style.display !== 'none' && !t.classList.contains('ops')).map(t => t.dataset.k).join()`);
+const cBefore = await visCols();
+check('表头菜单有移列与调宽入口', await menuClick(`#view-subs th[data-k="status"]`, '移列与调宽'));
+await evl(`[...document.querySelectorAll('.thmenu .mi')].find(b => b.textContent.includes('右移一列')).click()`);
+await sleep(400);
+const cAfter = await visCols();
+check('右移一列换了显示序', cAfter !== cBefore && cAfter.indexOf('status') > cBefore.indexOf('status'), `${cBefore} → ${cAfter}`);
+await evl(`[...document.querySelectorAll('.thmenu .mi')].find(b => b.textContent.includes('左移一列')).click()`);
+await sleep(400);
+check('左移一列挪得回来', await visCols() === cBefore, await visCols());
+const wSnap = await evl(`JSON.stringify(views.subs.widths)`);
+const wOfStatus = () => evl(`Math.round(document.querySelector('#view-subs th[data-k="status"]').getBoundingClientRect().width)`);
+const wMenu0 = await wOfStatus();
+await evl(`[...document.querySelectorAll('.thmenu .mi')].find(b => b.textContent.includes('加宽此列')).click()`);
+await sleep(400);
+check('菜单加宽 +60px', Math.abs(await wOfStatus() - wMenu0 - 60) <= 3, `${wMenu0} → ${await wOfStatus()}`);
+check('菜单加宽后表宽=列宽和', Math.abs(await tableW() - await thWidthSum()) <= 2, `table=${await tableW()} sum=${await thWidthSum()}`);
+await evl(`[...document.querySelectorAll('.thmenu .mi')].find(b => b.textContent.includes('变窄此列')).click()`);
+await sleep(400);
+check('菜单变窄挪得回来', Math.abs(await wOfStatus() - wMenu0) <= 3, `${await wOfStatus()}`);
+await evl(`closePop()`);
+await evl(`views.subs.widths = JSON.parse('${wSnap}'); saveViews(); applyWidths('subs')`);
+await sleep(200);
+
 // 负向：引擎真列与算出来的列不给这两项，删了没有意义（后端也只认 src='extra'）
 const mCol = await thMenuOf('subs', 'price');
 check('引擎真列（价格）没有删除列', !mCol.includes('删除列'), mCol);
@@ -1739,6 +1794,22 @@ check('表尾「＋ 新建」也能用键盘走到', await evl(`(() => {
   return nr.tabIndex === 0 && nr.getAttribute('role') === 'button';
 })()`) === true);
 
+/* 17.12b. 筛选中新建：新空行必被筛选挡住，此前只有 toast、再点一次就攒空行——
+   现在自动清掉本表筛选与搜索并定位到新行。 */
+await evl(`setFilter('subs', 'status', ['Active'])`);
+await sleep(300);
+const nrIds0 = new Set(await evl(`[...document.querySelectorAll('#subs-body tr')].map(t => +t.dataset.id)`));
+await evl(`document.querySelector('#view-subs .newrow').click()`);
+await sleep(900);
+const nrNew = (await (await fetch(APP + 'api/collections/subs/items')).json())
+  .map(x => x.id).filter(x => !nrIds0.has(x)).sort((a, b) => b - a)[0];
+check('筛选被自动清掉', await evl(`JSON.stringify(views.subs.filters)`) === '{}');
+check('新行落位可见', await evl(`!!document.querySelector('#subs-body tr[data-id="${nrNew}"]')`) === true);
+await evl(`closePop()`);
+await fetch(`${APP}api/items/${nrNew}`, { method: 'DELETE' });
+await evl(`loadAll()`);
+await sleep(600);
+
 /* 17.13. TMDB 搜索缩略图此前直连 image.tmdb.org：绕开 meta.proxy（被墙环境配了代理
    也全是空图），且是浏览器直连第三方的唯一出口。改成经服务端转发，路径要校验。 */
 check('缩略图不再直连 image.tmdb.org',
@@ -1940,6 +2011,21 @@ check('Alt+↑ 挪得回来',
   === JSON.stringify(kbBefore));
 check('手柄不在 Tab 序里', await evl(`document.querySelector('#subs-body .rgrip').tabIndex`) === -1);
 check('复选框可聚焦', await evl(`document.querySelector('#subs-body [data-sel]').tabIndex`) !== -1);
+
+/* 17.18b. 拖手的点击菜单：拖不了的场合（触摸屏）的单指针挪行，与 Alt+↑↓ 同一条 nudgeRow */
+await evl(`document.querySelector('#subs-body tr[data-id="${kbBefore[0]}"] .rgrip').click()`);
+await sleep(250);
+check('拖手点开挪行菜单', await evl(`[...document.querySelectorAll('.thmenu .mi')].map(b => b.textContent.replace(/[↑↓]/g, '')).join()`) === '上移一行,下移一行');
+await evl(`[...document.querySelectorAll('.thmenu .mi')].find(b => b.textContent.includes('下移一行')).click()`);
+await sleep(600);
+check('菜单下移把行挪下去了', (await evl(`[...document.querySelectorAll('#subs-body tr:not(.subrow)')].map(t => +t.dataset.id)`))[1] === kbBefore[0]);
+await evl(`[...document.querySelectorAll('.thmenu .mi')].find(b => b.textContent.includes('上移一行')).click()`);
+await sleep(600);
+check('菜单上移挪得回来',
+  JSON.stringify(await evl(`[...document.querySelectorAll('#subs-body tr:not(.subrow)')].map(t => +t.dataset.id)`))
+  === JSON.stringify(kbBefore));
+await evl(`closePop()`);
+await sleep(120);
 
 /* 17.19. 媒体侧同样三件事。媒体的默认序仍是「最近标记」——拖拽是排序下拉里新增的
    「手动」档，选中才可拖，否则 439 条会被一次性冻结成当前顺序。 */
@@ -2670,15 +2756,25 @@ check('两层的边界在界面上说得出来', await evl(`(() => {
   document.querySelector('#dlg-coll').close();
   return note.includes('所有设备一致');
 })()`) === true);
-// 「还原列宽」只在真有手动列宽时才出现——先把那个前提造出来，否则这条断言没有区分度
 check('表头菜单里的本机项标了「仅本机」', await evl(`(() => {
-  views.subs.widths = { ...views.subs.widths, notes: 180 };
   document.querySelector('#view-subs thead th[data-k="notes"]').click();
   const txt = [...document.querySelectorAll('.thmenu .mi')].map(x => x.textContent).join('|');
   closePop();
+  return txt.includes('隐藏此列（仅本机）') && txt.includes('移列与调宽…');
+})()`) === true);
+// 还原列宽住进了移列与调宽子菜单（主菜单塞不下第五项，上方钉着整份可见），
+// 且只在真有手动列宽时出现——先把前提造出来，否则这条断言没有区分度
+check('还原列宽在子菜单里且只在有手动列宽时出现', await evl(`(() => {
+  views.subs.widths = { ...views.subs.widths, notes: 180 };
+  openMovePop('subs', document.querySelector('#view-subs thead th[data-k="notes"]'));
+  const withW = [...document.querySelectorAll('.thmenu .mi')].map(x => x.textContent).join('|');
+  closePop();
   views.subs.widths = {};
   saveViews();
-  return txt.includes('隐藏此列（仅本机）') && txt.includes('还原列宽（仅本机）');
+  openMovePop('subs', document.querySelector('#view-subs thead th[data-k="notes"]'));
+  const noW = [...document.querySelectorAll('.thmenu .mi')].map(x => x.textContent).join('|');
+  closePop();
+  return withW.includes('还原列宽') && !noW.includes('还原列宽');
 })()`) === true);
 
 /* 17.31b. 属性内核：一种类型的行为集中在 TYPES 一张表里。这几条守的是"单一真源"本身——

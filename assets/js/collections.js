@@ -657,6 +657,14 @@ function collDialog() {
         </select></label>
         <label><span>到期动作说法</span><input data-c="verb" placeholder="续费"></label>
       </div>
+      <div id="coll-order-row" class="fgrid" hidden>
+        <label class="span2"><span>标签位置（拖不了标签时从这里挪）</span>
+          <span class="chips">
+            <button type="button" class="btn ghost" id="coll-mv-l">◀ 前移</button>
+            <button type="button" class="btn ghost" id="coll-mv-r">后移 ▶</button>
+          </span>
+        </label>
+      </div>
       <div id="coll-fields-box" hidden>
         <div class="fp-note">字段是这个库自己的属性：拖动调序、关掉「上表」都<b>跟着账本走、所有设备一致</b>。
           列宽 / 列序 / 隐藏 / 排序 / 筛选是每台设备各自记的，改这里会把本机那份列序覆写作废。</div>
@@ -725,14 +733,25 @@ function fillCollFields(c) {
   fs.forEach((f, idx) => {
     const row = document.createElement('div');
     row.className = 'opt-row';
-    row.draggable = true;
+    row.draggable = true; // ↑↓ 是拖不了的场合（触摸屏）的同功能替代
     // 名称列不给关：它是行的唯一入口，且关掉会让表头与行的字段集对不上
     const locked = f.key === 'name';
     row.innerHTML = `<span class="fp-v">${esc(f.name || f.key)}</span>
+      <button type="button" class="btn link" data-up title="上移">↑</button>
+      <button type="button" class="btn link" data-dn title="下移">↓</button>
       <label class="check sem"${locked ? ' title="名称列承载详情入口，不能撤下表格"' : ''}><input type="checkbox"${f.shown || locked ? ' checked' : ''}${locked ? ' disabled' : ''}><span>上表</span></label>
       ${f.src === 'extra'
         ? '<button type="button" class="btn link fp-del" data-del title="删除此列">✕</button>'
         : '<span class="fp-del"></span>'}`;
+    const move = dir => {
+      const j = idx + dir;
+      if (j < 0 || j >= fs.length) return;
+      const keys = fs.map(x => x.key);
+      [keys[idx], keys[j]] = [keys[j], keys[idx]];
+      apply({ tbl: c.key, keys });
+    };
+    row.querySelector('[data-up]').onclick = () => move(-1);
+    row.querySelector('[data-dn]').onclick = () => move(1);
     // 不上表的列没有表头，表头菜单那条删除入口够不着——这儿是它们唯一的出口
     row.querySelector('[data-del]')?.addEventListener('click', async () => {
       if (!confirm(`删除列「${f.name || f.key}」？该列在所有行的值将被清除，不可撤销。`)) return;
@@ -793,6 +812,25 @@ async function openCollDialog(c) {
   g('verb').value = c?.verb || '';
   collTpl = null;
   fillCollFields(c);
+  // 库顺序的单指针替代：与拖标签写同一个 /api/collections/order；到头/到尾就不动
+  const orderRow = $('#coll-order-row');
+  orderRow.hidden = !c;
+  if (c) {
+    const shift = async dir => {
+      const order = colls().map(x => x.key);
+      const i = order.indexOf(c.key), j = i + dir;
+      if (i < 0 || j < 0 || j >= order.length) return;
+      [order[i], order[j]] = [order[j], order[i]];
+      try {
+        await api('/api/collections/order', {
+          method: 'PUT', body: JSON.stringify({ ids: order.map(k => collOf(k).id) }),
+        });
+        await loadAll();
+      } catch (err) { toast(err.message, true); }
+    };
+    $('#coll-mv-l').onclick = () => shift(-1);
+    $('#coll-mv-r').onclick = () => shift(1);
+  }
   const tplRow = $('#coll-tpl-row');
   tplRow.hidden = true;
   if (!c) {

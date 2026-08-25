@@ -109,11 +109,22 @@ function openOptionsPop(tab, k, anchor) {
     const x = o.v;
     const row = document.createElement('div');
     row.className = 'opt-row';
-    row.draggable = true; // 手动拖动排序
+    row.draggable = true; // 手动拖动排序；↑↓ 是拖不了的场合（触摸屏）的同功能替代
     row.innerHTML = `<button type="button" class="cdot t${o.c ?? tagHash(x)}" data-color title="颜色"></button>
       <span class="fp-v">${tagFor(tab, k, x)}</span>
+      <button type="button" class="btn link" data-up title="上移">↑</button>
+      <button type="button" class="btn link" data-dn title="下移">↓</button>
       <button type="button" class="btn link" data-rn title="改名">✎</button>
       <button type="button" class="btn link" data-del title="删除">✕</button>`;
+    const move = dir => {
+      const j = idx + dir;
+      if (j < 0 || j >= shown.length) return;
+      const next = shown.map(s => ({ ...s }));
+      [next[idx], next[j]] = [next[j], next[idx]];
+      commitList(next);
+    };
+    row.querySelector('[data-up]').onclick = () => move(-1);
+    row.querySelector('[data-dn]').onclick = () => move(1);
     row.addEventListener('dragstart', e => {
       dragFrom = idx;
       e.dataTransfer.effectAllowed = 'move';
@@ -251,6 +262,36 @@ function openRenameColPop(tab, k, th) {
   inp.select();
 }
 
+// 移列与调宽子菜单：列序/列宽的单指针替代（拖不了的场合从这里走），与拖动写同一套
+// views——shiftCol/stepColWidth 都在 table.js。项保持打开可连点，到边/到顶就没动作。
+function openMovePop(tab, th) {
+  closePop();
+  popKey = 'move:' + tab + ':' + th.dataset.k;
+  const k = th.dataset.k;
+  popEl = document.createElement('div');
+  popEl.className = 'thmenu';
+  popEl.innerHTML = '<div class="tm-title">移列与调宽（仅本机）</div>';
+  const acts = [
+    ['←', '左移一列', () => shiftCol(tab, k, -1)],
+    ['→', '右移一列', () => shiftCol(tab, k, 1)],
+    ['＋', '加宽此列', () => stepColWidth(tab, k, 60)],
+    ['－', '变窄此列', () => stepColWidth(tab, k, -60)],
+  ];
+  // 还原列宽住在这儿（主菜单塞不下第五项，e2e 钉着整份可见）；还原完项就消失，顺手关弹层
+  if (Object.keys(views[tab].widths || {}).length) {
+    acts.push(['⟺', '还原列宽（整表）', () => { views[tab].widths = {}; saveViews(); applyWidths(tab); closePop(); }]);
+  }
+  for (const [ic, t, act] of acts) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'mi';
+    b.innerHTML = `<span class="mic">${ic}</span>${t}`;
+    b.onclick = act;
+    popEl.appendChild(b);
+  }
+  placePop(popEl, th);
+}
+
 // 类型子菜单：文本值列可在 文本/单选/多选 呈现间切换（数据库字段本身不变）
 function openTypeMenu(tab, th) {
   closePop();
@@ -279,7 +320,7 @@ function openTypeMenu(tab, th) {
   placePop(popEl, th);
 }
 
-/* Notion 式表头属性菜单：类型 / 排序 / 筛选 / 隐藏列 / 还原列宽 */
+/* Notion 式表头属性菜单：类型 / 排序 / 筛选 / 移列与调宽 / 隐藏列 */
 function openHeadMenu(tab, th) {
   const id = 'menu:' + tab + ':' + th.dataset.k;
   if (popKey === id) { closePop(); return; }
@@ -310,6 +351,9 @@ function openHeadMenu(tab, th) {
     items.push({ ic: '＋', t: '新增状态值…', act: () => openAddStatusPop(tab, k, th), keepPop: true });
     items.push({ ic: '◐', t: '状态语义…', act: () => openStatusSemPop(tab, k, th), keepPop: true });
   }
+  // 列序与列宽的单指针替代（WCAG 2.5.7）走子菜单：直铺四项会撑破菜单的 max-height
+  //（上一回「删除列/重命名列」就是这么把末项挤进滚动条的，e2e 钉着整份可见）。
+  items.push({ ic: '⇄', t: '移列与调宽…', act: () => openMovePop(tab, th), keepPop: true });
   // 详情入口那一列不给隐藏：⤢ 与子行折叠钮都长在这一格里，撤掉整表就没了全表单入口。
   // 库是名称列（后端 PUT /api/fields/{id} 同样拒绝 shown=0），媒体是标题列——两边都要守。
   if (k !== entryKey(tab)) {
@@ -318,9 +362,6 @@ function openHeadMenu(tab, th) {
       saveViews();
       RENDER[tab]();
     } });
-  }
-  if (Object.keys(v.widths || {}).length) {
-    items.push({ ic: '⟺', t: '还原列宽（仅本机）', act: () => { v.widths = {}; saveViews(); applyWidths(tab); } });
   }
   // 值挂在 extra 里的列都归用户管（判据用 src 不用 builtin，与后端一致）；
   // 引擎真列与算出来的列没有改名/删除这两项。

@@ -739,7 +739,8 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
   margin-top: .48rem; font-size: .85rem; line-height: 1.3; font-weight: 650;
   overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
 }
-.card .meta { color: var(--ink-2); font-size: .74rem; display: flex; gap: .5rem; align-items: baseline; }
+/* 10 分制后最坏形状（年份+10★+豆9.9）在 146px 窄卡上是单行；wrap 只是真溢出时的软着陆 */
+.card .meta { color: var(--ink-2); font-size: .74rem; display: flex; flex-wrap: wrap; gap: .1rem .5rem; align-items: baseline; }
 /* 评分数字后面那颗星：只是「这是评分」的标识，用既有的蜂蜜金，别抢数字的位置 */
 .rstar { color: var(--honey); font-size: .88em; }
 .fold { border: 1px solid var(--line); border-radius: 12px; margin-top: .8rem; padding: .5rem .8rem .7rem; }

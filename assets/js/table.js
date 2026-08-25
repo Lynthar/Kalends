@@ -459,6 +459,76 @@ function fitWidths(thead, table) {
   table.style.width = total + 'px';
 }
 
+// 首次动宽先把当前渲染宽整表冻结成存储值（可见列，含操作列；fit 压缩过就是压缩后的值），
+// 避免切 fixed 布局时其余列跳动。拖宽与菜单步进共用这一步。
+function freezeWidths(tab) {
+  const v = views[tab];
+  const hid = v.hiddenCols || [];
+  $(HEAD_SEL[tab]).querySelectorAll('th').forEach(t => {
+    if (!hid.includes(t.dataset.k) && t.style.display !== 'none') v.widths[t.dataset.k] = Math.round(t.getBoundingClientRect().width);
+  });
+  applyWidths(tab);
+}
+
+// 右边框是硬边界：拖宽先吃容器空白，贴边后从被拖列右侧的数据列（显示序邻列优先，
+// 操作列除外）逐列压缩到 MIN_COLW，压无可压就停；拖窄整表收窄。
+// 这份基线拖宽与菜单步进共用，两条入口才不会各长出一套账。
+function widenBase(tab, th) {
+  const v = views[tab];
+  const hid = v.hiddenCols || [];
+  const k = th.dataset.k;
+  const startW = v.widths[k] || Math.round(th.getBoundingClientRect().width);
+  let startSum = 0;
+  for (const [o, px] of Object.entries(v.widths)) if (!hid.includes(o)) startSum += px;
+  const after = [];
+  for (let t = th.nextElementSibling; t; t = t.nextElementSibling) {
+    if (t.classList.contains('ops') || t.style.display === 'none') continue;
+    after.push({ k: t.dataset.k, w0: v.widths[t.dataset.k] || Math.round(t.getBoundingClientRect().width) });
+  }
+  const capW = th.closest('table').closest('.tablewrap').clientWidth;
+  const blank = Math.max(0, capW - startSum); // 最右列当前吃着的残差
+  const maxW = startW + blank + after.reduce((s, a) => s + Math.max(0, a.w0 - MIN_COLW), 0);
+  return { k, startW, after, blank, maxW };
+}
+
+function applyWiden(tab, base, want) {
+  const v = views[tab];
+  const nw = Math.min(base.maxW, Math.max(MIN_COLW, Math.round(want)));
+  v.widths[base.k] = nw;
+  let need = Math.max(0, nw - base.startW - base.blank);
+  for (const a of base.after) {
+    const take = Math.min(need, Math.max(0, a.w0 - MIN_COLW));
+    need -= take;
+    v.widths[a.k] = a.w0 - take;
+  }
+  applyWidths(tab); // 残差列与表宽统一由它结算，右缘恒贴边
+}
+
+// 表头菜单的加宽/变窄（拖不了的场合走这里）：与拖宽同一套基线与结算
+function stepColWidth(tab, k, delta) {
+  const th = $(HEAD_SEL[tab])?.querySelector(`th[data-k="${k}"]`);
+  if (!th) return;
+  if (!Object.keys(views[tab].widths).length) freezeWidths(tab);
+  const base = widenBase(tab, th);
+  applyWiden(tab, base, base.startW + delta);
+  saveViews();
+}
+
+// 表头菜单的左移/右移（拖不了的场合走这里）：与拖动换位写同一份 views.order
+function shiftCol(tab, k, dir) {
+  const cur = (validOrder(tab) || colKeys(tab)).slice();
+  const hid = views[tab].hiddenCols || [];
+  const vis = cur.filter(x => !hid.includes(x));
+  const i = vis.indexOf(k);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= vis.length) return;
+  const a = cur.indexOf(vis[i]), b = cur.indexOf(vis[j]);
+  [cur[a], cur[b]] = [cur[b], cur[a]];
+  views[tab].order = cur;
+  saveViews();
+  RENDER[tab]();
+}
+
 function initColResize(tab, th) {
   const h = document.createElement('span');
   h.className = 'rhandle';
@@ -475,42 +545,10 @@ function initColResize(tab, th) {
     e.stopPropagation();
     th.draggable = false; // 调宽期间禁掉列序拖动（dragstart 的 target 是 th，拦不到把手）
     closePop();
-    const v = views[tab];
-    const hid = v.hiddenCols || [];
-    if (!Object.keys(v.widths).length) {
-      // 冻结当前渲染宽（可见列，含操作列；fit 压缩过就是压缩后的值），避免切 fixed 时跳动
-      $(HEAD_SEL[tab]).querySelectorAll('th').forEach(t => {
-        if (!hid.includes(t.dataset.k) && t.style.display !== 'none') v.widths[t.dataset.k] = Math.round(t.getBoundingClientRect().width);
-      });
-      applyWidths(tab);
-    }
-    const table = th.closest('table');
-    const capW = table.closest('.tablewrap').clientWidth;
-    const k = th.dataset.k;
+    if (!Object.keys(views[tab].widths).length) freezeWidths(tab);
     const startX = e.clientX;
-    const startW = v.widths[k] || Math.round(th.getBoundingClientRect().width);
-    let startSum = 0;
-    for (const [o, px] of Object.entries(v.widths)) if (!hid.includes(o)) startSum += px;
-    // 右边框是硬边界：拖宽先吃容器空白，贴边后从被拖列右侧的数据列（显示序邻列优先，
-    // 操作列除外）逐列压缩到 MIN_COLW，压无可压把手就停；拖窄整表收窄。
-    const after = [];
-    for (let t = th.nextElementSibling; t; t = t.nextElementSibling) {
-      if (t.classList.contains('ops') || t.style.display === 'none') continue;
-      after.push({ el: t, k: t.dataset.k, w0: v.widths[t.dataset.k] || Math.round(t.getBoundingClientRect().width) });
-    }
-    const blank = Math.max(0, capW - startSum); // 最右列当前吃着的残差
-    const maxW = startW + blank + after.reduce((s, a) => s + Math.max(0, a.w0 - MIN_COLW), 0);
-    const move = ev => {
-      const nw = Math.min(maxW, Math.max(MIN_COLW, Math.round(startW + ev.clientX - startX)));
-      v.widths[k] = nw;
-      let need = Math.max(0, nw - startW - blank);
-      for (const a of after) {
-        const take = Math.min(need, Math.max(0, a.w0 - MIN_COLW));
-        need -= take;
-        v.widths[a.k] = a.w0 - take;
-      }
-      applyWidths(tab); // 残差列与表宽统一由它结算，右缘恒贴边
-    };
+    const base = widenBase(tab, th);
+    const move = ev => applyWiden(tab, base, base.startW + ev.clientX - startX);
     const up = () => {
       removeEventListener('pointermove', move);
       removeEventListener('pointerup', up);
@@ -660,6 +698,25 @@ function bindSelectAll(tab, g) {
 
 let rowDrag = null;   // {tab, id}
 
+// 拖手的点击菜单：菜单保持打开可连点；行重绘后按 id 继续生效，不吃 DOM 的巧
+function openRowMenu(tab, id, anchor) {
+  const key = `rowmove:${tab}:${id}`;
+  if (popKey === key) { closePop(); return; }
+  closePop();
+  popKey = key;
+  popEl = document.createElement('div');
+  popEl.className = 'thmenu';
+  for (const [t, ic, step] of [['上移一行', '↑', -1], ['下移一行', '↓', 1]]) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'mi';
+    b.innerHTML = `<span class="mic">${ic}</span>${t}`;
+    b.onclick = () => nudgeRow(tab, id, step);
+    popEl.appendChild(b);
+  }
+  placePop(popEl, anchor);
+}
+
 function bindRowGutter(tab, tr, g) {
   const id = +tr.dataset.id;
   const box = g.querySelector('[data-sel]');
@@ -679,7 +736,12 @@ function bindRowGutter(tab, tr, g) {
     grip.title = tab === 'media' ? '排序选「手动」后才能拖动' : '清掉列排序后才能拖动';
     return;
   }
-  grip.title = '拖动排序';
+  grip.title = '拖动排序 · 点击出上移/下移';
+  // 拖不动的场合（触摸屏、辅助设备）点开菜单挪行，与 Alt+↑↓ 走同一条 nudgeRow
+  grip.onclick = e => {
+    e.stopPropagation();
+    openRowMenu(tab, id, grip);
+  };
   grip.onmousedown = () => { tr.draggable = true; };
   tr.ondragstart = e => {
     if (!tr.draggable) return;
@@ -853,8 +915,25 @@ async function addRowInline(tab) {
 }
 
 function focusNewRow(tab, id) {
-  const tr = tbodyOf(tab)?.querySelector(`tr[data-id="${id}"]`);
-  if (!tr) return void toast('新行建好了，但被当前的筛选或搜索挡住了');
+  let tr = tbodyOf(tab)?.querySelector(`tr[data-id="${id}"]`);
+  if (!tr) {
+    // 新空行几乎必被筛选/搜索挡住；光提示等于请人再点一次、攒一堆空行。
+    // 清掉本表的筛选与搜索让它现身——建行是显式动作，丢一次筛选是它的自然代价
+    const v = views[tab];
+    v.filters = {};
+    v.q = '';
+    if (tab === 'media') {
+      state.mQ = '';
+      $('#m-search').value = '';
+    } else {
+      $('#t-search').value = '';
+    }
+    saveViews();
+    RENDER[tab]();
+    tr = tbodyOf(tab)?.querySelector(`tr[data-id="${id}"]`);
+    if (!tr) return void toast('新行建好了，但没能定位到它');
+    toast('已清除本表的筛选与搜索，定位到新行');
+  }
   const open = () => {
     const cells = [...tr.children].filter(td => td.style.display !== 'none');
     const td = cells.find(x => x.dataset.k === 'name' || x.dataset.k === 'title') || cells[0];
