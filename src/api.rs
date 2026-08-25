@@ -269,6 +269,113 @@ async fn notify_log(State(app): State<App>) -> R {
     Ok(Json(json!(notify_log_rows(&conn)?)))
 }
 
+/// 已知键按形状拦、不认识的键照存。只拦「一眼可辨的垃圾」——写坏了会静默出事的那几类
+///（端口环绕、阈值解析失败回默认、空 ICS 令牌把日历开给所有人）；R3-#6 的拍板仍然成立：
+/// 键白名单会把「漏登记的键」变成「永远存不进去且不报错」。
+fn check_setting(k: &str, v: &str) -> anyhow::Result<()> {
+    let int_in = |lo: i64, hi: i64, what: &str| {
+        v.trim()
+            .parse::<i64>()
+            .ok()
+            .filter(|n| (lo..=hi).contains(n))
+            .map(|_| ())
+            .ok_or_else(|| bad(format!("{what}要是 {lo}–{hi} 的整数")))
+    };
+    match k {
+        "auth.pin" => (v.is_empty()
+            || (v.len() <= 64 && v.chars().all(|c| c.is_ascii_alphanumeric())))
+        .then_some(())
+        .ok_or_else(|| bad("PIN 只收字母与数字（至多 64 位）；留空＝不设门")),
+        "notify.window_days" => int_in(1, 3650, "摘要窗口"),
+        "ui.upcoming_days" => int_in(1, 3650, "到期窗口"),
+        "notify.digest_time" => (v.is_ascii()
+            && v.len() == 5
+            && v.as_bytes()[2] == b':'
+            && v[..2].parse::<u8>().is_ok_and(|h| h < 24)
+            && v[3..].parse::<u8>().is_ok_and(|m| m < 60))
+        .then_some(())
+        .ok_or_else(|| bad("摘要时刻要是 HH:MM")),
+        "notify.thresholds" => {
+            let arr: Vec<i64> =
+                serde_json::from_str(v).map_err(|_| bad("提醒阈值要是整数数组（可以为空）"))?;
+            (arr.len() <= 32 && arr.iter().all(|n| (0..=3650).contains(n)))
+                .then_some(())
+                .ok_or_else(|| bad("提醒阈值每项要在 0–3650 天"))
+        }
+        "notify.telegram" | "notify.email" => {
+            let o: Value = serde_json::from_str(v).map_err(|_| bad("渠道配置要是 JSON 对象"))?;
+            let o = o.as_object().ok_or_else(|| bad("渠道配置要是 JSON 对象"))?;
+            for (fk, fv) in o {
+                let ok = match fk.as_str() {
+                    "enabled" | "starttls" => fv.is_boolean(),
+                    "port" => fv.is_u64(),
+                    _ => fv.is_string(),
+                };
+                if !ok {
+                    return Err(bad(format!("渠道配置 {fk} 的类型不对")));
+                }
+            }
+            // 端口在写入口就拦：环绕成没人配过的端口号之后，读侧只能悄悄回落默认
+            if let Some(p) = o.get("port") {
+                p.as_u64()
+                    .filter(|p| (1..=65535).contains(p))
+                    .ok_or_else(|| bad("SMTP 端口要在 1–65535"))?;
+            }
+            Ok(())
+        }
+        "fx.display" => {
+            let t = v.trim();
+            (t.is_empty() || (t.len() == 3 && t.chars().all(|c| c.is_ascii_alphabetic())))
+                .then_some(())
+                .ok_or_else(|| bad("显示币种要是三位字母代码，留空＝不折算"))
+        }
+        "ics.token" => (!v.is_empty()
+            && v.len() <= 128
+            && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        .then_some(())
+        .ok_or_else(|| bad("ICS 令牌要是非空的 URL 安全字符串——空令牌等于把日历开给所有人")),
+        "meta.proxy" => (v.is_empty() || v.contains("://"))
+            .then_some(())
+            .ok_or_else(|| bad("代理要是带协议的地址（如 socks5://…），留空＝直连")),
+        _ => Ok(()),
+    }
+}
+
+// 渠道密钥不回读明文：GET 把它换成占位串，PUT 收到占位串＝保持库里那份。
+// 占位串在输入框里就是一排点，前端不必知道这套机制存在；清空照旧发 ""。
+const SECRET_MASK: &str = "••••••••";
+
+fn secret_field(k: &str) -> Option<&'static str> {
+    match k {
+        "notify.telegram" => Some("bot_token"),
+        "notify.email" => Some("password"),
+        _ => None,
+    }
+}
+
+fn mask_secret(k: &str, stored: &str) -> String {
+    let Some(field) = secret_field(k) else { return stored.into() };
+    let Ok(mut v) = serde_json::from_str::<Value>(stored) else { return stored.into() };
+    if v[field].as_str().is_some_and(|s| !s.is_empty()) {
+        v[field] = Value::from(SECRET_MASK);
+    }
+    v.to_string()
+}
+
+fn keep_masked_secret(conn: &rusqlite::Connection, k: &str, incoming: &str) -> anyhow::Result<String> {
+    let Some(field) = secret_field(k) else { return Ok(incoming.into()) };
+    let Ok(mut v) = serde_json::from_str::<Value>(incoming) else { return Ok(incoming.into()) };
+    if v[field].as_str() == Some(SECRET_MASK) {
+        // 读不出旧值要报错别吞：把故障当"没存过"会把密钥静默清空
+        let stored = crate::db::get_setting_checked(conn, k)?
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .and_then(|s| s[field].as_str().map(str::to_string))
+            .unwrap_or_default();
+        v[field] = Value::from(stored);
+    }
+    Ok(v.to_string())
+}
+
 async fn settings_get(State(app): State<App>) -> R {
     let conn = app.db.lock().unwrap();
     let mut stmt = conn.prepare("SELECT key,value FROM settings")?;
@@ -278,7 +385,8 @@ async fn settings_get(State(app): State<App>) -> R {
     })?;
     for row in rows {
         let (k, v) = row?;
-        out.insert(k, Value::String(v));
+        let masked = mask_secret(&k, &v);
+        out.insert(k, Value::String(masked));
     }
     Ok(Json(Value::Object(out)))
 }
@@ -290,11 +398,13 @@ async fn settings_put(State(app): State<App>, Json(b): Json<Value>) -> R {
     let mut pairs = Vec::with_capacity(obj.len());
     for (k, v) in obj {
         let val = v.as_str().ok_or_else(|| bad(format!("{k} 的值必须是字符串")))?;
+        check_setting(k, val)?;
         pairs.push((k, val));
     }
     let conn = app.db.lock().unwrap();
     let tx = conn.unchecked_transaction()?;
     for (k, val) in pairs {
+        let val = keep_masked_secret(&tx, k, val)?;
         tx.execute(
             "INSERT INTO settings(key,value) VALUES(?1,?2)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -376,6 +486,66 @@ mod tests {
         assert!(chk(&json!({ "name": null, "cycle_days": "", "price": null, "extra": null })).is_ok());
         assert!(chk(&json!({ "due": "只读键随便传" })).is_ok());
         assert!(chk(&json!({})).is_ok());
+    }
+
+    /// 已知键拦一眼可辨的垃圾，不认识的键照存——R3-#6 的拍板：不做键白名单，
+    /// 漏登记的键「存不进去且不报错」比存进垃圾更糟。
+    #[test]
+    fn known_settings_are_shape_checked_and_unknown_keys_pass() {
+        let ok = |k, v| assert!(check_setting(k, v).is_ok(), "{k}={v}");
+        let no = |k, v| assert!(check_setting(k, v).is_err(), "{k}={v}");
+        ok("auth.pin", "");
+        ok("auth.pin", "1a2B");
+        no("auth.pin", "p@ss");
+        ok("notify.window_days", "14");
+        no("notify.window_days", "0");
+        no("notify.window_days", "x");
+        ok("notify.digest_time", "09:00");
+        no("notify.digest_time", "9:00");
+        no("notify.digest_time", "24:00");
+        ok("notify.thresholds", "[]");
+        ok("notify.thresholds", "[14,7,0]");
+        no("notify.thresholds", r#"["a"]"#);
+        no("notify.thresholds", "14,7");
+        ok("notify.email", r#"{"enabled":true,"port":465,"password":"x"}"#);
+        no("notify.email", r#"{"port":70000}"#);
+        no("notify.email", r#"{"port":0}"#);
+        no("notify.email", r#"{"enabled":"yes"}"#);
+        no("notify.telegram", "not json");
+        ok("fx.display", "");
+        ok("fx.display", " cny ");
+        no("fx.display", "yuan");
+        ok("ics.token", "abcDEF123_-");
+        no("ics.token", "");
+        no("ics.token", "白");
+        ok("meta.proxy", "");
+        ok("meta.proxy", "socks5://127.0.0.1:1080");
+        no("meta.proxy", "12345");
+        ok("some.future_key", "anything at all");
+    }
+
+    /// 渠道密钥不回读明文：GET 换占位串；PUT 收占位串＝保持、收新值＝更新、收空串＝清掉。
+    #[test]
+    fn channel_secrets_mask_on_read_and_keep_on_masked_write() {
+        let conn = crate::db::fresh_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES('notify.telegram',?1)",
+            [r#"{"enabled":true,"bot_token":"tok123","chat_id":"1"}"#],
+        )
+        .unwrap();
+        let stored = crate::db::get_setting(&conn, "notify.telegram").unwrap();
+        let masked = mask_secret("notify.telegram", &stored);
+        assert!(!masked.contains("tok123") && masked.contains(SECRET_MASK), "{masked}");
+        let kept = keep_masked_secret(&conn, "notify.telegram", &masked).unwrap();
+        assert!(kept.contains("tok123"), "{kept}");
+        let fresh = keep_masked_secret(&conn, "notify.telegram", r#"{"bot_token":"new"}"#).unwrap();
+        assert!(fresh.contains("new") && !fresh.contains("tok123"));
+        let cleared = keep_masked_secret(&conn, "notify.telegram", r#"{"bot_token":""}"#).unwrap();
+        assert!(!cleared.contains("tok123"));
+        // 空 token 不上占位串（否则看起来像已配置）；无密钥可藏的键原样通过
+        assert!(!mask_secret("notify.telegram", r#"{"bot_token":""}"#).contains(SECRET_MASK));
+        assert_eq!(secret_field("notify.email"), Some("password"));
+        assert_eq!(mask_secret("fx.display", "CNY"), "CNY");
     }
 
     /// 通知记录是 notification_log 唯一的读路径：最新在前、covered 行不缺席、

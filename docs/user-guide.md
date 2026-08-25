@@ -7,12 +7,15 @@ Kalends 是单个二进制 + 单个 SQLite 文件，怎么跑都行；推荐 Doc
 ```bash
 docker build -t kalends:local .
 mkdir -p /path/to/appdata/kalends
+chown -R 10001:10001 /path/to/appdata/kalends   # 容器内以非 root（uid 10001）运行，数据卷要先交给它
 cp deploy/compose.yaml /path/to/compose/kalends/
 cd /path/to/compose/kalends && docker compose up -d
 curl -sf http://127.0.0.1:4180/api/health
 ```
 
 `compose.yaml` 里按需修改数据卷路径与时区；容器默认只绑 `127.0.0.1:4180`，由你的反向代理对局域网提供访问。
+
+**从旧版（root 运行的镜像）升级**：换镜像前先在宿主机对既有数据卷执行同一条 `chown -R 10001:10001`，否则新容器写不进 `/data`、起不来（日志会明说）；`chown` 回 root 即可回退旧镜像。基础镜像已钉 digest，升级基础镜像＝显式改 `Dockerfile` 里的 `@sha256:` 值。
 
 ## 反向代理示例（Caddy）
 
@@ -55,6 +58,20 @@ kalends restore --from /path/to/data/backups/snapshot-2026-01-01.db --to /path/t
 命令会复制快照、做 `integrity_check`、从原数据目录把 `covers/` 与 `logos/` 一并带上，并核对条目引用的图标/海报是否在位；之后把 `KALENDS_DATA`（或 compose 的数据卷）指向新目录即可。退出码 `0` 为完整恢复；`1` 表示数据库完好但有引用文件缺失（会逐个列出）。目标目录必须为空——恢复永不覆盖在用数据。
 
 升级版本时，应用会在跑数据库迁移之前自动往 `backups/` 落一份 `pre-migration-v<N>.db`；落不下去（如磁盘满）会拒绝启动。回滚部署或迁移出问题时，从这份快照恢复。
+
+## 升级与回滚 / Upgrade & Rollback
+
+- **升级**：重新 `docker build` + `docker compose up -d`。应用在跑数据库迁移**之前**会自动往 `backups/` 落一份 `pre-migration-v<N>.db`；落不下去（如磁盘满）会拒绝启动，先腾空间再试。
+- **回滚**：数据库结构没动过的升级直接换回旧镜像即可。**跑过迁移的升级不能带库回滚**——旧二进制遇到更新的数据库会拒绝启动（这是保护，不是故障）。此时用迁移前快照恢复：`kalends restore --from backups/pre-migration-v<N>.db --to <新目录>`，把数据卷指向新目录后再起旧镜像。
+
+## 通知排查 / Notifications Troubleshooting
+
+提醒没来时按顺序看：
+
+1. **设置页「通知发送记录」**：每次投递成败都记一条，失败带原因（悬停「失败」看全文）。这里空着说明决策层就没发——往下查。
+2. **渠道开关与凭据**：Telegram / 邮件要勾选启用且凭据齐全；「发送测试」按钮当场验证。
+3. **阈值与语义**：提醒阈值留空＝只发每日摘要；条目静音（muted）不发逐项提醒但仍进摘要；**逾期条目只在首轮提醒一次**，之后只出现在每日摘要里——这些都是设计行为。
+4. **时区**：容器默认 UTC，「今天」会错位——compose 里设 `TZ`，启动日志会打印本地时间供核对。
 
 ## 注意
 

@@ -3098,6 +3098,21 @@ const nt_resp = await raw('/api/notify/test', 'POST', { channel: 'telegram' });
 const nt_body = await nt_resp.text();
 check('发送失败是 500（配置在、网络不通不是客户端的锅）', nt_resp.status === 500, String(nt_resp.status));
 check('错误响应里没有 bot token', !nt_body.includes(NT_CANARY), nt_body.slice(0, 160));
+
+/* 17.36b. 渠道密钥不回读明文：GET 是占位串；占位串写回=保持（notify/test 走到发送层
+   报 500 说明 token 还在——「未配置」才是 400）；发空串=真清掉。 */
+const maskedSt = await (await fetch(APP + 'api/settings')).json();
+check('设置回读不含 bot token', !JSON.stringify(maskedSt).includes(NT_CANARY));
+const maskedTg = JSON.parse(maskedSt['notify.telegram']);
+check('token 字段是占位串', maskedTg.bot_token === '••••••••', maskedTg.bot_token);
+await put('/api/settings', { 'notify.telegram': JSON.stringify(maskedTg) }); // 表单原样存回
+check('占位串写回后配置仍完整（发送层 500 而非 400）',
+  (await raw('/api/notify/test', 'POST', { channel: 'telegram' })).status === 500);
+await put('/api/settings', {
+  'notify.telegram': JSON.stringify({ enabled: true, bot_token: '', chat_id: '1', proxy: 'http://127.0.0.1:9' }),
+});
+check('发空串把密钥真清掉（回到未配置 400）',
+  (await raw('/api/notify/test', 'POST', { channel: 'telegram' })).status === 400);
 await put('/api/settings', {
   'notify.telegram': JSON.stringify({ enabled: false, bot_token: '', chat_id: '', proxy: '' }),
 });
