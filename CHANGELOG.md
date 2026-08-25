@@ -4,22 +4,12 @@ Release notes are taken from this file verbatim — each `## vX.Y.Z` section bec
 
 ## v0.1.0
 
-First public release. Kalends has been running as the author's daily ledger for a few months; this is the first tagged build with prebuilt binaries.
+First tagged build. Kalends is a self-hosted ledger for things that renew: subscriptions, SIM keep-alives, VPS boxes, and whatever else you care to define. A media library sits alongside it. The code has been running as my own ledger for a few months and did not change for the release — it just has binaries now.
 
-**What you get**
+Take `x86_64-unknown-linux-gnu` for an ordinary server, `aarch64` for ARM boxes and NAS units, or the static `musl` build if your glibc is old or you are on Alpine. Check what you downloaded against `SHA256SUMS`.
 
-- Renewal tracking for anything with a next date — subscriptions, SIM keep-alives, VPS boxes ship as ready-made collections, and you can build your own from a template or from scratch.
-- Notion-style tables: typed columns, in-place editing, per-collection field sets, per-device sort/filter/width.
-- Reminders over Telegram and SMTP with N-days-before thresholds and a daily digest, deduplicated and catching up on downtime; plus an ICS feed to subscribe from a phone calendar.
-- Media library for films, series, anime and games, with TMDB lookup and a poster wall.
-- Prices kept in their original currency; status values carry their own spend/alert/timeline semantics.
-- Nightly SQLite snapshots and a plain-text JSONL dump, `kalends restore` to rebuild a verified data directory from a snapshot, and an automatic snapshot before any database migration.
-- One binary, one SQLite file, no account, no telemetry. Optional PIN gate.
+Unpack it, point `KALENDS_DATA` at a directory on local disk, and open http://127.0.0.1:4180. Keep that directory off SMB and NFS; their locking is not reliable enough for a ledger. Compose file, reverse proxy, backups and restore are in [the user guide](https://github.com/Lynthar/Kalends/blob/main/docs/user-guide.md).
 
-**Requirements**
+### Before you trust it with data
 
-Linux x86_64 or aarch64. The `musl` build is statically linked and runs on older distributions and Alpine. Keep the SQLite file on local disk — network filesystem locking is not reliable enough for a ledger.
-
-**Known limits**
-
-Single user by design: there are no accounts and no per-user data. Two stale browser tabs can overwrite each other. Touch-target sizes have not been verified on real mobile devices, and the notification path has not yet been exercised against a live channel by anyone but the author.
+Single user by design: no accounts, no permissions, and the optional PIN stops a curious housemate and nothing more. Two browser tabs left open on stale data can overwrite each other. The notification path has never run against a live channel outside my own instance, and nobody has checked the touch targets on a real phone.

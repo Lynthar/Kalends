@@ -77,11 +77,13 @@ jobs:
       - name: Checksums
         run: cd dist && sha256sum *.tar.gz > SHA256SUMS
       # gh 是 runner 自带的，不引第三方 action：发布这一步的供应链越短越好。
-      # 发布说明只从 CHANGELOG.md 取（单一真源），那儿没写就停下——宁可不发也别发一份空说明
-      - name: Create release
+      # 发布说明只从 CHANGELOG.md 取（单一真源），那儿没写就停下——宁可不发也别发一份空说明。
+      # **建草稿不直接发布**：产物与说明都先落到草稿上，人过一眼再点 Publish
+      - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           awk -v v="## $GITHUB_REF_NAME" '$0==v{f=1;next} /^## /{f=0} f' CHANGELOG.md > notes.md
           test -s notes.md || { echo "CHANGELOG.md 里没有 $GITHUB_REF_NAME 这一节"; exit 1; }
-          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file notes.md
+          gh release create "$GITHUB_REF_NAME" dist/* --draft --title "$GITHUB_REF_NAME" --notes-file notes.md
+          echo "草稿已建好，去 Releases 页确认后再 Publish"
