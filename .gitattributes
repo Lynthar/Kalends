@@ -1,0 +1,4 @@
+# 全仓按 LF 存取。不钉的话，任何 core.autocrlf=true 的 Windows 检出都会
+# 把整棵树写成 CRLF，此后每个文件在 diff 里都是整篇重写，真实改动被淹没；
+# Dockerfile 里的 CR 还会直接让镜像构建失败。
+* text=auto eol=lf
