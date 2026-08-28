@@ -5,9 +5,11 @@
   <p><a href="README.md">English</a> · <b>中文</b></p>
 </div>
 
-> 自托管的个人台账：**续费中心**（预置订阅 / SIM 卡保号 / VPS，也能自己建库）加**媒体库**（影视 / 剧集 / 动画 / 游戏）。单个 Rust 二进制、单个 SQLite 文件，数据全程在自己盘上。
+> 自托管的续费台账：预置订阅 / SIM 卡保号 / VPS 三个库，也能自己建——凡是「有下一个日期」的东西都记得下。单个 Rust 二进制、单个 SQLite 文件，数据全程在自己盘上。
 
 名字取自罗马历的朔日 *Kalendae*——每月初一收账还债之日，也是 calendar 的词源。图标里那弯被气泡一颗颗补圆的薄荷朔月，就是它：账期数满成圆，朔日收账。
+
+曾经内置的媒体库（影视 / 剧集 / 动画 / 游戏）已独立成 [Ludi](https://github.com/Lynthar/Ludi)，那边有把媒体数据整份搬过去的导入脚本。
 
 ## 它做什么
 
@@ -29,15 +31,9 @@
 
 Telegram Bot 与 SMTP 邮件，提前 N 天逐档提醒加每日摘要，Telegram 可以单独走代理。发送按（种类, 条目, 到期日, 档位, 渠道）去重，停机期间漏掉的会补发。另有 ICS 订阅地址，事件自带提前一天的闹钟——手机日历订上，推送就可以不要了。
 
-### 媒体库
-
-豆瓣式字段（导演 / 编剧 / 类型，豆瓣评分与短评快照），我的评分按 10 分制、与豆瓣评分并排可比，海报墙与表格双视图。按需调 TMDB 抓中文元数据，海报落到本地。批量导入走接口，`scripts/notion-import.py` 是当初从 Notion 搬家用的脚本。
-
 ### 备份与隐私
 
-每天 03:30 之后做一份 SQLite 快照，滚动保留 14 份；同时把每张表导成 JSONL 明文，不装 Kalends 也读得懂。可选 PIN 门禁。零遥测，也不会自己往外发东西：出网只有 TMDB 抓取、拉取实时汇率、从网站取图标这三件——都得你点一下才发生——加上你自己配的通知渠道。
-
-只要一半也行：`KALENDS_MODULES=renewals` 或 `=media`，另一半的接口、界面、后台任务整个不存在。
+每天 03:30 之后做一份 SQLite 快照，滚动保留 14 份；同时把每张表导成 JSONL 明文，不装 Kalends 也读得懂。可选 PIN 门禁。零遥测，也不会自己往外发东西：出网只有拉取实时汇率、从网站取图标这两件——都得你点一下才发生——加上你自己配的通知渠道。
 
 ## 快速开始与部署
 
@@ -54,18 +50,18 @@ KALENDS_DATA=./data ./kalends-*/kalends      # http://127.0.0.1:4180
 cargo run    # http://127.0.0.1:4180，数据在 ./data/
 ```
 
-TMDB 抓取要先在设置页填一个免费申请的 API key。手机上「添加到主屏幕」可以全屏运行。
+手机上「添加到主屏幕」可以全屏运行。
 
-生产部署（Docker Compose、反向代理、单模块开关）见 [docs/user-guide.md](docs/user-guide.md)。环境变量：`KALENDS_ADDR`（默认 `127.0.0.1:4180`）、`KALENDS_DATA`（默认 `./data`）、`KALENDS_MODULES`（默认 `renewals,media`）。
+生产部署（Docker Compose、反向代理）见 [docs/user-guide.md](docs/user-guide.md)。环境变量：`KALENDS_ADDR`（默认 `127.0.0.1:4180`）、`KALENDS_DATA`（默认 `./data`）。
 
-SQLite 文件务必放本地磁盘，SMB / NFS 的文件锁不够可靠，别拿账本去赌。被墙的网络环境里，设置页有一个共用的出网代理（管 TMDB、汇率、取图标），Telegram 另有自己的一格。
+SQLite 文件务必放本地磁盘，SMB / NFS 的文件锁不够可靠，别拿账本去赌。被墙的网络环境里，设置页有一个共用的出网代理（管汇率与取图标），Telegram 另有自己的一格。
 
 构建受同一条约束。仓库本身放在网络共享上时，先把 Cargo 的产物指到本地盘——`export CARGO_TARGET_DIR=~/.cache/kalends-target`——增量编译要的文件锁这类文件系统给不了，不指的话 `cargo build` 只会撂下一句 `os error 45`。
 
 ## 仓库结构
 
 ```
-src/            axum 服务、到期引擎、通知、备份、TMDB 客户端
+src/            axum 服务、到期引擎、通知、备份
 migrations/     数据库迁移（编译期嵌入，PRAGMA user_version 记版本）
 assets/         前端（原生 JS，无构建步骤，编译期嵌入二进制；js/ 下拆成八份按序加载）
 scripts/        Notion 迁移脚本、前端端到端验证、迁移演练与接口对拍

@@ -2,6 +2,14 @@
 
 Release notes are taken from this file verbatim — each `## vX.Y.Z` section becomes that release's body.
 
+## v0.2.0
+
+Kalends is now the renewal tracker alone. The media library moved to its own project, [Ludi](https://github.com/Lynthar/Ludi), which ships `scripts/import-from-kalends.py` to carry your media rows, custom columns and cached posters across wholesale.
+
+**Upgrading**: if your database still holds media entries, this version refuses to start and says so — move them to Ludi (or clear the media library in v0.1.x) first. A pre-migration snapshot lands in `backups/` before the schema changes either way. Once you are settled, the now-unused `covers/` directory in the data directory can be deleted by hand.
+
+**Removed**: the media pages and API (`/api/media`, `/api/tmdb/*`, `/covers`), the `KALENDS_MODULES` module switch and `/config.js`, and the TMDB key setting. Outbound traffic is down to exchange-rate refreshes, favicon fetches and your notification channels.
+
 ## v0.1.0
 
 First tagged build. Kalends is a self-hosted ledger for things that renew: subscriptions, SIM keep-alives, VPS boxes, and whatever else you care to define. A media library sits alongside it. The code has been running as my own ledger for a few months and did not change for the release — it just has binaries now.

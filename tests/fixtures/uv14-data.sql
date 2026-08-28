@@ -19,10 +19,6 @@ INSERT INTO items(id, collection_id, name, status, price, currency, cycle, cycle
   (103, 3, 'ExampleHost',     'Active', 5.5,   'USD', 'annual',  NULL, NULL,         '2026-05-20', '{"product":"VPS-Basic","cores":2}',       1),
   (104, 4, 'Example Almanac', 'Active', NULL,  NULL,  NULL,      NULL, '2026-12-31', NULL,         NULL,                                      1);
 
-INSERT INTO media_items(id, kind, title, year, status, rating, marked_at, pos) VALUES
-  (201, '电影', 'Example Film E', 2018, '看过', 3, '2024-02-02', 1),
-  (202, '游戏', 'Example Game F', 2017, '弃',   0, NULL,         2);
-
 INSERT INTO renewal_ledger(kind, item_id, renewed_at, amount, currency) VALUES
   ('subs',  101, '2026-08-01', 11.99, 'USD'),
   ('books', 999, '2026-01-01', NULL,  NULL);

@@ -5,9 +5,11 @@
   <p><b>English</b> · <a href="README.zh-CN.md">中文</a></p>
 </div>
 
-> Self-hosted tracker for everything that renews — subscriptions, SIM keep-alives, VPS boxes, and whatever else you care to define — plus a media library for films, series, anime and games. One Rust binary, one SQLite file, no account anywhere.
+> Self-hosted tracker for everything that renews — subscriptions, SIM keep-alives, VPS boxes, and whatever else you care to define. One Rust binary, one SQLite file, no account anywhere.
 
 Named after the Roman *Kalendae*: the first day of the month, when debts came due. It is where the word "calendar" comes from — and the new moon that opened each Roman month is the crescent in the icon, filling up bubble by bubble until the account falls due.
+
+The media library that used to live here (films, series, anime and games) is now its own project, [Ludi](https://github.com/Lynthar/Ludi), which ships an importer that moves your media data across wholesale.
 
 ## What it does
 
@@ -29,15 +31,9 @@ Columns are data, so a new collection arrives with a working set. Add your own, 
 
 Telegram bot and SMTP mail, N-days-before thresholds plus a daily digest. Telegram can go through its own proxy. Sends are deduplicated on (kind, item, due date, threshold, channel) and catch up on whatever was missed while the server was down. There is also an ICS feed whose events carry a one-day alarm — subscribe from your phone's calendar and you can skip push notifications entirely.
 
-### Media library
-
-Douban-shaped fields (directors, writers, genres, a snapshot of the Douban rating and reviews), your own score out of ten next to Douban's, poster wall and table views. TMDB lookup on demand in Chinese, posters cached to disk. Bulk import over the API; `scripts/notion-import.py` is the script used to move off Notion.
-
 ### Backups and privacy
 
-A SQLite snapshot every night after 03:30, 14 kept on a rolling basis, plus a plain-text JSONL dump of every table that stays readable without Kalends. Optional PIN gate. No telemetry, and nothing leaves the machine on its own: the outbound traffic is a TMDB lookup, an exchange-rate refresh or a favicon fetch — each one only when you ask for it — plus the notification channels you configure.
-
-You can ship half of it. `KALENDS_MODULES=renewals` or `=media` removes the other half's routes, interface and background jobs.
+A SQLite snapshot every night after 03:30, 14 kept on a rolling basis, plus a plain-text JSONL dump of every table that stays readable without Kalends. Optional PIN gate. No telemetry, and nothing leaves the machine on its own: the outbound traffic is an exchange-rate refresh or a favicon fetch — each one only when you ask for it — plus the notification channels you configure.
 
 ## Quick start
 
@@ -54,11 +50,11 @@ Or from source:
 cargo run     # http://127.0.0.1:4180, data in ./data/
 ```
 
-TMDB lookups need a free API key, entered on the settings page. On a phone, "add to home screen" gives you a full-screen app.
+On a phone, "add to home screen" gives you a full-screen app.
 
-For a real deployment (Docker Compose, reverse proxy, single-module setups) see [docs/user-guide.md](docs/user-guide.md). Environment variables: `KALENDS_ADDR` (default `127.0.0.1:4180`), `KALENDS_DATA` (default `./data`), `KALENDS_MODULES` (default `renewals,media`).
+For a real deployment (Docker Compose, reverse proxy) see [docs/user-guide.md](docs/user-guide.md). Environment variables: `KALENDS_ADDR` (default `127.0.0.1:4180`) and `KALENDS_DATA` (default `./data`).
 
-Behind a restrictive network, the settings page has one shared outbound proxy covering TMDB lookups, exchange-rate refreshes and favicon fetches; Telegram gets its own proxy field.
+Behind a restrictive network, the settings page has one shared outbound proxy covering exchange-rate refreshes and favicon fetches; Telegram gets its own proxy field.
 
 Keep the SQLite file on local disk. Locking over SMB or NFS is not reliable enough to trust a ledger to.
 
@@ -67,7 +63,7 @@ Building has the same constraint. If the repository itself sits on a network sha
 ## Repository layout
 
 ```
-src/            axum server, renewal engine, notifications, backups, TMDB client
+src/            axum server, renewal engine, notifications, backups
 migrations/     database migrations (embedded at compile time, versioned by PRAGMA user_version)
 assets/         frontend (vanilla JS, no build step, embedded at compile time; js/ splits into eight files loaded in order)
 scripts/        Notion migration, frontend end-to-end checks, migration rehearsals and API diffing

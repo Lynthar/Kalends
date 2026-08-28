@@ -10,7 +10,6 @@ use serde_json::{Map, Value};
 const TABLES: &[&str] = &[
     "collections",
     "items",
-    "media_items",
     "fields",
     "renewal_ledger",
     "notification_log",
@@ -143,7 +142,7 @@ pub fn restore(from: &Path, to: &Path) -> Result<RestoreReport> {
         anyhow::bail!("快照的 user_version {user_version} 高于本二进制支持的 {known}：用更新版本的 Kalends 来恢复");
     }
 
-    // 图标与海报不在快照里：按标准布局回到原数据目录整份带上（含孤儿，恢复求忠实不做清理）
+    // 图标不在快照里：按标准布局回到原数据目录整份带上（含孤儿，恢复求忠实不做清理）
     let assets_from = from
         .parent()
         .filter(|p| p.file_name().is_some_and(|n| n == "backups"))
@@ -151,12 +150,11 @@ pub fn restore(from: &Path, to: &Path) -> Result<RestoreReport> {
         .map(Path::to_path_buf);
     let mut assets_copied = 0usize;
     if let Some(src) = &assets_from {
-        for sub in ["covers", "logos"] {
-            let Ok(entries) = fs::read_dir(src.join(sub)) else { continue };
-            fs::create_dir_all(to.join(sub))?;
+        if let Ok(entries) = fs::read_dir(src.join("logos")) {
+            fs::create_dir_all(to.join("logos"))?;
             for entry in entries.flatten() {
                 if entry.path().is_file() {
-                    fs::copy(entry.path(), to.join(sub).join(entry.file_name()))?;
+                    fs::copy(entry.path(), to.join("logos").join(entry.file_name()))?;
                     assets_copied += 1;
                 }
             }
@@ -165,32 +163,29 @@ pub fn restore(from: &Path, to: &Path) -> Result<RestoreReport> {
 
     // 引用核对：条目引用而磁盘缺失的按缺失报；名字不过 safe_name 的本就永远服务不出来，同报
     let mut referenced = Vec::new();
-    for (table, col, sub) in [("items", "logo", "logos"), ("media_items", "cover", "covers")] {
-        if !table_exists(&conn, table) {
-            continue; // 老快照可能还没这张表，缺表不等于缺文件
-        }
+    if table_exists(&conn, "items") {
+        // 老快照可能还没这张表，缺表不等于缺文件
         let mut stmt =
-            conn.prepare(&format!("SELECT {col} FROM {table} WHERE {col} IS NOT NULL AND {col} != ''"))?;
+            conn.prepare("SELECT logo FROM items WHERE logo IS NOT NULL AND logo != ''")?;
         let names = stmt.query_map([], |r| r.get::<_, String>(0))?;
         for name in names {
-            referenced.push((sub, name?));
+            referenced.push(name?);
         }
     }
     let mut missing = std::collections::BTreeSet::new();
     let mut present = std::collections::HashSet::new();
-    for (sub, name) in &referenced {
-        if crate::api::safe_name(name) && to.join(sub).join(name).is_file() {
-            present.insert(format!("{sub}/{name}"));
+    for name in &referenced {
+        if crate::api::safe_name(name) && to.join("logos").join(name).is_file() {
+            present.insert(name.clone());
         } else {
-            missing.insert(format!("{sub}/{name}"));
+            missing.insert(format!("logos/{name}"));
         }
     }
     let mut orphans = 0usize;
-    for sub in ["covers", "logos"] {
-        let Ok(entries) = fs::read_dir(to.join(sub)) else { continue };
+    if let Ok(entries) = fs::read_dir(to.join("logos")) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if entry.path().is_file() && !present.contains(&format!("{sub}/{name}")) {
+            if entry.path().is_file() && !present.contains(&name) {
                 orphans += 1;
             }
         }
@@ -257,7 +252,7 @@ mod tests {
         conn.query_row(sql, [], |r| r.get(0)).unwrap()
     }
 
-    /// 恢复演练全流程：备份产出的快照装配成新目录，covers/logos 整份带上、引用核对通过；
+    /// 恢复演练全流程：备份产出的快照装配成新目录，logos/ 整份带上、引用核对通过；
     /// 负向对照：源目录里被引用的文件消失后，恢复必须点名它。
     #[test]
     fn a_snapshot_restores_into_a_verified_new_data_dir() {
@@ -270,20 +265,16 @@ mod tests {
             [],
         )
         .unwrap();
-        conn.execute("INSERT INTO media_items(title,cover) VALUES('Example Film','b.jpg')", [])
-            .unwrap();
         fs::create_dir_all(src.join("logos")).unwrap();
-        fs::create_dir_all(src.join("covers")).unwrap();
         fs::write(src.join("logos").join("a.png"), b"x").unwrap();
-        fs::write(src.join("covers").join("b.jpg"), b"x").unwrap();
-        fs::write(src.join("covers").join("orphan.jpg"), b"x").unwrap();
+        fs::write(src.join("logos").join("orphan.png"), b"x").unwrap();
         let snapshot = run(&conn, &src).unwrap().snapshot;
         drop(conn);
 
         let to = root.path().join("restored");
         let r = restore(&snapshot, &to).unwrap();
         assert!(r.missing.is_empty(), "{:?}", r.missing);
-        assert_eq!((r.pending, r.assets_copied, r.orphans), (0, 3, 1));
+        assert_eq!((r.pending, r.assets_copied, r.orphans), (0, 2, 1));
         assert_eq!(r.assets_from.as_deref(), Some(src.as_path()));
         let restored = Connection::open(to.join("kalends.db")).unwrap();
         assert_eq!(one::<i64>(&restored, "SELECT count(*) FROM items"), 1);

@@ -23,6 +23,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0017_split_renew_from_due_anchor.sql"),
     include_str!("../migrations/0018_ledger_keeps_its_own_names.sql"),
     include_str!("../migrations/0019_rating_out_of_ten.sql"),
+    include_str!("../migrations/0020_drop_media.sql"),
 ];
 
 /// 一个跑完全部迁移的内存库，等价于"全新安装"。只给测试用。
@@ -88,9 +89,8 @@ pub fn get_setting_checked(conn: &Connection, key: &str) -> rusqlite::Result<Opt
 pub fn seed_defaults(conn: &Connection) -> Result<()> {
     let ics_token: String =
         conn.query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))?;
-    let defaults: [(&str, String); 11] = [
+    let defaults: [(&str, String); 10] = [
         ("auth.pin", String::new()),
-        ("meta.tmdb_key", String::new()),
         ("meta.proxy", String::new()),
         ("notify.thresholds", "[14,7,3,1,0]".into()),
         ("notify.digest_time", "09:00".into()),
@@ -179,7 +179,7 @@ mod tests {
     }
 
     /// 从 v4（库泛化之前的最后形态）一路迁到当前：0006 状态翻译、0007 搬运与重指、
-    /// 0010/0011 删旧表、0012 NOCASE 回填、0013–0019 各钉一处逐值对拍。
+    /// 0010/0011 删旧表、0012 NOCASE 回填、0013–0018 各钉一处逐值对拍、0020 媒体退场。
     #[test]
     fn a_v4_era_database_upgrades_to_current_with_every_value_accounted_for() {
         let conn = db_at(4, include_str!("../tests/fixtures/uv04-data.sql"));
@@ -234,8 +234,7 @@ mod tests {
         assert_eq!(one::<String>(&conn, "SELECT item_name FROM renewal_ledger WHERE kind='sims'"), "🇬🇧 ExampleTel");
         assert_eq!(one::<Option<String>>(&conn, "SELECT item_name FROM renewal_ledger WHERE kind='sim'"), None);
         assert_eq!(one::<Option<String>>(&conn, "SELECT coll_name FROM renewal_ledger WHERE kind='sim'"), None);
-        // 0012：库内 pos 按 NOCASE 名序回填（'alpha' 排在 'Beta' 前，正是与 BINARY 的分界）；
-        // 媒体按标记日期倒序、没标记的沉底
+        // 0012：库内 pos 按 NOCASE 名序回填（'alpha' 排在 'Beta' 前，正是与 BINARY 的分界）
         let order = |sql: &str| -> Vec<String> {
             let mut stmt = conn.prepare(sql).unwrap();
             let v: Vec<String> = stmt.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
@@ -244,10 +243,6 @@ mod tests {
         assert_eq!(
             order("SELECT name FROM items WHERE collection_id=(SELECT id FROM collections WHERE key='subs') ORDER BY pos"),
             ["alpha Host", "Beta Cloud", "Pro tier"]
-        );
-        assert_eq!(
-            order("SELECT title FROM media_items ORDER BY pos"),
-            ["Example Show C", "Example Film A", "Example Film D", "Example Game B"]
         );
         // 0008：自定义列 src='extra'；状态词表播上语义标记
         assert_eq!(one::<String>(&conn, "SELECT src FROM fields WHERE tbl='subs' AND key='c1'"), "extra");
@@ -264,11 +259,9 @@ mod tests {
         assert_eq!(one::<String>(&conn, "SELECT renew_from FROM collections WHERE key='subs'"), "schedule");
         assert_eq!(one::<String>(&conn, "SELECT renew_from FROM collections WHERE key='sims'"), "today");
         assert_eq!(one::<String>(&conn, "SELECT renew_from FROM collections WHERE key='vps'"), "schedule");
-        // 0019：五星制等比换到十分制，0 分摘成未评分
-        assert_eq!(one::<i64>(&conn, "SELECT rating FROM media_items WHERE title='Example Film A'"), 8);
-        assert_eq!(one::<i64>(&conn, "SELECT rating FROM media_items WHERE title='Example Film D'"), 10);
-        assert_eq!(one::<Option<i64>>(&conn, "SELECT rating FROM media_items WHERE title='Example Game B'"), None);
-        assert_eq!(one::<Option<i64>>(&conn, "SELECT rating FROM media_items WHERE title='Example Show C'"), None);
+        // 0020：媒体表连媒体字段注册一起退场（数据先经 Ludi 搬走，fixture 里也不再有媒体行）
+        assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM sqlite_master WHERE name='media_items'"), 0);
+        assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM fields WHERE tbl='media'"), 0);
     }
 
     /// 从 v14（新架构时代）迁到当前：自定义库/自定义列/extra 原样存续，
@@ -298,9 +291,34 @@ mod tests {
         assert_eq!(one::<String>(&conn, "SELECT item_name FROM renewal_ledger WHERE kind='subs'"), "Example Plus");
         assert_eq!(one::<Option<String>>(&conn, "SELECT item_name FROM renewal_ledger WHERE kind='books'"), None);
         assert_eq!(one::<String>(&conn, "SELECT coll_name FROM renewal_ledger WHERE kind='books'"), "藏书");
-        // 0019
-        assert_eq!(one::<i64>(&conn, "SELECT rating FROM media_items WHERE title='Example Film E'"), 6);
-        assert_eq!(one::<Option<i64>>(&conn, "SELECT rating FROM media_items WHERE title='Example Game F'"), None);
+        // 0020：媒体表退场
+        assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM sqlite_master WHERE name='media_items'"), 0);
+    }
+
+    /// 0020 只在媒体清空后放行：还有媒体行就整库拒绝迁移（先经 Ludi 导入或在旧版本界面清空）。
+    /// 守卫翻车时错误里带着自述表名——这条测试的前半就是它的负向对照。
+    #[test]
+    fn the_media_drop_refuses_while_media_rows_remain() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        for sql in &MIGRATIONS[..19] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 19).unwrap();
+        conn.execute("INSERT INTO media_items(title) VALUES('还没搬走')", []).unwrap();
+        let err = migrate(&conn).unwrap_err().to_string();
+        assert!(
+            err.contains("0020") && err.contains("media_rows_remain_export_to_ludi_first"),
+            "{err}"
+        );
+        // 拒绝之后原样无损：媒体行还在、版本没动
+        assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM media_items"), 1);
+        assert_eq!(one::<i64>(&conn, "PRAGMA user_version"), 19);
+        // 清空后放行：表消失、媒体字段注册一并清掉
+        conn.execute("DELETE FROM media_items", []).unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(one::<i64>(&conn, "PRAGMA user_version"), known_version());
+        assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM sqlite_master WHERE name='media_items'"), 0);
     }
 
     /// 升级启动必须先落迁移前快照（停在旧版本的整份库）；全新安装不落；落不下去就不启动。

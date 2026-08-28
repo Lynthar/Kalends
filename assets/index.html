@@ -36,10 +36,6 @@
       <span class="brand-sub">朔日台账</span>
     </div>
   </div>
-  <nav class="nav" aria-label="模块">
-    <button class="nav-tab on" data-page="renewals" type="button">续费中心</button>
-    <button class="nav-tab" data-page="media" type="button">媒体库</button>
-  </nav>
   <button id="btn-settings" class="btn ghost" type="button">设置</button>
 </header>
 
@@ -117,133 +113,15 @@
     </div>
   </section>
 </div>
-
-<div id="page-media" hidden>
-  <section class="panel">
-    <div class="tabbar">
-      <div id="m-kind-chips" class="chips"></div>
-      <div class="tab-actions">
-        <input id="m-search" class="searchbox" placeholder="搜标题 / 短评 / 导演 / 主演" aria-label="搜索媒体库">
-        <select id="m-sort" class="mini-select" aria-label="媒体排序方式">
-          <option value="pos">手动</option>
-          <option value="marked">标记日期</option>
-          <option value="year">年份</option>
-          <option value="rating">我的评分</option>
-          <option value="douban">豆瓣评分</option>
-          <option value="title">标题</option>
-        </select>
-        <button id="m-covers" class="btn ghost" type="button" title="为缺海报的条目从 TMDB 搜索并缓存（需先在设置里填 TMDB Key）">补海报</button>
-        <button id="m-view-toggle" class="btn ghost" type="button">表格</button>
-        <button id="m-add" class="btn primary" type="button">＋ 新增</button>
-      </div>
-    </div>
-    <div id="m-status-row" class="chips" style="margin-bottom:.6rem"></div>
-    <div id="m-view-pills" class="vpills" hidden></div>
-    <div id="m-wall" class="wall"></div>
-    <div id="m-tablewrap" class="tablewrap" hidden>
-      <table class="grid">
-        <thead><tr>
-          <th data-k="title">标题</th><th data-k="kind">类别</th><th data-k="year">年份</th><th data-k="rating">我评</th><th class="num" data-k="douban">豆瓣</th>
-          <th data-k="status">状态</th><th data-k="marked">标记日期</th><th class="ops" data-k="ops"></th>
-        </tr></thead>
-        <tbody id="m-body" data-tab="media"></tbody>
-      </table>
-    </div>
-    <p id="m-empty" class="empty" hidden>◌ 空架待书</p>
-  </section>
-</div>
 </main>
 
 <footer class="colophon">KALENDAE · 罗马历朔日，收账之日</footer>
 
 
 
-<dialog id="dlg-media">
-  <form id="form-media" method="dialog">
-    <h3 id="dlg-media-title">新增条目</h3>
-    <div id="m-tmdb-box">
-      <div class="ics-row">
-        <input id="m-tmdb-q" placeholder="输入片名，从 TMDB 拉取元数据与海报…">
-        <button type="button" class="btn ghost" id="m-tmdb-go">搜索</button>
-      </div>
-      <div id="m-tmdb-results"></div>
-      <p class="note">或直接手填下方字段（游戏暂为手填，之后接 IGDB/Steam）。</p>
-    </div>
-    <div class="fgrid">
-      <label>类别
-        <select name="kind">
-          <option>电影</option><option>剧集</option><option>动画</option><option>游戏</option>
-        </select>
-      </label>
-      <label>状态
-        <select name="status">
-          <option>想看</option><option>在看</option><option>看过</option><option>弃</option>
-        </select>
-      </label>
-      <label class="span2">标题 *<input name="title" required></label>
-      <label class="span2">又名 / 原文名<input name="orig_title"></label>
-      <label>年份<input name="year" type="number" min="1870" max="2100"></label>
-      <label>我的评分（1–10，留空＝没评分）<input name="rating" type="number" min="1" max="10" step="1" inputmode="numeric"></label>
-      <label>标记日期<input name="marked_at" type="date"></label>
-      <label>开始日期<input name="started_at" type="date"></label>
-      <label class="span2">我的短评<textarea name="review" rows="2"></textarea></label>
-    </div>
-    <details class="fold">
-      <summary>详情字段（类型 / 主创 / 片长…）</summary>
-      <div class="fgrid">
-        <label class="span2">类型（" / " 分隔）<input name="genres"></label>
-        <label>导演<input name="directors"></label>
-        <label>编剧<input name="writers"></label>
-        <label class="span2">主演<input name="actors"></label>
-        <label>制片国家/地区<input name="countries"></label>
-        <label>语言<input name="languages"></label>
-        <label>片长<input name="runtime"></label>
-        <label>上映/首播日期<input name="release_date"></label>
-      </div>
-    </details>
-    <details class="fold">
-      <summary>豆瓣 / 外部编号</summary>
-      <div class="fgrid">
-        <label>豆瓣链接<input name="douban_url"></label>
-        <label>豆瓣编号<input name="douban_id"></label>
-        <label>豆瓣评分<input name="douban_rating" type="number" step="0.1" min="0" max="10"></label>
-        <label>评分人数<input name="douban_votes" type="number" min="0"></label>
-        <label>IMDB 编号<input name="imdb_id"></label>
-        <label>TMDB 编号<input name="tmdb_id" type="number"></label>
-      </div>
-    </details>
-    <details class="fold" id="m-extra-fold" hidden>
-      <summary>自定义列</summary>
-      <div class="fgrid" id="m-extra-fields"></div>
-    </details>
-    <details class="fold" id="m-game-fold">
-      <summary>游戏字段</summary>
-      <div class="fgrid">
-        <label>平台<input name="platform" placeholder="Steam / Switch / PS5…"></label>
-        <label>游玩时长（小时）<input name="playtime_hours" type="number" step="0.5" min="0"></label>
-        <label>Steam AppID<input name="steam_appid" type="number"></label>
-      </div>
-    </details>
-    <details class="fold">
-      <summary>备注 / 他人短评快照</summary>
-      <div class="fgrid">
-        <label class="span2">备注<textarea name="notes" rows="2"></textarea></label>
-        <label class="span2">短评们<textarea name="others_reviews" rows="3"></textarea></label>
-      </div>
-    </details>
-    <div class="dlg-foot">
-      <button type="button" class="btn ghost foot-left" id="m-fetch-cover" hidden title="按已保存的 TMDB 编号（无则按标题搜索）抓取并缓存海报">抓取海报</button>
-      <button type="button" class="btn ghost" data-close>取消</button>
-      <button type="submit" class="btn primary">保存</button>
-    </div>
-  </form>
-</dialog>
-
-
 <dialog id="dlg-settings">
   <form id="form-settings" method="dialog">
     <h3>设置</h3>
-    <div id="settings-renewals">
     <div class="fgrid">
       <label>提醒阈值（提前天数，留空＝只发每日摘要）<input name="thresholds" placeholder="14,7,3,1,0"></label>
       <label>摘要发送时间<input name="digest_time" type="time"></label>
@@ -301,23 +179,12 @@
       <div id="notify-log" class="ledger-log"></div>
       <p class="note">最近的投递记录（成败都记，失败带原因）；该来的提醒没来时，先看这里。</p>
     </fieldset>
-    </div>
-    <div id="settings-media">
-    <fieldset class="chanset">
-      <legend>元数据抓取</legend>
-      <div class="fgrid">
-        <label class="span2">TMDB API Key（v3 短 key 或 v4 令牌，themoviedb.org 免费申请）<input name="tmdb_key" autocomplete="off"></label>
-      </div>
-    </fieldset>
-    </div>
-    <!-- 代理单独一段、恒可见：meta.proxy 管 TMDB / 汇率 / 取图标三件事，
-         放进 #settings-media 的话 renewals-only 部署整块隐藏、就配不了代理 -->
     <fieldset class="chanset">
       <legend>出网</legend>
       <div class="fgrid">
         <label class="span2">代理（可选）<input name="meta_proxy" placeholder="socks5://127.0.0.1:1080"></label>
       </div>
-      <p class="note">TMDB 元数据抓取、拉取实时汇率、从网站取图标共用这一个代理。三件事都得你主动触发才会发生。</p>
+      <p class="note">拉取实时汇率、从网站取图标共用这一个代理。两件事都得你主动触发才会发生。</p>
     </fieldset>
     <fieldset class="chanset">
       <legend>安全与数据</legend>
@@ -350,7 +217,7 @@
 <script src="/js/table.js"></script>
 <script src="/js/fields.js"></script>
 <script src="/js/editors.js"></script>
-<script src="/js/settings-media.js"></script>
+<script src="/js/settings.js"></script>
 <script src="/js/pages.js"></script>
 <script src="/js/collections.js"></script>
 </body>

@@ -116,7 +116,7 @@ pub async fn refresh(conn: &crate::Db) -> Result<Value> {
     if !resp.status().is_success() {
         anyhow::bail!("汇率接口返回 {}", resp.status());
     }
-    // 与 TMDB 同一条规矩：出网响应体一律封顶，超时管不住"读多少"
+    // 出网的通用规矩：响应体一律封顶，超时管不住"读多少"
     let bytes = crate::notify::body_capped(resp, 1 << 20)
         .await
         .map_err(|e| anyhow::anyhow!("汇率接口{e}"))?;

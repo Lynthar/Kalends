@@ -18,7 +18,7 @@ The optional PIN is a thin door, not a public-internet defence: it is a plain eq
 
 ## What the app does on its own
 
-Nothing leaves the machine unprompted. Outbound traffic happens only when you ask for it: TMDB metadata lookups, exchange-rate refreshes, favicon fetches, and the notification channels you configure. There is no telemetry and no update check.
+Nothing leaves the machine unprompted. Outbound traffic happens only when you ask for it: exchange-rate refreshes, favicon fetches, and the notification channels you configure. There is no telemetry and no update check.
 
 Server-side fetches of user-supplied URLs (favicons) are blocked from reaching private address space — literal addresses, DNS resolution results, and every redirect hop are each re-checked. All outbound requests carry timeouts and capped response bodies.
 

@@ -109,12 +109,8 @@ def main():
     load(conn, 'collections', colls, log)
     items = [it for c in colls for it in get(a.source, f"/api/collections/{c['key']}/items")]
     load(conn, 'items', items, log)
-    for path, table in (('/api/media', 'media_items'), ('/api/ledger', 'renewal_ledger'),
-                        ('/api/fields', 'fields')):
-        try:
-            load(conn, table, get(a.source, path), log)
-        except Exception as e:  # 模块未启用时对应端点不挂载
-            log(f'  {table}: 取不到（{type(e).__name__}），跳过')
+    for path, table in (('/api/ledger', 'renewal_ledger'), ('/api/fields', 'fields')):
+        load(conn, table, get(a.source, path), log)
     conn.commit()
 
     log(f'\n副本就绪：{db}（user_version={a.upto}）')

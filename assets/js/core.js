@@ -5,24 +5,17 @@
 'use strict';
 
 const $ = s => document.querySelector(s);
-const MODULES = window.KALENDS_MODULES || ['renewals', 'media'];
 const state = {
-  overview: null, subs: [], sims: [], vps: [], settings: {}, media: [], fields: [], fx: null,
-  tab: 'subs', page: 'renewals', mKind: '全部', mStatus: '全部', mQ: '',
+  overview: null, subs: [], sims: [], vps: [], settings: {}, fields: [], fx: null,
+  tab: 'subs',
   upWindow: '30', upFolded: localStorage.getItem('kalends.upfold') === '1',
 };
 
-// 各表视图偏好（列排序 / 列筛选 / 表内搜索 / 列类型 / 媒体视图），存本浏览器
+// 各表视图偏好（列排序 / 列筛选 / 表内搜索 / 列类型），存本浏览器
 const VIEWS_KEY = 'kalends.views.v1';
-const views = { subs: {}, sims: {}, vps: {}, media: {} };
+const views = { subs: {}, sims: {}, vps: {} };
 try { Object.assign(views, JSON.parse(localStorage.getItem(VIEWS_KEY) || '{}')); } catch {}
 for (const t of ['subs', 'sims', 'vps']) views[t] = { sort: null, filters: {}, q: '', widths: {}, order: null, hiddenCols: [], types: {}, keys: null, collapsed: [], ...views[t] };
-views.media = { sort: null, filters: {}, view: 'wall', widths: {}, order: null, hiddenCols: [], types: {}, keys: null, ...views.media };
-if (views.media.key) { // 旧形态迁移：媒体表早期用 key/dir 而非 sort
-  if (!(views.media.key === 'marked' && views.media.dir === -1)) views.media.sort = { key: views.media.key, dir: views.media.dir };
-  delete views.media.key;
-  delete views.media.dir;
-}
 function saveViews() {
   try { localStorage.setItem(VIEWS_KEY, JSON.stringify(views)); } catch {}
 }
@@ -34,8 +27,6 @@ const CYCLE_LABEL = {
 // 周期下拉的档位与次序（就地编辑器与详情表单共用，'' = 不设周期）。
 // 选项的 value 恒为存储键（monthly），显示的才是 CYCLE_LABEL 的文案（Monthly）。
 const CYCLE_ORDER = ['', 'monthly', 'annual', 'biennial', 'triennial', 'quarterly', 'semiannual', 'weekly', 'days', 'lifetime'];
-const M_KINDS = ['电影', '剧集', '动画', '游戏'];
-const M_STATUSES = ['想看', '在看', '看过', '弃'];
 
 function toast(msg, err) {
   const t = $('#toast');
@@ -109,20 +100,16 @@ function safeUrl(u) {
 }
 
 async function loadAll() {
-  const hasR = MODULES.includes('renewals');
-  const hasM = MODULES.includes('media');
-  // /api/fx 挂在 renewals 路由上：media-only 部署下必然 404，且拉不到也不该拖垮首屏——
-  // 折算是可选视图，没有汇率就按原币显示并如实说一声
+  // 汇率拉不到不该拖垮首屏——折算是可选视图，没有汇率就按原币显示并如实说一声
   const noFx = { display: '', rates: {}, live: [], baseline_period: '', source: '' };
   // 先取概览（里面带库清单）与设置，之后才知道有哪些库要拉条目
-  [state.overview, state.settings, state.media, state.fx] = await Promise.all([
-    hasR ? api('/api/overview') : { today: '', upcoming: [], undated: [], totals: [], collections: [] },
+  [state.overview, state.settings, state.fx] = await Promise.all([
+    api('/api/overview'),
     api('/api/settings'),
-    hasM ? api('/api/media') : [],
-    hasR ? api('/api/fx').catch(e => {
+    api('/api/fx').catch(e => {
       toast('汇率表没取到，费用按原币显示：' + e.message, true);
       return noFx;
-    }) : noFx,
+    }),
   ]);
   const wins = ['7', '14', '30', '60', '90', '180', 'all'];
   state.upWindow = wins.includes(state.settings['ui.upcoming_days'])
@@ -141,9 +128,7 @@ function renderAll() {
   renderUpcoming();
   renderTotals();
   syncColls();
-  syncMediaCols();
   for (const c of colls()) renderColl(c.key);
-  renderMedia();
 }
 
 /* ── 即将到期 ── */

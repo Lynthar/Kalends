@@ -1,8 +1,8 @@
 [package]
 name = "kalends"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Self-hosted, local-first tracker for subscriptions, SIM keep-alives, VPS renewals and a personal media library"
+description = "Self-hosted, local-first tracker for subscriptions, SIM keep-alives, VPS renewals and anything else with a next date"
 license = "AGPL-3.0-only"
 repository = "https://github.com/Lynthar/Kalends"
 

@@ -26,11 +26,7 @@ const tags = arr => (arr || []).map(tag).join('');
 const splitVals = s => String(s).split(/[,，、/]+/).map(x => x.trim()).filter(Boolean);
 
 // 状态词的语义定色（Notion status 式），未列出的词走默认灰底
-const ST_CLASS = {
-  Active: 'on', 看过: 'on',
-  Planned: 'plan', 在看: 'plan',
-  Deferred: 'cmp', Ending: 'warn',
-};
+const ST_CLASS = { Active: 'on', Planned: 'plan', Deferred: 'cmp', Ending: 'warn' };
 const stPill = v => v ? `<span class="st${ST_CLASS[v] ? ' ' + ST_CLASS[v] : ''}">${esc(v)}</span>` : '';
 
 /* 字段类型（Notion 式）：每列必属其一，驱动表头图标、排序、筛选操作符与单元格造型。
@@ -52,18 +48,8 @@ const colType = (tab, k) => {
 // t：字段类型；conv=1 允许切换呈现类型；ord：勾选列表按词表序（默认按中文序）；
 // val：取排序值（str=1 按中文串比较，否则按数值）；fvals：取筛选值列表（无值行归入 BLANK）
 const ordVal = (ord, get) => r => { const i = ord.indexOf(get(r)); return i < 0 ? null : i; };
-const COLS = {
-  media: {
-    title: { t: 'text', val: r => r.title, str: 1, fvals: r => [r.title, r.orig_title].filter(Boolean) },
-    kind: { t: 'sel', conv: 1, ord: M_KINDS, val: ordVal(M_KINDS, r => r.kind), fvals: r => r.kind ? [r.kind] : [] },
-    year: { t: 'num', val: r => r.year },
-    // 10 分制（迁移 0019 起），与豆瓣评分同一把尺；筛选因此从「勾 1–5」变成 ≥8 这类操作符
-    rating: { t: 'num', val: r => r.rating },
-    douban: { t: 'num', val: r => r.douban_rating },
-    status: { t: 'status', ord: M_STATUSES, val: ordVal(M_STATUSES, r => r.status), fvals: r => r.status ? [r.status] : [] },
-    marked: { t: 'date', val: r => r.marked_at, str: 1 },
-  },
-};
+// 各库的列集由 ensureCollDom 按字段注册表生成（colFromField），这里只是壳
+const COLS = {};
 
 // 有效类型感知的筛选值：呈现为多选的文本列按分隔符拆开。
 // 真多选列的值本身就是数组，**绝不能再拆**——含 , ， 、 / 的值（「CN2 GIA/9929」）
@@ -96,39 +82,11 @@ function cellVal(tab, k, v) {
   return cell ? cell(v, tab, k) : esc(String(v));
 }
 
-/* ── 自定义列（/api/fields，值挂在行的 extra JSON，键 c<id>）── */
-const FKEY = f => 'c' + f.id;
-const customFields = tab => state.fields
-  .filter(f => f.tbl === tab && !f.builtin)
-  .sort((a, b) => a.pos - b.pos || a.id - b.id);
+/* ── 字段注册表（/api/fields，自定义列的值挂在行的 extra JSON，键 c<id>）── */
 const fieldOf = (tab, k) => state.fields.find(f => f.tbl === tab && f.key === k);
-// 值挂在行的 extra 里还是顶层：库的列看注册表的 src，媒体的自定义列看 custom。
-// 这也是"这列归不归用户管"的判据——改名/删除只对 extra 列开放，与后端一致。
+// 值挂在行的 extra 里还是顶层：看注册表的 src。这也是"这列归不归用户管"的判据——
+// 改名/删除只对 extra 列开放，与后端一致。
 const inExtra = col => (col.src ? col.src === 'extra' : !!col.custom);
-
-// 把自定义列并进 COLS 并在操作列前插 th；rebuildHead 前会先清掉旧的
-function injectCustomCols(tab) {
-  const cols = COLS[tab];
-  for (const k of Object.keys(cols)) if (cols[k].custom) delete cols[k];
-  const opsTh = $(HEAD_SEL[tab]).querySelector('th.ops');
-  for (const f of customFields(tab)) {
-    const k = FKEY(f);
-    const cv = r => (r.extra || {})[k];
-    const numeric = !!TYPES[f.ftype]?.numeric; // 按不按数值排序由类型表说了算
-    cols[k] = {
-      t: f.ftype, custom: f.id,
-      conv: CONV_TYPES.includes(f.ftype) ? 1 : 0,
-      ord: null,
-      str: numeric ? 0 : 1,
-      val: numeric ? r => { const v = cv(r); return v == null || v === '' ? null : +v; } : cv,
-      fvals: r => { const v = cv(r); return v == null || v === '' ? [] : Array.isArray(v) ? v.map(String) : [String(v)]; },
-    };
-    const th = document.createElement('th');
-    th.dataset.k = k;
-    th.textContent = f.name;
-    opsTh.before(th);
-  }
-}
 
 async function refreshFields() {
   state.fields = await api('/api/fields');
@@ -146,51 +104,14 @@ function tagFor(tab, k, v) {
 }
 const tagsFor = (tab, k, arr) => (arr || []).map(v => tagFor(tab, k, v)).join('');
 
-// 加删列后重建表头：回到模板再注入，视图偏好走 initHead 的温和迁移
+// 加删列后重建表头：先刷字段，再交给 ensureCollDom 重建，视图偏好走 initHead 的温和迁移
 const THEAD_HTML = {};
 async function rebuildHead(tab) {
-  // 库的表头由字段注册表生成：先刷字段，再交给 ensureCollDom 重建，不走下面媒体表那条模板路
   const c = collOf(tab);
-  if (c) {
-    await refreshFields();
-    ensureCollDom(c);
-    renderColl(tab);
-    return;
-  }
-  rebuildMediaHead();
-  RENDER[tab]();
-}
-
-// 媒体表的表头走模板快照那条老路：先还原成模板再注入，不能直接重入 injectCustomCols
-//（它只追加 th、不清旧的，重入一次多一列）
-function rebuildMediaHead() {
-  const thead = $(HEAD_SEL.media);
-  thead.rows[0].innerHTML = THEAD_HTML.media;
-  thead.closest('.tablewrap').querySelector('.newrow')?.remove();
-  injectCustomCols('media');
-  initHead('media');
-}
-
-/* 媒体的 COLS 要跟字段注册表对账：注入只在 boot 与 rebuildHead 跑，而 loadAll 每次都
-   刷注册表——别处（另一台设备/标签页/接口）加了列，这边就会拿旧 COLS 渲染新字段，
-   colType 读到 undefined 把整个 renderAll 打断。库那侧由 ensureCollDom 兜着。 */
-function syncMediaCols() {
-  const want = customFields('media').map(FKEY).join();
-  const have = Object.keys(COLS.media).filter(k => COLS.media[k].custom).join();
-  if (want !== have) rebuildMediaHead();
-}
-
-// td 的造型与要不要挂 title 同样查类型表（与 renderColl 那侧同一份判据），
-// 否则同名同类型的列在两张表上长得不一样
-function customTds(tab, it) {
-  let h = '';
-  for (const f of customFields(tab)) {
-    const k = FKEY(f);
-    const v = (it.extra || {})[k];
-    const ts = TYPES[f.ftype] || {};
-    h += `<td${ts.td ? ` class="${ts.td}"` : ''}${ts.title ? ` title="${esc(v ?? '')}"` : ''}>${cellVal(tab, k, v)}</td>`;
-  }
-  return h;
+  if (!c) return;
+  await refreshFields();
+  ensureCollDom(c);
+  renderColl(tab);
 }
 
 
@@ -266,19 +187,14 @@ function setEmpty(sel, shown, base) {
   el.textContent = base > 0 ? '无匹配项，试试清除筛选' : '此栏尚无记录';
 }
 
-// 表内搜索取哪些字段：库的由 ensureCollDom 按字段集注册；媒体走自己的搜索框
+// 表内搜索取哪些字段：由 ensureCollDom 按字段集注册
 const SEARCH_FIELDS = {};
-// 媒体渲染器住在后一份文件里，而函数声明只在自己那个 script 内提升——顶层直接取它的值
-// 会拿到 undefined（拆文件时踩过）。包一层，等真正调用时再解析
-const RENDER = { media: (...a) => renderMedia(...a) };   // 库的渲染器由 ensureCollDom 注册
-const HEAD_SEL = { media: '#m-tablewrap thead' };   // 库的表头选择器由 ensureCollDom 注册
-const M_DIR_DEFAULT = { pos: 1, marked: -1, year: -1, rating: -1, douban: -1, title: 1 };
+const RENDER = {};     // 各库的渲染器由 ensureCollDom 注册
+const HEAD_SEL = {};   // 各库的表头选择器由 ensureCollDom 注册
 
-// dir: 1 升 / -1 降 / null 清除（媒体表的默认序 标记日期↓ 视同无排序）
+// dir: 1 升 / -1 降 / null 清除
 function setSort(tab, k, dir) {
-  const isDefault = dir == null || (tab === 'media' && k === 'marked' && dir === -1);
-  views[tab].sort = isDefault ? null : { key: k, dir };
-  if (tab === 'media') $('#m-sort').value = views.media.sort?.key || 'marked';
+  views[tab].sort = dir == null ? null : { key: k, dir };
   saveViews();
   RENDER[tab]();
 }
@@ -290,10 +206,9 @@ function colLabel(tab, k) {
 
 const FUNNEL_SVG = '<svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true"><path d="M1.4 1.6h9.2L7.4 5.9v3.4l-2.8 1.1V5.9L1.4 1.6Z"/></svg>';
 
-/* 行的详情入口（⤢）与子行折叠钮长在哪一格：库是名称列、媒体是标题列。
-   这一列撤下去，整表就没了全表单入口——两处守它（表头菜单不出「隐藏此列」、
-   settleView 无条件捞回），所以判据只此一份，别在别处写死 'name'。 */
-const entryKey = tab => (tab === 'media' ? 'title' : 'name');
+/* 行的详情入口（⤢）与子行折叠钮长在名称列。这一列撤下去，整表就没了全表单入口——
+   两处守它（表头菜单不出「隐藏此列」、settleView 无条件捞回），判据只此一份，别在别处写死。 */
+const entryKey = tab => 'name';
 
 // 各表列键的模板序快照（tbody 渲染恒为模板序，td 定位靠它；列序重排只动 thead/td 的 DOM 序）
 const TKEYS = {};
@@ -639,10 +554,9 @@ function applyColumns(tab) {
    排序」时生效；按列排序时拖动的位置存不住，手柄随之停用（Notion 同款）。 */
 
 const tbodyOf = tab => $(HEAD_SEL[tab])?.parentElement.tBodies[0] || null;
-const curTab = () => (state.page === 'media' ? 'media' : state.tab);
+const curTab = () => state.tab;
 const byPos = (a, b) => (a.pos ?? 1e9) - (b.pos ?? 1e9) || a.id - b.id;
-const manualOrder = tab =>
-  tab === 'media' ? views.media.sort?.key === 'pos' : !views[tab].sort;
+const manualOrder = tab => !views[tab].sort;
 
 const rowSel = {};                                  // tab → Set(选中的 id)
 const selOf = tab => (rowSel[tab] ||= new Set());
@@ -733,7 +647,7 @@ function bindRowGutter(tab, tr, g) {
   };
   if (!manualOrder(tab)) {
     grip.classList.add('off');
-    grip.title = tab === 'media' ? '排序选「手动」后才能拖动' : '清掉列排序后才能拖动';
+    grip.title = '清掉列排序后才能拖动';
     return;
   }
   grip.title = '拖动排序 · 点击出上移/下移';
@@ -777,7 +691,6 @@ function bindRowGutter(tab, tr, g) {
    落表的 pos 恒按这个形状写，所以「只重排看得见的那几行」不会把被筛掉的行挤乱。 */
 function fullOrder(tab) {
   const all = [...(state[tab] || [])].sort(byPos);
-  if (tab === 'media') return all;
   const has = new Set(all.map(r => r.id));
   const kids = new Map();
   const top = [];
@@ -821,7 +734,7 @@ function moveRow(tab, srcId, tgtId, after) {
 // 键盘挪行：在同级里与相邻的那一行交换位置
 function nudgeRow(tab, id, step) {
   if (!manualOrder(tab)) {
-    toast(tab === 'media' ? '排序选「手动」后才能挪行' : '清掉列排序后才能挪行', true);
+    toast('清掉列排序后才能挪行', true);
     return;
   }
   const list = fullOrder(tab);
@@ -838,7 +751,7 @@ function nudgeRow(tab, id, step) {
 
 async function applyRowOrder(tab, ids, refocus) {
   if (!ids) return;
-  const path = tab === 'media' ? '/api/media/order' : `/api/collections/${tab}/items/order`;
+  const path = `/api/collections/${tab}/items/order`;
   try {
     await api(path, { method: 'PUT', body: JSON.stringify({ ids }) });
     // 本地同步 pos，省一次整表重取；渲染层无排序时就是按 pos 排
@@ -892,7 +805,7 @@ $('#bulk-del').onclick = async () => {
   const ids = [...selOf(tab)];
   if (!ids.length) return;
   if (!confirm(`删除选中的 ${ids.length} 项？此操作不可撤销。`)) return;
-  const path = tab === 'media' ? '/api/media/bulk_delete' : '/api/items/bulk_delete';
+  const path = '/api/items/bulk_delete';
   try {
     const r = await api(path, { method: 'POST', body: JSON.stringify({ ids }) });
     selOf(tab).clear();
@@ -907,8 +820,7 @@ $('#bulk-del').onclick = async () => {
    空名/空标题后端是放行的；新行落在手动序末尾，所以按列排序时它可能不在末尾。 */
 async function addRowInline(tab) {
   try {
-    const path = tab === 'media' ? '/api/media' : `/api/collections/${tab}/items`;
-    const { id } = await api(path, { method: 'POST', body: JSON.stringify({}) });
+    const { id } = await api(`/api/collections/${tab}/items`, { method: 'POST', body: JSON.stringify({}) });
     await loadAll();
     focusNewRow(tab, id);
   } catch (e) { toast(e.message, true); }
@@ -922,12 +834,7 @@ function focusNewRow(tab, id) {
     const v = views[tab];
     v.filters = {};
     v.q = '';
-    if (tab === 'media') {
-      state.mQ = '';
-      $('#m-search').value = '';
-    } else {
-      $('#t-search').value = '';
-    }
+    $('#t-search').value = '';
     saveViews();
     RENDER[tab]();
     tr = tbodyOf(tab)?.querySelector(`tr[data-id="${id}"]`);
@@ -936,7 +843,7 @@ function focusNewRow(tab, id) {
   }
   const open = () => {
     const cells = [...tr.children].filter(td => td.style.display !== 'none');
-    const td = cells.find(x => x.dataset.k === 'name' || x.dataset.k === 'title') || cells[0];
+    const td = cells.find(x => x.dataset.k === entryKey(tab)) || cells[0];
     const it = state[tab]?.find(x => x.id === id);
     if (td && it) openCellPop(tab, it, td.dataset.k, td);
   };

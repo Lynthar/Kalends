@@ -118,20 +118,7 @@ main, header, footer { position: relative; z-index: 1; }
   -webkit-background-clip: text; background-clip: text; color: transparent;
 }
 .brand-sub { color: var(--ink-2); font-size: .78rem; letter-spacing: .42em; }
-.nav { display: flex; gap: .3rem; margin-left: auto; }
-.nav-tab {
-  border: 0; background: none; color: var(--ink-2); font: inherit; font-weight: 600;
-  padding: .4rem .8rem .5rem; cursor: pointer; letter-spacing: .05em; position: relative;
-  transition: color .2s;
-}
-.nav-tab::after {
-  content: ""; position: absolute; left: 22%; right: 22%; bottom: .1rem; height: 3px;
-  border-radius: 99px; background: linear-gradient(90deg, var(--aqua), #55b9dc);
-  transform: scaleX(0); transition: transform .4s var(--spring);
-}
-.nav-tab.on { color: var(--ink); }
-.nav-tab.on::after { transform: scaleX(1); }
-.nav-tab:hover { color: var(--ink); }
+#btn-settings { margin-left: auto; }
 
 /* ── 版面：漂浮卡片 ───────────────────── */
 main { max-width: 1400px; margin: 0 auto; padding: .6rem 1.4rem 3rem; }
@@ -695,7 +682,7 @@ dialog h3 {
 dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
 .dlg-foot .foot-left { margin-right: auto; }
 
-/* ── 媒体库 ───────────────────────────── */
+/* ── 搜索框与小下拉 ───────────────────── */
 .searchbox, .mini-select {
   font: inherit; font-size: .85rem; font-weight: 500; color: var(--ink);
   background: var(--surface); border: 1.5px solid var(--line);
@@ -707,58 +694,6 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
 .mini-select { border-radius: 10px; }
 .mini-select.tiny { font-size: .76rem; padding: .16rem .5rem; border-radius: 99px; color: var(--ink-2); }
 .searchbox:focus, .mini-select:focus { outline: none; border-color: var(--aqua); box-shadow: 0 0 0 3.5px var(--ring); }
-.wall {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(126px, 1fr));
-  gap: 1.15rem .95rem; padding-top: .4rem;
-}
-.card { cursor: pointer; animation: rise .45s var(--spring) calc(var(--i, 0) * 30ms) both; }
-/* 卡片自己进 Tab 序（海报墙的唯一入口），焦点环要画在海报上而不是整块留白 */
-.card:focus-visible { outline: none; }
-.card:focus-visible .cov { outline: 2.5px solid var(--aqua); outline-offset: 3px; }
-.card .cov {
-  aspect-ratio: 2 / 3; border-radius: 14px; overflow: hidden; position: relative;
-  background: linear-gradient(160deg, var(--aqua-soft), var(--surface-2) 70%);
-  border: 1px solid var(--line);
-  transition: transform .35s var(--spring), box-shadow .35s var(--spring);
-}
-.card:hover .cov { transform: translateY(-5px) scale(1.025); box-shadow: var(--shadow-lift); }
-.card:active .cov { transform: translateY(-1px) scale(.98); }
-.card .cov img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.card .ph {
-  display: grid; place-items: center; height: 100%;
-  font-size: 2.5rem; font-weight: 800; color: var(--ink-2); opacity: .8;
-}
-.card .badge {
-  position: absolute; top: .45rem; left: .45rem;
-  background: color-mix(in srgb, var(--surface) 78%, transparent);
-  backdrop-filter: blur(6px);
-  border: 1px solid var(--line); font-size: .68rem; font-weight: 700;
-  padding: .06rem .5rem; border-radius: 99px;
-}
-.card .t {
-  margin-top: .48rem; font-size: .85rem; line-height: 1.3; font-weight: 650;
-  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-}
-/* 10 分制后最坏形状（年份+10★+豆9.9）在 146px 窄卡上是单行；wrap 只是真溢出时的软着陆 */
-.card .meta { color: var(--ink-2); font-size: .74rem; display: flex; flex-wrap: wrap; gap: .1rem .5rem; align-items: baseline; }
-/* 评分数字后面那颗星：只是「这是评分」的标识，用既有的蜂蜜金，别抢数字的位置 */
-.rstar { color: var(--honey); font-size: .88em; }
-.fold { border: 1px solid var(--line); border-radius: 12px; margin-top: .8rem; padding: .5rem .8rem .7rem; }
-.fold summary { cursor: pointer; font-size: .8rem; font-weight: 650; color: var(--ink-2); letter-spacing: .05em; transition: color .2s; }
-.fold summary:hover { color: var(--aqua-deep); }
-.fold .fgrid { margin-top: .6rem; }
-#dlg-media { width: min(94vw, 40rem); }
-#m-tmdb-box { border: 1.5px dashed var(--line); border-radius: 14px; padding: .7rem .8rem; margin-bottom: .9rem; }
-#m-tmdb-results { display: flex; flex-direction: column; gap: .45rem; margin-top: .5rem; }
-.tmdb-hit {
-  display: flex; gap: .6rem; align-items: center;
-  padding: .38rem .5rem; border: 1px solid var(--line); border-radius: 12px;
-  transition: border-color .2s, background .2s, transform .3s var(--spring);
-}
-.tmdb-hit:hover { border-color: var(--aqua); background: var(--surface-2); transform: translateX(3px); }
-.tmdb-hit img { width: 32px; height: 48px; object-fit: cover; border-radius: 6px; }
-.tmdb-hit .ti { flex: 1; font-size: .85rem; font-weight: 550; }
-.tmdb-hit .ti small { color: var(--ink-2); display: block; font-weight: 500; }
 
 /* ── 其他 ─────────────────────────────── */
 .colophon {
@@ -795,7 +730,6 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
   .masthead { gap: .8rem; }
   .panel { padding: .95rem 1rem 1.1rem; border-radius: 16px; }
   .searchbox, .searchbox.slim { width: 100%; }
-  .wall { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: .9rem .7rem; }
   .filterpop { max-width: 84vw; }
 }
 @media (min-width: 1200px) {

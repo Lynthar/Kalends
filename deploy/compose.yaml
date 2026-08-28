@@ -10,5 +10,3 @@ services:
       - /path/to/appdata/kalends:/data
     environment:
       TZ: Asia/Shanghai
-      # 模块开关（默认全开）：只要续费中心改为 "renewals"，只要媒体库改为 "media"
-      # KALENDS_MODULES: renewals,media

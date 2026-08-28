@@ -54,7 +54,7 @@ pub fn email_cfg(conn: &Connection) -> Option<EmailCfg> {
     (!cfg.host.is_empty() && !cfg.from.is_empty() && !cfg.to.is_empty()).then_some(cfg)
 }
 
-/// 出网请求（Telegram 与 TMDB 共用）。**必须带超时**：reqwest 默认既没有连接超时
+/// 出网请求（Telegram / 汇率 / 取图标共用）。**必须带超时**：reqwest 默认既没有连接超时
 /// 也没有总超时，而通知调度器是一条条顺序 await 的——一根挂死的连接能把之后所有提醒
 /// 拖到下次重启，日志里还什么都看不到。
 pub fn http_client(proxy: &str) -> Result<reqwest::Client> {
@@ -75,7 +75,7 @@ fn build_client(
 ) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(30)) // 含响应体，海报下载也走这条
+        .timeout(std::time::Duration::from_secs(30)) // 含响应体，图标下载也走这条
         .redirect(if follow {
             reqwest::redirect::Policy::default()
         } else {
@@ -93,7 +93,7 @@ fn build_client(
 
 /// 整段读进来，累计超限就断开并报错（读完再判等于白读）。reqwest 没有默认上限，
 /// 唯一边界是 30s 总超时＝「带宽 × 30s」全进内存——容器内存配额常只有几百 MB，
-/// OOM kill 会把通知调度一起带走。取图标与 TMDB 图片都走它。
+/// OOM kill 会把通知调度一起带走。取图标与拉汇率都走它。
 pub async fn body_capped(resp: reqwest::Response, limit: usize) -> Result<Vec<u8>, String> {
     let too_big = || format!("响应体超过 {} KB", limit >> 10);
     if resp.content_length().is_some_and(|n| n > limit as u64) {

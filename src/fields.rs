@@ -15,19 +15,9 @@ use crate::App;
 /// 可建的列类型。`star` 已撤掉：它只是"数字加个星形壳"——要打分用 `num`，要档位用 `sel`。
 const FTYPES: &[&str] = &["text", "num", "sel", "multi", "date", "tel", "url", "email"];
 
-/// 字段所属的数据源：库（值在 items.extra，按 collection_id 圈定）或独立表（媒体库）。
-enum Owner {
-    Collection(i64),
-    Table(&'static str),
-}
-
-/// tbl 既可能是库键，也可能是 'media' 这种独立表；库表已泛化，不再有按表名写死的映射。
-fn owner(conn: &Connection, tbl: &str) -> anyhow::Result<Owner> {
-    if tbl == "media" {
-        return Ok(Owner::Table("media_items"));
-    }
+/// tbl 是库键（字段值在 items.extra，按 collection_id 圈定）；库表已泛化，不再有按表名写死的映射。
+fn owner(conn: &Connection, tbl: &str) -> anyhow::Result<i64> {
     conn.query_row("SELECT id FROM collections WHERE key=?1", [tbl], |r| r.get(0))
-        .map(Owner::Collection)
         .map_err(|_| bad(format!("未知表：{tbl}")))
 }
 
@@ -43,12 +33,10 @@ pub fn router() -> Router<App> {
         .route("/api/fields/{id}", put(update).delete(delete_field))
 }
 
-/// 逐行改写时的定位条件：库按 collection_id 圈定，独立表全表。
+/// 逐行改写时的定位条件：按 collection_id 圈定该库的行。
 fn scope(conn: &Connection, tbl: &str) -> anyhow::Result<(&'static str, String)> {
-    Ok(match owner(conn, tbl)? {
-        Owner::Collection(id) => ("items", format!("collection_id={id}")),
-        Owner::Table(t) => (t, "1".into()),
-    })
+    let id = owner(conn, tbl)?;
+    Ok(("items", format!("collection_id={id}")))
 }
 
 // 选项存对象数组 [{v, c?, spend?, alert?, timeline?}]：v=值，c=标签调色板号 0..9

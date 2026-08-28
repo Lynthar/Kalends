@@ -6,21 +6,13 @@
    undefined 连键一起丢掉，键缺席在这套语义里是"别动它"。 */
 async function patchRow(tab, it, patch) {
   try {
-    const path = tab === 'media' ? `/api/media/${it.id}` : `/api/items/${it.id}`;
-    await api(path, { method: 'PATCH', body: JSON.stringify(patch) });
+    await api(`/api/items/${it.id}`, { method: 'PATCH', body: JSON.stringify(patch) });
     await loadAll();
   } catch (err) { toast(err.message, true); }
 }
 
 // 复合格与字段名映射；没列出的格按列的有效类型走通用编辑器（字段名=列键）
-const CELL_SPEC = {
-  media: {
-    title: { inputs: [['title', '标题', 'text'], ['orig_title', '又名 / 原文名', 'text']] },
-    year: { inputs: [['year', '年份', 'number']] },
-    douban: { inputs: [['douban_rating', '豆瓣评分', 'number']] },
-    marked: { f: 'marked_at' },
-  },
-};
+const CELL_SPEC = {};
 
 // 自定义列的值写进 extra；空值直接摘掉键
 function extraPatch(it, k, v) {

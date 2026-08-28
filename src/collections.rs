@@ -939,8 +939,7 @@ pub fn url_host(raw: &str) -> Option<String> {
 }
 
 /// 把某张表里有形状的字段就地规范化。字段类型是数据，写入口按表名现查一次
-/// （`tbl`＝库键或 `media`，没有这类列的表查询返回空集）。**媒体那侧同样要过**：
-/// "新建列"的类型下拉对两侧一视同仁。
+/// （`tbl`＝库键，没有这类列的表查询返回空集）。
 pub fn normalize_shaped_in(conn: &Connection, tbl: &str, b: &mut Value) -> anyhow::Result<()> {
     let mut stmt =
         conn.prepare("SELECT key, ftype FROM fields WHERE tbl=?1 AND ftype IN ('tel','url','email','date')")?;
@@ -1078,7 +1077,7 @@ pub fn insert_item(conn: &Connection, coll: i64, b: &Value) -> anyhow::Result<i6
     Ok(id)
 }
 
-/// 局部更新的合并规则，**全项目只此一条**（媒体同款）：请求里**出现**的键写入
+/// 局部更新的合并规则，**全项目只此一条**：请求里**出现**的键写入
 /// （`""` 与 `null` 都表示清空），**缺席**的键保持原值；`extra` 作为一个整体值走
 /// 同一条规则。全量替换那套「body 漏一列就清一列」正是这条协议要根除的。
 pub fn merge_over(cur: &Value, b: &Value, cols: impl Iterator<Item = &'static str>) -> Value {
@@ -1150,7 +1149,7 @@ async fn items_delete(State(app): State<App>, Path(id): Path<i64>) -> R {
     Ok(Json(json!({ "ok": true })))
 }
 
-/// 批量端点的 ids 数组（库与媒体共用）。掺了非整数就整体拒：静默滤掉等于
+/// 批量端点的 ids 数组。掺了非整数就整体拒：静默滤掉等于
 /// 「说删 5 个、实际删 3 个」还不吭声。
 pub fn id_list(b: &Value) -> anyhow::Result<Vec<i64>> {
     let arr = b.get("ids").and_then(|x| x.as_array()).ok_or_else(|| bad("缺少 ids"))?;

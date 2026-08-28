@@ -150,12 +150,12 @@ pub fn check_shape(b: &Value, strs: &[&str], ints: &[&str], reals: &[&str]) -> a
 
 /// 健康详情。任何一张表读不出来就 ok=false——状态码必须跟着变：容器探针与监控只看
 /// 状态码，200 + ok:true 会把缺表的实例标成健康（`--health` 的判据是 <500，PIN 的 401 仍算活）。
-pub(crate) fn health_payload(conn: &rusqlite::Connection, modules: &[String]) -> (bool, Value) {
+pub(crate) fn health_payload(conn: &rusqlite::Connection) -> (bool, Value) {
     let count = |table: &str| -> Option<i64> {
         conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
             .ok()
     };
-    let tables = ["collections", "items", "media_items", "renewal_ledger"];
+    let tables = ["collections", "items", "renewal_ledger"];
     let counts: Vec<(&str, Option<i64>)> = tables.iter().map(|t| (*t, count(t))).collect();
     let ok = counts.iter().all(|(_, n)| n.is_some());
     let counts: serde_json::Map<String, Value> = counts
@@ -165,7 +165,6 @@ pub(crate) fn health_payload(conn: &rusqlite::Connection, modules: &[String]) ->
     let payload = json!({
         "ok": ok,
         "version": env!("CARGO_PKG_VERSION"),
-        "modules": modules,
         "counts": counts,
     });
     (ok, payload)
@@ -173,7 +172,7 @@ pub(crate) fn health_payload(conn: &rusqlite::Connection, modules: &[String]) ->
 
 async fn health(State(app): State<App>) -> Response {
     let conn = app.db.lock().unwrap();
-    let (ok, payload) = health_payload(&conn, &app.modules);
+    let (ok, payload) = health_payload(&conn);
     let status = if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
     (status, Json(payload)).into_response()
 }
@@ -578,13 +577,12 @@ mod tests {
     #[test]
     fn health_reports_false_when_a_table_cannot_be_read() {
         let conn = crate::db::fresh_in_memory().unwrap();
-        let modules = vec!["renewals".to_string()];
-        let (ok, payload) = health_payload(&conn, &modules);
+        let (ok, payload) = health_payload(&conn);
         assert!(ok);
         assert!(payload["counts"]["items"].as_i64().unwrap() >= 0);
 
         conn.execute_batch("DROP TABLE items").unwrap();
-        let (ok, payload) = health_payload(&conn, &modules);
+        let (ok, payload) = health_payload(&conn);
         assert!(!ok, "缺表还报健康就是骗探针");
         assert_eq!(payload["ok"], json!(false));
         assert_eq!(payload["counts"]["items"], json!(-1));

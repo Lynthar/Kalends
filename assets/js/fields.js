@@ -409,8 +409,8 @@ function filtDesc(tab, k, f) {
 
 /* 表格上方的视图状态胶囊行：当前排序 / 各列筛选 / 已隐藏列 */
 function renderViewPills(tab) {
-  const el = tab === 'media' ? $('#m-view-pills') : $('#view-pills');
-  if (tab !== 'media' && tab !== state.tab) return; // 三张续费表共用一行，只画当前标签页的
+  const el = $('#view-pills');
+  if (tab !== state.tab) return; // 各库共用一行，只画当前标签页的
   el.innerHTML = '';
   const v = views[tab];
   if (!v) { el.hidden = true; return; } // 这张表的视图偏好已随库一起删掉
@@ -462,7 +462,6 @@ function renderViewPills(tab) {
       v.sort = null;
       v.filters = {};
       v.hiddenCols = [];
-      if (tab === 'media') $('#m-sort').value = 'marked';
       saveViews();
       RENDER[tab]();
     };

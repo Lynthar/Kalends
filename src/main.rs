@@ -6,9 +6,7 @@ mod engine;
 mod fields;
 mod fx;
 mod ics;
-mod media;
 mod notify;
-mod tmdb;
 
 use std::{
     net::SocketAddr,
@@ -33,7 +31,6 @@ pub type Db = Arc<Mutex<rusqlite::Connection>>;
 pub struct App {
     pub db: Db,
     pub data_dir: PathBuf,
-    pub modules: Vec<String>,
 }
 
 /// `kalends --health`：容器 HEALTHCHECK 自检（镜像里没有 curl / wget，为一件事装包
@@ -123,39 +120,22 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("local time {} (UTC{})", now.format("%Y-%m-%d %H:%M"), now.format("%:z"));
     }
 
-    // 模块开关：KALENDS_MODULES=renewals,media（默认全开）——只装其一时另一模块的接口与界面整体消失
-    let modules: Vec<String> = std::env::var("KALENDS_MODULES")
-        .unwrap_or_else(|_| "renewals,media".into())
-        .split(',')
-        .map(|m| m.trim().to_string())
-        .filter(|m| m == "renewals" || m == "media")
-        .collect();
     let app = App {
         db: Arc::new(Mutex::new(conn)),
         data_dir: data_dir.clone(),
-        modules: modules.clone(),
     };
-    if modules.iter().any(|m| m == "renewals") {
-        tokio::spawn(notify::scheduler(app.db.clone()));
-    }
+    tokio::spawn(notify::scheduler(app.db.clone()));
     tokio::spawn(backup::scheduler(app.db.clone(), data_dir));
 
-    let mut router = Router::new()
+    let router = Router::new()
         .route("/", get(index))
         .route("/js/{name}", get(js_file))
         .route("/style.css", get(style_css))
-        .route("/config.js", get(config_js))
         .route("/manifest.webmanifest", get(manifest))
         .route("/icon.svg", get(icon))
         .merge(api::core_router())
-        .merge(fields::router());
-    if modules.iter().any(|m| m == "renewals") {
-        router = router.merge(api::renewals_router());
-    }
-    if modules.iter().any(|m| m == "media") {
-        router = router.merge(media::router());
-    }
-    let router = router
+        .merge(fields::router())
+        .merge(api::renewals_router())
         .with_state(app.clone())
         .layer(middleware::from_fn_with_state(app, pin_gate));
 
@@ -170,11 +150,11 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 设置 auth.pin 后，/api/* 需要 X-Kalends-Pin 头或 kalends_pin cookie；
+/// 设置 auth.pin 后，/api/* 与 /logos/* 需要 X-Kalends-Pin 头或 kalends_pin cookie；
 /// 静态页与 /calendar.ics（自带令牌）不拦。
 async fn pin_gate(State(app): State<App>, req: Request, next: Next) -> Response {
     let path = req.uri().path();
-    if !path.starts_with("/api") && !path.starts_with("/covers") && !path.starts_with("/logos") {
+    if !path.starts_with("/api") && !path.starts_with("/logos") {
         return next.run(req).await;
     }
     let required = {
@@ -228,7 +208,7 @@ async fn js_file(Path(name): Path<String>) -> Response {
         "table.js" => include_str!("../assets/js/table.js"),
         "fields.js" => include_str!("../assets/js/fields.js"),
         "editors.js" => include_str!("../assets/js/editors.js"),
-        "settings-media.js" => include_str!("../assets/js/settings-media.js"),
+        "settings.js" => include_str!("../assets/js/settings.js"),
         "pages.js" => include_str!("../assets/js/pages.js"),
         "collections.js" => include_str!("../assets/js/collections.js"),
         _ => return StatusCode::NOT_FOUND.into_response(),
@@ -244,16 +224,6 @@ async fn style_css() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         include_str!("../assets/style.css"),
-    )
-}
-
-async fn config_js(State(app): State<App>) -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
-        format!(
-            "window.KALENDS_MODULES={};",
-            serde_json::to_string(&app.modules).unwrap_or_else(|_| "[]".into())
-        ),
     )
 }
 
@@ -307,7 +277,6 @@ mod tests {
         let app = App {
             db: Arc::new(Mutex::new(conn)),
             data_dir: PathBuf::from("."),
-            modules: Vec::new(),
         };
         Router::new()
             .route("/api/ping", get(|| async { "pong" }))

@@ -19,12 +19,6 @@ INSERT INTO vps_instances(id, vendor, product, status, purpose, locations, route
   (8, 'ExampleHost', 'VPS-Basic', '预结束', '代理出口', '["东京（TYO）"]', '["CN2 GIA","9929"]', 1,    1,    20,   'SSD', 1,    1,    1,    5.5,  'USD', 'annual', '2026-03-10', 'https://example.com', 'user@example.com'),
   (9, 'NodeCo',      NULL,        '准备',   NULL,       NULL,              NULL,                 NULL, NULL, NULL, NULL,  NULL, NULL, NULL, NULL, NULL,  NULL,     NULL,         NULL,                  NULL);
 
-INSERT INTO media_items(id, kind, title, year, status, rating, marked_at, platform) VALUES
-  (1, '电影', 'Example Film A', 2020, '看过', 4,    '2024-05-01', NULL),
-  (2, '游戏', 'Example Game B', 2021, '弃',   0,    NULL,         'PC'),
-  (3, '剧集', 'Example Show C', 2022, '在看', NULL, '2025-01-02', NULL),
-  (4, '电影', 'Example Film D', 2019, '看过', 5,    '2023-11-11', NULL);
-
 INSERT INTO fields(tbl, key, name, ftype, options, builtin, pos) VALUES
   ('subs', 'c1', '自定义列', 'text', '[]', 0, 1);
 

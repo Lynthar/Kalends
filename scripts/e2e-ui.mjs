@@ -51,10 +51,6 @@ if (subs0.length === 0) {
   await mk('vps', { name: 'HostA', status: 'Active', price: 25, currency: 'USD', cycle: 'annual', last_renewed: day(-334), extra: { product: 'VPS-1', purpose: '代理出口', locations: ['东京'], routes: ['CN2 GIA'], cores: 1, ram_gb: 1, storage_gb: 20, storage_type: 'SSD' } });
   await mk('vps', { name: 'HostB', status: 'Ending', price: 48, currency: 'USD', cycle: 'annual', last_renewed: day(-304), extra: { purpose: '建站', locations: ['洛杉矶'], routes: ['9929'], cores: 2, ram_gb: 4, storage_gb: 60 } });
   await mk('vps', { name: 'HostC', status: 'Active', price: 320, currency: 'CNY', cycle: 'triennial', last_renewed: day(-60), extra: { purpose: '任务', locations: ['香港', '东京'], routes: ['CMI'], cores: 4, ram_gb: 8, storage_gb: 100 } });
-  // 评分是 10 分制（迁移 0019 起）
-  await post('/api/media', { kind: '电影', title: '测试电影甲', year: 2019, rating: 8, douban_rating: 8.4, status: '看过', marked_at: '2026-06-01' });
-  await post('/api/media', { kind: '剧集', title: '测试剧集乙', year: 2023, rating: 10, douban_rating: 9.1, status: '在看', marked_at: '2026-07-10' });
-  await post('/api/media', { kind: '游戏', title: '测试游戏丙', year: 2021, rating: 6, status: '想看', marked_at: '2026-05-20', platform: 'Steam' });
 } else {
   console.log('警告：复用已有数据，断言可能因日期漂移或数据差异失败');
 }
@@ -174,7 +170,7 @@ check('订阅默认显示全部 6 行', await evl(`document.querySelectorAll('#s
 check('状态胶囊按语义定色', await evl(`document.querySelectorAll('#subs-body .st.on').length`) === 4
   && await evl(`document.querySelectorAll('#subs-body .st.cmp').length`) === 1);
 check('VPS 状态列存在', await evl(`!!document.querySelector('#view-vps th[data-k="status"]')`) === true);
-check('＋新建行存在', await evl(`document.querySelectorAll('.newrow').length`) === 4);
+check('＋新建行存在', await evl(`document.querySelectorAll('.newrow').length`) === 3);
 
 /* 4b. 订阅子行树 + 行悬停打开 */
 check('编辑按钮已移除', await evl(`!document.querySelector('#subs-body [data-edit]')`) === true);
@@ -1409,69 +1405,7 @@ await sleep(800);
 await evl(`switchTab('subs')`);
 await sleep(300);
 
-/* 13. 媒体表格 */
-await evl(`document.querySelector('.nav-tab[data-page="media"]').click()`);
-await sleep(200);
-check('海报墙显示类别 chips', await evl(`getComputedStyle(document.querySelector('#m-kind-chips')).display`) !== 'none');
-await evl(`document.querySelector('#m-view-toggle').click()`);
-await sleep(200);
-check('表格视图海报墙隐藏', await evl(`getComputedStyle(document.querySelector('#m-wall')).display`) === 'none');
-check('表格视图 chips 隐藏', await evl(`getComputedStyle(document.querySelector('#m-kind-chips')).display`) === 'none'
-  && await evl(`getComputedStyle(document.querySelector('#m-status-row')).display`) === 'none');
-check('媒体年份降序', await menuClick('#m-tablewrap th[data-k="year"]', '降序'));
-check('媒体首行 2023 剧集', (await evl(`document.querySelector('#m-body tr td').textContent.trim()`)).includes('乙'));
-check('排序选择器联动', await evl(`document.querySelector('#m-sort').value`) === 'year');
-check('媒体排序胶囊', await evl(`!!document.querySelector('#m-view-pills .p-sort')`) === true);
-check('媒体菜单清除排序', await menuClick('#m-tablewrap th[data-k="year"]', '清除排序'));
-check('回到默认后胶囊消失', await evl(`!!document.querySelector('#m-view-pills .p-sort')`) === false);
-check('类别列菜单筛选', await menuClick('#m-tablewrap th[data-k="kind"]', '筛选'));
-await evl(`[...document.querySelectorAll('.filterpop input')].find(i => i.value === '剧集').click()`);
-await sleep(250);
-check('类别=剧集 1 行', await evl(`document.querySelectorAll('#m-body tr').length`) === 1);
-await evl(`document.querySelector('#m-view-pills .p-filt .x').click()`);
-await sleep(200);
-check('清除类别筛选恢复 3 行', await evl(`document.querySelectorAll('#m-body tr').length`) === 3);
-// 评分是 10 分制的数字 + 一颗蜂蜜金星（迁移 0019 起）：光一列数字看不出是评分，
-// 而 5 颗星又把 10 分制的精度抹掉；数字给精度、星给辨识
-const mrate = (await evl(`[...document.querySelectorAll('#m-body tr td[data-k="rating"]')].map(t => t.textContent.trim()).join('|')`));
-check('我评列显示成「N ★」', /^\d+ ★/.test(mrate.split('|')[0]) && !mrate.includes('★★'), mrate);
-check('评分那颗星用的是蜂蜜金', await evl(
-  `getComputedStyle(document.querySelector('#m-body .rstar')).color`) === 'rgb(237, 164, 18)');
-check('评分列已是数字列（筛选给操作符而不是勾选清单）', await menuClick('#m-tablewrap th[data-k="rating"]', '筛选')
-  && await evl(`(() => {
-    const ops = [...document.querySelectorAll('.filterpop .fp-op option')].map(o => o.value).join(',');
-    const q = document.querySelector('.filterpop .fp-q');
-    return ops.includes('ge') && q?.type === 'number' && !document.querySelector('.filterpop input[type=checkbox]');
-  })()`) === true);
-await evl(`closePop()`);
-check('后端只收 1–10', (await raw('/api/media', 'POST', { title: '越界评分', rating: 11 })).status === 400
-  && (await raw('/api/media', 'POST', { title: '满分', rating: 10 })).ok);
-await evl(`loadAll()`);
-await sleep(600);
-await shot('07-media-table');
-
-/* 14. fetch_cover 端点（未配 TMDB Key 的错误路径；游戏拒绝） */
-const mediaList = await (await fetch(APP + 'api/media')).json();
-const filmT = mediaList.find(m => m.kind !== '游戏');
-const fcResp = await fetch(`${APP}api/media/${filmT.id}/fetch_cover`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-const fcBody = await fcResp.json().catch(() => ({}));
-const st2 = await (await fetch(APP + 'api/settings')).json();
-if (st2['meta.tmdb_key']) {
-  console.log('SKIP 无 Key 报错断言（本实例已配置 TMDB Key）');
-} else {
-  check('无 Key 报错清晰', !fcResp.ok && String(fcBody.error || '').includes('TMDB API Key'));
-  // 服务端侧的问题仍要是 500——别因为给客户端错误分了级就把真故障也一起降级了
-  check('未判定为客户端错误的仍返回 500', fcResp.status === 500, String(fcResp.status));
-}
-const game = mediaList.find(m => m.kind === '游戏');
-if (game) {
-  const gResp = await fetch(`${APP}api/media/${game.id}/fetch_cover`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-  check('游戏类拒绝', !gResp.ok && String((await gResp.json().catch(() => ({}))).error || '').includes('游戏'));
-}
-check('补海报按钮存在', await evl(`!!document.querySelector('#m-covers')`) === true);
-
 /* 15. 刷新持久化 */
-await evl(`document.querySelector('.nav-tab[data-page="renewals"]').click()`);
 await evl(`document.querySelector('.tab[data-tab="subs"]').click()`);
 await sleep(150);
 check('刷新前设升序', await menuClick('#view-subs th[data-k="price"]', '升序'));
@@ -1486,7 +1420,6 @@ check('刷新后保持折叠', await evl(`document.querySelector('#up-panel').cl
 check('刷新后首列分类', await evl(`document.querySelector('#view-subs thead th').dataset.k`) === 'category');
 check('刷新后 fixed 列宽', await evl(`document.querySelector('#view-subs table').classList.contains('fixed')`) === true);
 check('刷新后排序胶囊在', await evl(`!!document.querySelector('#view-pills .p-sort')`) === true);
-check('刷新后媒体表格视图', await evl(`JSON.parse(localStorage.getItem('kalends.views.v1')).media.view`) === 'table');
 await shot('08-reloaded-folded');
 
 /* 16. hidden 属性回归（全局 [hidden]{display:none!important} 不能被 display 规则盖掉，
@@ -1810,74 +1743,6 @@ await fetch(`${APP}api/items/${nrNew}`, { method: 'DELETE' });
 await evl(`loadAll()`);
 await sleep(600);
 
-/* 17.13. TMDB 搜索缩略图此前直连 image.tmdb.org：绕开 meta.proxy（被墙环境配了代理
-   也全是空图），且是浏览器直连第三方的唯一出口。改成经服务端转发，路径要校验。 */
-check('缩略图不再直连 image.tmdb.org',
-  !(await (await fetch(APP + 'app.js')).text()).includes('image.tmdb.org'));
-const thumbBad = await fetch(APP + 'api/tmdb/thumb?path=' + encodeURIComponent('/../../etc/passwd'));
-check('转发端点拦下不合法路径', thumbBad.status === 400, String(thumbBad.status));
-// 路径不合法＝请求本身的问题＝400；未配 Key 是配置故障，与 fetch_cover 一致保持 500
-// （第 14 段那条注释是同一个决定：别因为分了级就把真故障也降级）
-const thumbNoKey = await fetch(APP + 'api/tmdb/thumb?path=' + encodeURIComponent('/abc123.jpg'));
-const thumbNoKeyBody = await thumbNoKey.json().catch(() => ({}));
-if ((await (await fetch(APP + 'api/settings')).json())['meta.tmdb_key']) {
-  console.log('SKIP 缩略图无 Key 断言（本实例已配置 TMDB Key）');
-} else {
-  check('未配 Key 时缩略图仍是 500 且报错清晰',
-    thumbNoKey.status === 500 && String(thumbNoKeyBody.error || '').includes('TMDB API Key'),
-    `${thumbNoKey.status} ${JSON.stringify(thumbNoKeyBody)}`);
-}
-
-/* 17.14. 媒体自定义列：加列走接口而不是界面，等同于「别处（另一台设备/另一个标签页）加了列」——
-   本地 COLS 会拿旧的去渲染新字段，colType 读到 undefined 打断整个 renderAll。 */
-const mfield = await post('/api/fields', { tbl: 'media', name: '片源', ftype: 'text' });
-const mrow = (await (await fetch(APP + 'api/media')).json())[0];
-await patch(`/api/media/${mrow.id}`, { ...mrow, extra: { [mfield.key]: 'BD 原盘' } });
-// 得等 loadAll 自己结算再问它成没成：它抛的是异步异常，同步去查 DOM 只会看到上一轮
-// 渲染留下的行，两版都「通过」。**而且值必须先落到某一行上**——cellVal 对空值提前返回，
-// 列刚建好、还没有任何行有值时根本走不到 colType，那一刻同样测不出东西（两条都真踩过）。
-check('别处加了媒体列，这边 loadAll 不崩', await evl(
-  `loadAll().then(() => 'ok', e => 'ERR: ' + (e && e.message))`) === 'ok');
-await sleep(900);
-check('新列的表头也补上了', await evl(
-  `!!document.querySelector('#m-tablewrap thead th[data-k="${mfield.key}"]')`) === true);
-check('表头没有被注入两遍', await evl(
-  `document.querySelectorAll('#m-tablewrap thead th[data-k="${mfield.key}"]').length`) === 1);
-await evl(`document.querySelector('.nav-tab[data-page="media"]').click()`);
-await sleep(400);
-await evl(`openMediaDialog(state.media.find(m => m.id === ${mrow.id}))`);
-await sleep(500);
-check('媒体表单里出现了自定义列', await evl(
-  `!document.querySelector('#m-extra-fold').hidden
-   && !!document.querySelector('#m-extra-fields [data-f="${mfield.key}"]')`) === true);
-check('自定义列的现值被读进控件', await evl(
-  `document.querySelector('#m-extra-fields [data-f="${mfield.key}"]')?.value`) === 'BD 原盘');
-check('已有值时那一段自动摊开', await evl(`document.querySelector('#m-extra-fold').open`) === true);
-// 撤回修复做负向对照时这个控件不在场：要让套件继续跑完，别崩在半路
-await evl(`(() => { const el = document.querySelector('#m-extra-fields [data-f="${mfield.key}"]'); if (el) el.value = 'REMUX'; })()`);
-await shot('21-media-extra');
-await evl(`document.querySelector('#form-media').requestSubmit()`);
-await sleep(1400);
-const msaved = (await (await fetch(APP + 'api/media')).json()).find(m => m.id === mrow.id);
-check('改动落库', msaved?.extra?.[mfield.key] === 'REMUX', JSON.stringify(msaved?.extra));
-check('保存没有清掉条目本身的字段',
-  msaved?.title === mrow.title && msaved?.rating === mrow.rating,
-  `${msaved?.title} / ${msaved?.rating}`);
-// 负向对照的靶子：表单不带 extra 时后端会把它写成 NULL，所以这条要一直有人守着
-await patch(`/api/media/${mrow.id}`, { ...msaved, extra: { [mfield.key]: '守着' } });
-await evl(`loadAll().catch(() => {})`); // 负向对照时这里本就会抛，别让它打断套件
-await sleep(700);
-await evl(`openMediaDialog(state.media.find(m => m.id === ${mrow.id}))`);
-await sleep(500);
-await evl(`document.querySelector('#form-media').requestSubmit()`);
-await sleep(1400);
-check('开表单直接保存不动自定义列的值',
-  (await (await fetch(APP + 'api/media')).json()).find(m => m.id === mrow.id)?.extra?.[mfield.key] === '守着');
-await fetch(`${APP}api/fields/${mfield.id}`, { method: 'DELETE' });
-await evl(`document.querySelector('.nav-tab[data-page="renewals"]').click()`);
-await evl(`loadAll().catch(() => {})`); // 负向对照时这里本就会抛，别让它打断套件
-await sleep(700);
-
 /* 17.15. 行首浮标：⠿ 拖动手柄 + 复选框，占的是首格预留的左内边距而不是一列。
    浮标住在名称格里，所以字形必须由 CSS ::before 画——写成按钮文本就会混进
    td.textContent，行文本从此永远带一个 ⠿（复制整行、断言取值都会看见）。 */
@@ -2027,46 +1892,6 @@ check('菜单上移挪得回来',
 await evl(`closePop()`);
 await sleep(120);
 
-/* 17.19. 媒体侧同样三件事。媒体的默认序仍是「最近标记」——拖拽是排序下拉里新增的
-   「手动」档，选中才可拖，否则 439 条会被一次性冻结成当前顺序。 */
-await evl(`document.querySelector('.nav-tab[data-page="media"]').click()`);
-await evl(`views.media.view = 'table'; saveViews(); renderMedia()`);
-await sleep(500);
-check('媒体排序下拉有「手动」档',
-  await evl(`!!document.querySelector('#m-sort option[value="pos"]')`) === true);
-check('媒体默认序仍是最近标记（不是手动）', await evl(`views.media.sort?.key`) !== 'pos');
-check('非手动档时媒体手柄停用', await evl(`!!document.querySelector('#m-body .rgrip.off')`) === true);
-check('媒体行末也没有「删」了',
-  await evl(`!!document.querySelector('#m-body tr td.ops [data-del]')`) === false);
-await evl(`setSort('media', 'pos', 1)`);
-await sleep(400);
-check('选了手动档手柄就活了', await evl(`!!document.querySelector('#m-body .rgrip.off')`) === false);
-const mOrd0 = await evl(`[...document.querySelectorAll('#m-body tr')].map(t => +t.dataset.id)`);
-await evl(`applyRowOrder('media', moveRow('media', ${mOrd0[0]}, ${mOrd0[mOrd0.length - 1]}, true))`);
-await sleep(600);
-const mOrd1 = await evl(`[...document.querySelectorAll('#m-body tr')].map(t => +t.dataset.id)`);
-check('媒体拖动改变了行序', mOrd1[mOrd1.length - 1] === mOrd0[0], `${mOrd0} → ${mOrd1}`);
-check('媒体新序落了库', await (async () => {
-  const rows = await (await fetch(APP + 'api/media')).json();
-  const byPos = [...rows].sort((a, b) => a.pos - b.pos).map(r => r.id);
-  return JSON.stringify(byPos) === JSON.stringify(mOrd1);
-})() === true);
-// 媒体的新建空行 + 批量删除
-const mN0 = await evl(`document.querySelectorAll('#m-body tr').length`);
-await evl(`document.querySelector('#m-tablewrap .newrow').click()`);
-await sleep(800);
-check('媒体新建也是直接插空行', await evl(`document.querySelectorAll('#m-body tr').length`) === mN0 + 1);
-check('媒体空标题渲染成「未命名」', await evl(`!!document.querySelector('#m-body .unnamed')`) === true);
-await evl(`closePop()`);
-const mBlank = await evl(`Math.max(...state.media.map(x => x.id))`);
-const mDel = await (await raw('/api/media/bulk_delete', 'POST', { ids: [mBlank] })).json();
-check('媒体批量删除端点可用', mDel.deleted === 1, JSON.stringify(mDel));
-await evl(`setSort('media', 'marked', -1)`);
-await evl(`loadAll()`);
-await sleep(600);
-check('媒体收拾回原来的行数', await evl(`document.querySelectorAll('#m-body tr').length`) === mN0);
-await evl(`document.querySelector('.nav-tab[data-page="renewals"]').click()`);
-await sleep(400);
 // 拍在该看的状态下：滚到表格、勾两行，让浮标（复选框常驻）、行高亮与批量条一起入镜
 await evl(`document.querySelector('#view-subs').scrollIntoView({ block: 'center' })`);
 await evl(`[...document.querySelectorAll('#subs-body tr [data-sel]')].slice(0, 2)
@@ -2422,8 +2247,7 @@ await evl(`loadAll()`);
 await sleep(700);
 
 /* 17.28. 「类型 × 场所」的叉积：新字段类型最常见的失守是只接一半管线——渲染接了
-   筛选没接、库那侧接了媒体没接。按功能加断言抓不到这类缺口，得按叉积补。 */
-await evl(`document.querySelector('.nav-tab[data-page="renewals"]').click()`);
+   筛选没接、表格接了表单没接。按功能加断言抓不到这类缺口，得按叉积补。 */
 await evl(`switchTab('subs')`);
 await sleep(400);
 // 上一段收拾掉了自己建的那两列，这里重新建一套自己的（三种类型各一）
@@ -2471,26 +2295,6 @@ check('网址列筛出来的行数真的变了',
 await evl(`setFilter('subs', '${xUrl}', null); closePop();`);
 await sleep(300);
 for (const f of [xUrlF, xMailF, xTel]) await fetch(`${APP}api/fields/${f.id}`, { method: 'DELETE' });
-await evl(`loadAll()`);
-await sleep(700);
-
-// 媒体表两头都要接：建列的类型下拉对媒体一视同仁地供应这三种类型，
-// 而写入口不规范化、格子里不给链接的话，同名同类型的列在两张表上表现就不一样。
-const xMField = await post('/api/fields', { tbl: 'media', name: '播放页', ftype: 'url' });
-const xMRow = (await (await fetch(APP + 'api/media')).json())[0];
-await patch(`/api/media/${xMRow.id}`, { ...xMRow, extra: { ...(xMRow.extra || {}), [xMField.key]: 'netflix.com/title/1' } });
-const xMSaved = (await (await fetch(APP + 'api/media')).json()).find(m => m.id === xMRow.id);
-check('媒体的 url 列同样过写入口规范化（没有协议的裸串会被当成站内相对路径）',
-  xMSaved?.extra?.[xMField.key] === 'https://netflix.com/title/1', JSON.stringify(xMSaved?.extra));
-await evl(`loadAll()`);
-await sleep(900);
-await evl(`document.querySelector('.nav-tab[data-page="media"]').click()`);
-await sleep(400);
-check('媒体表里也渲染成可点链接（此前是灰色纯文本）',
-  await evl(`document.querySelector('#m-body tr[data-id="${xMRow.id}"] td[data-k="${xMField.key}"] a')?.getAttribute('href')`)
-    === 'https://netflix.com/title/1');
-await fetch(`${APP}api/fields/${xMField.id}`, { method: 'DELETE' });
-await evl(`document.querySelector('.nav-tab[data-page="renewals"]').click()`);
 await evl(`loadAll()`);
 await sleep(700);
 
@@ -2596,18 +2400,8 @@ const pa_sim2 = (await (await fetch(APP + 'api/collections/sims/items')).json())
 check('表单里没有的真列（SIM 的周期）不会被一次保存清掉',
   pa_sim2.cycle === pa_sim.cycle && pa_sim2.cycle_days === pa_sim.cycle_days,
   `${pa_sim2.cycle}/${pa_sim2.cycle_days}`);
-// 媒体那侧同一套语义
-const pa_m = (await (await fetch(APP + 'api/media')).json())[0];
-await patch(`/api/media/${pa_m.id}`, { extra: { pa_note: '自定义列的值' } });
-await patch(`/api/media/${pa_m.id}`, { title: pa_m.title });
-const pa_m2 = (await (await fetch(APP + 'api/media')).json()).find(r => r.id === pa_m.id);
-check('媒体：只发标题不会清掉 extra 与评分',
-  pa_m2.extra?.pa_note === '自定义列的值' && pa_m2.rating === pa_m.rating,
-  JSON.stringify([pa_m2.extra, pa_m2.rating]));
-await patch(`/api/media/${pa_m.id}`, { extra: {} });
 // 协议真的换了：旧的整行 PUT 不再受理（405），免得有人照旧发全量体却以为是局部更新
 check('条目的 PUT 已不受理（405）', (await raw(`/api/items/${pa_item.id}`, 'PUT', { name: 'x' })).status === 405);
-check('媒体条目同样（405）', (await raw(`/api/media/${pa_m.id}`, 'PUT', { title: 'x' })).status === 405);
 await fetch(`${APP}api/items/${pa_item.id}`, { method: 'DELETE' });
 await evl(`loadAll()`);
 await sleep(700);
@@ -2696,8 +2490,8 @@ await sleep(900);
 check('loadAll 不再重建库表头',
   await evl(`document.querySelector('.tablewrap[data-tab="subs"] thead th')?.dataset.probe`) === 'kept');
 
-// ⑥ 汇率是辅助资源：它拉不到也不该让整页渲染不出来（media-only 部署下 /api/fx 必然 404，
-//    从前它就在首屏那一批 Promise.all 里，媒体数据取回来了页面却是空的）
+// ⑥ 汇率是辅助资源：它拉不到也不该让整页渲染不出来
+//    （从前它就在首屏那一批 Promise.all 里，一起被拖垮时表格是空的）
 await evl(`(() => { window._rf = window.fetch;
   window.fetch = (u, o) => String(u).includes('/api/fx') ? Promise.reject(new Error('装作拉不到')) : window._rf(u, o); })()`);
 // 先把行清空：不清的话上一轮渲染的行还在，"渲染出来了"这条断言就没有区分度
@@ -2710,20 +2504,6 @@ check('汇率拉不到，表格照常渲染',
 await evl(`window.fetch = window._rf`);
 await evl(`loadAll()`);
 await sleep(900);
-
-// ⑦ 海报墙是媒体库的默认视图，卡片只挂 onclick 就等于键盘用户在这一屏无路可走
-await evl(`(() => { state.page = 'media'; document.querySelector('#page-renewals').hidden = true;
-  document.querySelector('#page-media').hidden = false; views.media.view = 'wall'; renderMedia(); })()`);
-await sleep(500);
-check('海报卡进 Tab 序且自报身份', await evl(
-  `(() => { const c = document.querySelector('#m-wall .card');
-     return c?.tabIndex === 0 && c.getAttribute('role') === 'button' && !!c.getAttribute('aria-label'); })()`) === true);
-await evl(`document.querySelector('#m-wall .card').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`);
-await sleep(400);
-check('回车能打开详情', await evl(`document.querySelector('#dlg-media')?.open`) === true);
-await evl(`document.querySelector('#dlg-media').close(); state.page = 'renewals';
-  document.querySelector('#page-media').hidden = true; document.querySelector('#page-renewals').hidden = false;`);
-await sleep(300);
 
 /* 17.31a. schema 与 view 是两层：字段序与「上表」跟着账本走（服务端 fields），
    列宽/列序/隐藏/排序/筛选各设备各记（本机 views）。两层唯一会打架的是列序——
@@ -2814,14 +2594,10 @@ check('切库后 aria-current 跟着走', await evl(
   `document.querySelector('.tab[aria-current]')?.dataset.tab`) === 'vps');
 await evl(`switchTab('subs')`);
 await sleep(250);
-check('主导航标了当前页（且只标一个）', await evl(`(() => {
-  const on = [...document.querySelectorAll('.nav-tab[data-page]')].filter(t => t.getAttribute('aria-current') === 'page');
-  return on.length === 1 && on[0].dataset.page === 'renewals';
-})()`) === true);
 check('没有认领 tab 模式（没有 role=tab / tablist）', await evl(
   `!document.querySelector('[role="tab"], [role="tablist"]')`) === true);
 check('搜索框有可访问名（placeholder 一输入就没了，不能当名字）', await evl(
-  `!!document.querySelector('#t-search').getAttribute('aria-label') && !!document.querySelector('#m-search').getAttribute('aria-label')`) === true);
+  `!!document.querySelector('#t-search').getAttribute('aria-label')`) === true);
 
 // 复合控件：一个 label 只配一枚控件，多选那种一串控件的用 group + aria-labelledby
 await evl(`openItemDialog('vps', state.vps[0])`);
@@ -2862,7 +2638,7 @@ check('浅色 --ink-2 在三种底上都过 WCAG AA 的 4.5', await evl(`(() => 
   return ['--bg', '--surface', '--surface-2'].every(b => ratio(b) >= 4.5);
 })()`) === true);
 
-/* 17.33. 写入口的日期与币种校验；媒体排序下拉只属于海报墙；库设置只留齿轮。 */
+/* 17.33. 写入口的日期与币种校验；库设置只留齿轮。 */
 // 界面挡得住（原生 date 控件 / 币种下拉），接口挡不住——而写坏的后果都不出声：
 // 坏日期让条目掉出到期时间线，坏币种让那笔钱永远不进支出统计
 const vRow = (await (await fetch(`${APP}api/collections/subs/items`)).json())[0];
@@ -2882,18 +2658,6 @@ check('币种统一存大写，四位的也进得来', await (async () => {
 })() === 'USDT');
 await evl(`loadAll()`);
 await sleep(700);
-// 排序下拉：海报墙没有表头可点，它是唯一入口；表格视图里点表头就能排，两个入口管同一个状态
-await evl(`(() => { state.page = 'media'; document.querySelector('#page-renewals').hidden = true;
-  document.querySelector('#page-media').hidden = false; views.media.view = 'wall'; renderMedia(); })()`);
-await sleep(400);
-check('海报墙里排序下拉在', await evl(`!document.querySelector('#m-sort').hidden`) === true);
-await evl(`(() => { views.media.view = 'table'; renderMedia(); })()`);
-await sleep(400);
-check('表格视图里排序下拉收起（点表头就能排）', await evl(
-  `getComputedStyle(document.querySelector('#m-sort')).display`) === 'none');
-await evl(`(() => { views.media.view = 'wall'; state.page = 'renewals';
-  document.querySelector('#page-media').hidden = true; document.querySelector('#page-renewals').hidden = false; })()`);
-await sleep(250);
 // 库设置只剩齿轮：右键那个入口不看文档发现不了，撤掉
 check('右键库标签不再开设置', await evl(`(() => {
   const tab = document.querySelector('.tab[data-tab="subs"]');
@@ -2955,17 +2719,6 @@ check('文本真列存回去的是字符串，原值没被清成 NULL',
   noteAfter?.notes === '甲', JSON.stringify(noteAfter?.notes));
 await evl(`(() => { delete views.subs.types.notes; saveViews(); })()`);
 
-// ③ 评分填 8.5：as_i64 读不出来，范围校验整个跳过、再被写成 NULL——键明明在请求里
-const mediaAll = await (await fetch(APP + 'api/media')).json();
-const rated = mediaAll.find(m => m.rating != null) || mediaAll[0];
-check('评分只收整数：8.5 要被拦下，不能悄悄写成 NULL',
-  (await raw(`/api/media/${rated.id}`, 'PATCH', { rating: 8.5 })).status === 400);
-check('拒了之后分数原样还在',
-  ((await (await fetch(APP + 'api/media')).json()).find(m => m.id === rated.id) || {}).rating === rated.rating);
-check('清空仍按协议放行（null 是清空，不是坏值）',
-  (await raw(`/api/media/${rated.id}`, 'PATCH', { rating: null })).ok);
-await patch(`/api/media/${rated.id}`, { rating: rated.rating });
-
 // ④ 买断没有「每月多少」可言：缺币种也不该被点名——补了也照样不计入
 const lifeIt = await mk('subs', { name: '买断软件', status: 'Active', price: 49, cycle: 'lifetime' });
 const gapIt = await mk('subs', { name: '缺币种月付', status: 'Active', price: 9, cycle: 'monthly' });
@@ -3020,50 +2773,8 @@ await sleep(1600);
 const hostAfter = (await (await fetch(APP + 'api/collections/vps/items')).json()).find(x => x.id === hostA.id);
 check('回车加新值用的是此刻的勾选态，不是开浮层时的快照',
   JSON.stringify(hostAfter?.extra?.locations) === '["东京","京都"]', JSON.stringify(hostAfter?.extra?.locations));
-
-// ⑦ 媒体的详情入口在标题格里：那一列同样不给隐藏（此前只守了库的名称列）
-await evl(`(() => { views.media.view = 'table'; renderMedia(); })()`);
-await sleep(400);
-await evl(`document.querySelector('#m-tablewrap thead th[data-k="title"]')?.click()`);
-await sleep(300);
-check('媒体标题列的表头菜单里没有「隐藏此列」', await evl(
-  `[...document.querySelectorAll('.thmenu .mi')].every(x => !x.textContent.includes('隐藏此列'))`) === true);
-await evl(`closePop()`);
-await evl(`(() => { views.media.hiddenCols = ['title']; saveViews(); })()`);
-await evl(`rebuildHead('media')`);
-await sleep(800);
-check('本机存着的隐藏标题列偏好被捞回来', await evl(
-  `!views.media.hiddenCols.includes('title')
-   && document.querySelector('#m-tablewrap thead th[data-k="title"]').style.display !== 'none'`) === true);
-
-// ⑧ 媒体自定义列的 td 造型也查类型表（与库那侧同一份判据）：数字列右对齐、
-//    文本列可截断且悬停看全，否则同名同类型的列在两张表上长得不一样
-const mtxt = await post('/api/fields', { tbl: 'media', name: '片源说明', ftype: 'text' });
-const mnum = await post('/api/fields', { tbl: 'media', name: '集数', ftype: 'num' });
-const mrowT = (await (await fetch(APP + 'api/media')).json())[0];
-await patch(`/api/media/${mrowT.id}`, {
-  extra: { ...(mrowT.extra || {}), [mtxt.key]: '一段很长的片源说明', [mnum.key]: 12 },
-});
 await evl(`loadAll()`);
-await sleep(1000);
-await evl(`(() => { views.media.view = 'table'; renderMedia(); })()`);
-await sleep(400);
-const mtd = JSON.parse(await evl(`(() => {
-  const tr = document.querySelector('#m-body tr[data-id="${mrowT.id}"]');
-  const g = k => {
-    const td = tr && [...tr.children].find(x => x.dataset.k === k);
-    return td ? { cls: td.className, title: td.getAttribute('title') } : null;
-  };
-  return JSON.stringify({ txt: g('${mtxt.key}'), num: g('${mnum.key}') });
-})()`) || '{}');
-check('媒体自定义数字列右对齐', (mtd.num?.cls || '').includes('amt'), JSON.stringify(mtd));
-check('媒体自定义文本列可截断且悬停看全',
-  (mtd.txt?.cls || '').includes('clip') && mtd.txt?.title === '一段很长的片源说明', JSON.stringify(mtd));
-await fetch(`${APP}api/fields/${mtxt.id}`, { method: 'DELETE' });
-await fetch(`${APP}api/fields/${mnum.id}`, { method: 'DELETE' });
-await evl(`(() => { views.media.view = 'wall'; saveViews(); })()`);
-await evl(`loadAll()`);
-await sleep(900);
+await sleep(700);
 
 /* 17.35. 写入口的类型契约：出现的键必须是它该有的类型。取值函数读不出来就当缺席，
    「出现即写入」的协议下那是一次静默清空——价格传成字符串，响应 200，价格却成 NULL。
@@ -3078,14 +2789,7 @@ check('被拒的请求一字未动', tv_after.price === 12.5 && tv_after.extra?.
   JSON.stringify([tv_after.price, tv_after.extra, tv_after.name]));
 check('PATCH 带非空 logo → 400', (await raw(`/api/items/${tv_item.id}`, 'PATCH', { logo: 'item-1-1.png' })).status === 400);
 check('整行回读的 logo:null 不挡道', (await raw(`/api/items/${tv_item.id}`, 'PATCH', { logo: null, notes: '行' })).ok);
-const tv_m = await post('/api/media', { title: '类型契约片', kind: '电影', status: '看过' });
-check('媒体 PATCH title 传数字 → 400', (await raw(`/api/media/${tv_m.id}`, 'PATCH', { title: 123 })).status === 400);
-check('媒体 PATCH extra 传字符串 → 400', (await raw(`/api/media/${tv_m.id}`, 'PATCH', { extra: '不是对象' })).status === 400);
-check('媒体 PATCH 带非空 cover → 400', (await raw(`/api/media/${tv_m.id}`, 'PATCH', { cover: '1.jpg' })).status === 400);
-const tv_m2 = (await (await fetch(APP + 'api/media')).json()).find(x => x.id === tv_m.id);
-check('媒体被拒后标题原样', tv_m2.title === '类型契约片', tv_m2.title);
 await fetch(`${APP}api/items/${tv_item.id}`, { method: 'DELETE' });
-await fetch(`${APP}api/media/${tv_m.id}`, { method: 'DELETE' });
 
 /* 17.36. 渠道密钥不得进错误链：Telegram 的网址带着 bot token，而错误链会进 500
    响应体与 warn 日志——粘错误信息去 issue 的人不该顺手把 token 也贴出去。
