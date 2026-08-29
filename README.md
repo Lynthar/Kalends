@@ -1,80 +1,133 @@
 <div align="center">
-  <img src="assets/icon.svg" alt="" width="112">
-  <h1>Kalends</h1>
-  <p><b>朔日台账</b> — the new-moon ledger</p>
-  <p><b>English</b> · <a href="README.zh-CN.md">中文</a></p>
+
+<img src="assets/icon.svg" alt="Kalends" width="96">
+
+# Kalends
+
+[![license](https://img.shields.io/github/license/Lynthar/Kalends)](LICENSE)
+[![release](https://img.shields.io/github/v/release/Lynthar/Kalends)](https://github.com/Lynthar/Kalends/releases)
+
 </div>
 
-> Self-hosted tracker for everything that renews — subscriptions, SIM keep-alives, VPS boxes, and whatever else you care to define. One Rust binary, one SQLite file, no account anywhere.
+Self-hosted renewal tracker — subscriptions, SIM keep-alives, VPS boxes. One Rust binary, one SQLite file.
 
-Named after the Roman *Kalendae*: the first day of the month, when debts came due. It is where the word "calendar" comes from — and the new moon that opened each Roman month is the crescent in the icon, filling up bubble by bubble until the account falls due.
+English | [简体中文](README.zh-CN.md)
 
-The media library that used to live here (films, series, anime and games) is now its own project, [Ludi](https://github.com/Lynthar/Ludi), which ships an importer that moves your media data across wholesale.
+Anything with a next date goes on one timeline. Subscriptions, the prepaid SIM
+you have to top up every 181 days to keep the number, VPS boxes, domains,
+insurance, documents that expire.
 
-## What it does
+I built it to replace a handful of Notion databases: online-only, sluggish past a
+few hundred rows, and with no way to say whether a status counts as spending. The
+data model is the same shape — libraries with typed columns — but it comes out as
+one binary and one SQLite file, no accounts, nothing phoning home. Point it at a
+folder on a NAS and forget it's there.
 
-Everything that expires lands on one timeline. Subscriptions, SIM keep-alives and VPS servers ship as ready-made collections; rename them, delete them, or build your own from a template (domains, insurance, ID documents) or from an empty one. A template only decides what the collection looks like on day one. Afterwards its fields behave like any other, so you can rename them, edit their options, or throw them away.
+## Features
 
-Each collection owns its columns and decides how due dates work: store the next due date directly, or derive it from the last renewal plus a cycle. Cycles run weekly through triennial, plus lifetime and arbitrary day counts, so a 181-day SIM keep-alive is a normal setting rather than a workaround.
+- **Seven library templates** — subscriptions, SIM cards, VPS instances,
+  domains, insurance, documents, and a blank one. Columns are typed, and the
+  type drives sorting, filtering and how a cell renders.
+- **Two ways to express a due date.** Store the next one directly, or store the
+  last renewal and a cycle and let it work the date out. Cycles run from weekly
+  to three-yearly, plus lifetime and an arbitrary number of days — so a 181-day
+  SIM keep-alive is an ordinary setting, not a special case.
+- **Status values carry meaning.** Each one declares whether it counts as
+  spending, whether it should remind you, and whether it belongs on the
+  timeline.
+- **Reminders and calendar.** Telegram bot and SMTP email on an N-days-ahead
+  threshold plus a daily digest, de-duplicated across restarts and caught up
+  after downtime; an ICS feed at `/calendar.ics` for calendar apps.
+- **Money stays in its own currency.** Prices are recorded as entered and
+  totalled per currency; conversion is a view you can turn on.
+- **Backups run themselves.** A SQLite snapshot after 03:30 each night, 14 kept
+  on a rolling basis, plus a JSONL export of every table that stays readable
+  without Kalends around.
 
-Prices are stored in their original currency and totalled per currency; nothing is quietly converted. Items nest one level deep (service → tier), so the plans you are comparing and the one you actually pay for sit in the same table. Marking something renewed moves the date on and writes a ledger entry you can read back from the settings page.
+## Install
 
-Status values carry meaning rather than decoration. Each one declares whether it counts toward spend, fires alerts, and shows on the timeline, and you flip those three from the column header menu. `Deferred` has all three off, which turns it into a price-comparison shelf. `Ending` keeps its calendar entry and stops its own reminders — the daily digest still lists it, because the digest is the whole timeline.
-
-### Tables
-
-Modelled on Notion databases. Every column has a field type — text, number, select, multi-select, status, date, phone, link, mail — and the type drives sorting, the filter panel and how the cell renders. Click a cell to edit it in place; no form to open.
-
-Columns are data, so a new collection arrives with a working set. Add your own, rename them, recolour and hand-sort select options with changes propagating to every row, drag widths and order, hide what you don't need, collapse sub-rows. Field order and "show in table" belong to the collection and follow it across devices. Sort, filter and column width stay in the browser, so your phone and your laptop can disagree.
-
-### Reminders and calendar
-
-Telegram bot and SMTP mail, N-days-before thresholds plus a daily digest. Telegram can go through its own proxy. Sends are deduplicated on (kind, item, due date, threshold, channel) and catch up on whatever was missed while the server was down. There is also an ICS feed whose events carry a one-day alarm — subscribe from your phone's calendar and you can skip push notifications entirely.
-
-### Backups and privacy
-
-A SQLite snapshot every night after 03:30, 14 kept on a rolling basis, plus a plain-text JSONL dump of every table that stays readable without Kalends. Optional PIN gate. No telemetry, and nothing leaves the machine on its own: the outbound traffic is an exchange-rate refresh or a favicon fetch — each one only when you ask for it — plus the notification channels you configure.
-
-## Quick start
-
-Grab a binary from [Releases](https://github.com/Lynthar/Kalends/releases) — Linux x86_64 or aarch64, plus a statically linked musl build for older distributions:
+**Prebuilt binaries are Linux only.** Grab one from
+[Releases](https://github.com/Lynthar/Kalends/releases):
 
 ```bash
-tar xzf kalends-*-x86_64-unknown-linux-gnu.tar.gz
-KALENDS_DATA=./data ./kalends-*/kalends      # http://127.0.0.1:4180
+tar xzf kalends-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+KALENDS_DATA=./data TZ=Asia/Shanghai ./kalends-v0.1.0-x86_64-unknown-linux-gnu/kalends
 ```
 
-Or from source:
+There's an `aarch64` build for ARM boxes and NAS units, and a `musl` build for
+old glibc or Alpine. `SHA256SUMS` ships alongside them.
+
+**Docker** — the compose file builds locally; no image is published anywhere:
 
 ```bash
-cargo run     # http://127.0.0.1:4180, data in ./data/
+docker build -t kalends:local .
+sudo chown -R 10001:10001 /path/to/appdata/kalends
+docker compose -f deploy/compose.yaml up -d
 ```
 
-On a phone, "add to home screen" gives you a full-screen app.
+**From source:**
 
-For a real deployment (Docker Compose, reverse proxy) see [docs/user-guide.md](docs/user-guide.md). Environment variables: `KALENDS_ADDR` (default `127.0.0.1:4180`) and `KALENDS_DATA` (default `./data`).
-
-Behind a restrictive network, the settings page has one shared outbound proxy covering exchange-rate refreshes and favicon fetches; Telegram gets its own proxy field.
-
-Keep the SQLite file on local disk. Locking over SMB or NFS is not reliable enough to trust a ledger to.
-
-Building has the same constraint. If the repository itself sits on a network share, send Cargo's output to a local directory first — `export CARGO_TARGET_DIR=~/.cache/kalends-target` — because incremental compilation wants file locks those filesystems don't provide, and without it `cargo build` stops at a bare `os error 45`.
-
-## Repository layout
-
-```
-src/            axum server, renewal engine, notifications, backups
-migrations/     database migrations (embedded at compile time, versioned by PRAGMA user_version)
-assets/         frontend (vanilla JS, no build step, embedded at compile time; js/ splits into eight files loaded in order)
-scripts/        Notion migration, frontend end-to-end checks, migration rehearsals and API diffing
-tests/fixtures/ synthetic data at older schema versions, replayed by the upgrade tests
-docs/           user guide: deployment, restore, upgrade and rollback
-deploy/         Docker Compose file
-.github/        release workflow (tag-triggered; there is deliberately no CI on pull requests)
+```bash
+cargo run
 ```
 
-Changes under `assets/` need a fresh `cargo build` to take effect.
+That serves `http://127.0.0.1:4180` with data in `./data/`. If the repository
+lives on a network share, set `CARGO_TARGET_DIR` to somewhere local first —
+cargo doesn't get along with SMB.
+
+## Usage
+
+```bash
+KALENDS_DATA=./data KALENDS_ADDR=127.0.0.1:4180 TZ=Asia/Shanghai ./kalends
+```
+
+Two other modes:
+
+```bash
+kalends --health                                    # for a container healthcheck
+kalends restore --from backups/snapshot-2026-08-25.db --to ./data-new
+```
+
+Day to day: add it to your phone's home screen and it behaves like an app; fill
+in Telegram or SMTP under settings and send yourself a test notification; set an
+ICS token and subscribe to `/calendar.ics?token=…` from your calendar.
+
+## Configuration
+
+Four environment variables, and everything else lives in the settings page.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `KALENDS_ADDR` | `127.0.0.1:4180` | The container image binds `0.0.0.0:4180` instead |
+| `KALENDS_DATA` | `data` | `/data` in the container |
+| `TZ` | — | **Set this.** Containers default to UTC and "today" ends up wrong |
+| `RUST_LOG` | `info` | |
+
+In the settings page: an optional PIN, the ICS token, a shared outbound proxy,
+a display currency, Telegram and SMTP credentials, reminder thresholds and the
+digest time.
+
+## Limitations
+
+- **Single user, by design.** No accounts, no permissions. The optional PIN keeps
+  a curious housemate out and nothing more. Two browser tabs left open on stale
+  data can overwrite each other.
+- **Not meant to face the internet.** Put it behind Tailscale or a VPN rather
+  than a public port and a PIN.
+- **The database has to be on local disk.** SQLite locking over SMB or NFS isn't
+  reliable enough to trust with your only copy.
+- **The interface is Chinese only.** There's no i18n layer, so the UI, and the
+  CLI output from `restore` and `--health`, are all in Chinese.
+- **Search is a plain `LIKE`.** Fine for hundreds of rows; there's no full-text
+  index and no virtual scrolling yet.
+
+## Documentation
+
+- [User guide](docs/user-guide.md) — Docker Compose, a Caddy reverse proxy
+  example, running on bare metal, restoring, upgrades and rollback,
+  troubleshooting notifications. Written in Chinese.
 
 ## License
 
-[AGPL-3.0](LICENSE)
+GNU Affero General Public License v3.0 only — see [LICENSE](LICENSE).
+Copyright (c) 2026 Lynthar.
