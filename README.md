@@ -16,15 +16,15 @@ Self-hosted renewal tracker — subscriptions, SIM keep-alives, VPS boxes. One R
 
 English | [简体中文](README.zh-CN.md)
 
-Anything with a next date goes on one timeline. Subscriptions, the prepaid SIM
+Everything with a next date goes on one timeline: subscriptions, the prepaid SIM
 you have to top up every 181 days to keep the number, VPS boxes, domains,
 insurance, documents that expire.
 
 I built it to replace a handful of Notion databases: online-only, sluggish past a
 few hundred rows, and with no way to say whether a status counts as spending. The
-data model is the same shape — libraries with typed columns — but it comes out as
-one binary and one SQLite file, no accounts, nothing phoning home. Point it at a
-folder on a NAS and forget it's there.
+data model keeps the same shape — libraries with typed columns — but it comes out
+as one binary plus one SQLite file, no accounts, nothing phoning home. It can run
+on a NAS for months without attention.
 
 ## Features
 
@@ -41,11 +41,11 @@ folder on a NAS and forget it's there.
 - **Reminders and calendar.** Telegram bot and SMTP email on an N-days-ahead
   threshold plus a daily digest, de-duplicated across restarts and caught up
   after downtime; an ICS feed at `/calendar.ics` for calendar apps.
-- **Money stays in its own currency.** Prices are recorded as entered and
-  totalled per currency; conversion is a view you can turn on.
-- **Backups run themselves.** A SQLite snapshot after 03:30 each night, 14 kept
-  on a rolling basis, plus a JSONL export of every table that stays readable
-  without Kalends around.
+- **Amounts are recorded in their original currency.** Prices are stored as
+  entered and totalled per currency; conversion is a view you can turn on.
+- **Backups run automatically.** A SQLite snapshot after 03:30 each night, 14
+  kept on a rolling basis, plus a JSONL export of every table that can be read
+  without Kalends installed.
 
 ## Install
 
@@ -74,9 +74,9 @@ docker compose -f deploy/compose.yaml up -d
 cargo run
 ```
 
-That serves `http://127.0.0.1:4180` with data in `./data/`. If the repository
-lives on a network share, set `CARGO_TARGET_DIR` to somewhere local first —
-cargo doesn't get along with SMB.
+That serves `http://127.0.0.1:4180` with data written to `./data/`. If the
+repository lives on a network share, set `CARGO_TARGET_DIR` to somewhere local
+first — cargo has problems on SMB.
 
 ## Usage
 
@@ -112,13 +112,13 @@ digest time.
 
 ## Limitations
 
-- **Single user, by design.** No accounts, no permissions. The optional PIN keeps
-  a curious housemate out and nothing more. Two browser tabs left open on stale
-  data can overwrite each other.
+- **Single user, deliberately.** No accounts, no permissions. The optional PIN
+  keeps a curious housemate out and nothing more. Two browser tabs left open on
+  stale data can overwrite each other.
 - **Not meant to face the internet.** Put it behind Tailscale or a VPN rather
   than a public port and a PIN.
 - **The database has to be on local disk.** SQLite locking over SMB or NFS isn't
-  reliable enough to trust with your only copy.
+  reliable; don't put your only copy of the data there.
 - **The interface is Chinese only.** There's no i18n layer, so the UI, and the
   CLI output from `restore` and `--health`, are all in Chinese.
 - **Search is a plain `LIKE`.** Fine for hundreds of rows; there's no full-text
