@@ -7,6 +7,9 @@
 [![license](https://img.shields.io/github/license/Lynthar/Kalends)](LICENSE)
 [![release](https://img.shields.io/github/v/release/Lynthar/Kalends)](https://github.com/Lynthar/Kalends/releases)
 
+**[Live demo](https://lynthar.github.io/Kalends/demo/)** (read-only, synthetic data) ·
+[Project page](https://lynthar.github.io/Kalends/)
+
 </div>
 
 Self-hosted renewal tracker — subscriptions, SIM keep-alives, VPS boxes. One Rust binary, one SQLite file.

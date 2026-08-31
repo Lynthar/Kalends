@@ -3,6 +3,7 @@
 /data
 node_modules/
 dist/
+site/demo-data.js
 
 # 本地私有文件（机器/个人相关，不入库）
 CLAUDE.md

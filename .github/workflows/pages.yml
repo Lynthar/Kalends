@@ -1,0 +1,60 @@
+# 演示站的数据是真二进制跑出来的快照，所以这条流水线必须先编译再导出。
+# 定时那一档是给日期保鲜的：快照里的到期天数按导出当天算，久不重建就会显得陈旧。
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'assets/**'
+      - 'site/**'
+      - 'scripts/demo-seed.py'
+      - 'scripts/build-pages.py'
+      - '.github/workflows/pages.yml'
+      - 'src/**'          # 快照由后端产出，引擎变了就得重导
+      - 'migrations/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  schedule:
+    - cron: '0 3 1 * *'   # 每月 1 日重建，让演示里的到期天数保持新鲜
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同时只留一次部署，排队的旧任务直接让位
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: pages-cargo-${{ hashFiles('Cargo.lock') }}
+      - run: cargo build --release --locked
+      - name: Seed and export the demo snapshot
+        run: python3 scripts/demo-seed.py --bin target/release/kalends --out site/demo-data.js
+      - run: python3 scripts/build-pages.py --out dist
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: dist }
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f3faf7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b1715" media="(prefers-color-scheme: dark)">
+<title>Kalends — self-hosted renewal tracker</title>
+<meta name="description" content="Self-hosted renewal tracker for subscriptions, VPS boxes and policies. One Rust binary, one SQLite file, nothing phoning home.">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="landing.css">
+</head>
+<body>
+
+<div class="wrap">
+
+<header class="top">
+  <svg class="top-moon" viewBox="0 0 512 512" aria-hidden="true">
+    <defs>
+      <linearGradient id="m-grad" x1="1" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#22cfbc"/><stop offset="1" stop-color="#067f72"/>
+      </linearGradient>
+      <mask id="m-cres">
+        <circle cx="256" cy="256" r="216" fill="#fff"/>
+        <circle cx="174" cy="323" r="201" fill="#000"/>
+      </mask>
+    </defs>
+    <circle cx="256" cy="256" r="216" fill="url(#m-grad)" mask="url(#m-cres)"/>
+  </svg>
+  <span class="top-name">Kalends</span>
+  <nav class="top-links">
+    <a href="#install">Install</a>
+    <a href="#limits">Limitations</a>
+    <a href="https://github.com/Lynthar/Kalends">GitHub</a>
+  </nav>
+</header>
+
+<section class="hero">
+  <div>
+    <p class="etym">Kalendae — the first day of the Roman month, when accounts fell due.
+      The book they were written in was the <em>calendarium</em>.</p>
+    <h1 class="hero-h">Everything with a next date, on <em>one timeline</em>.</h1>
+    <p class="lede">Subscriptions, VPS boxes, insurance policies, domains — anything that
+      comes due again. Self-hosted and offline by default: one Rust binary, one SQLite
+      file, no accounts, nothing phoning home.</p>
+    <div class="cta-row">
+      <a class="btn btn-go" href="demo/">Open the demo</a>
+      <a class="btn btn-alt" href="https://github.com/Lynthar/Kalends/releases">Download</a>
+      <p class="cta-note">The demo is read-only and runs on synthetic data. The interface is Chinese only.</p>
+    </div>
+  </div>
+
+  <div class="tl" id="tl">
+    <div class="tl-head">
+      <span class="tl-title">Coming due</span>
+      <span class="tl-note">from the demo data</span>
+    </div>
+    <div id="tl-rows">
+      <div class="tl-row"><span class="tl-days near">2</span><span class="tl-unit">d</span><span class="tl-name">iCloud+</span><span class="tl-kind">订阅</span></div>
+      <div class="tl-row"><span class="tl-days near">6</span><span class="tl-unit">d</span><span class="tl-name">Netflix</span><span class="tl-kind">订阅</span></div>
+      <div class="tl-row"><span class="tl-days">13</span><span class="tl-unit">d</span><span class="tl-name">Spotify</span><span class="tl-kind">订阅</span></div>
+      <div class="tl-row"><span class="tl-days">22</span><span class="tl-unit">d</span><span class="tl-name">Hetzner · CX22</span><span class="tl-kind">VPS</span></div>
+    </div>
+    <div class="tl-foot">Dates come from the engine, not the page — <a href="demo/">open the demo</a>.</div>
+  </div>
+</section>
+
+<section class="sec">
+  <h2 class="sec-h">What it does</h2>
+  <p class="sec-lede">Libraries with typed columns, the way a spreadsheet wishes it worked.
+    The column type drives sorting, filtering, and how a cell renders.</p>
+  <dl class="feat">
+    <dt>Seven templates</dt>
+    <dd>Subscriptions, SIM cards, VPS instances, domains, insurance, documents, and a blank
+      one. Add your own columns to any of them.</dd>
+
+    <dt>Two due-date models</dt>
+    <dd>Store the next date directly, or store the last renewal plus a cycle and let the
+      engine work it out. Cycles run weekly to three-yearly, plus lifetime and an arbitrary
+      number of days.</dd>
+
+    <dt>Status semantics</dt>
+    <dd>Each status value declares whether it counts as spending, whether it should remind
+      you, and whether it belongs on the timeline. A price catalogue you are still comparing
+      stays out of the totals.</dd>
+
+    <dt>Reminders and calendar</dt>
+    <dd>Telegram and SMTP on an N-days-ahead threshold plus a daily digest, de-duplicated
+      across restarts and caught up after downtime. An ICS feed for calendar apps.</dd>
+
+    <dt>Money stays put</dt>
+    <dd>Prices are recorded in the currency you paid in and totalled per currency.
+      Conversion is a view you can turn on; notifications and ICS never convert.</dd>
+
+    <dt>Backups run themselves</dt>
+    <dd>A nightly SQLite snapshot, fourteen kept on a rolling basis, plus a JSONL export of
+      every table that stays readable without Kalends around.</dd>
+  </dl>
+</section>
+
+<section class="sec" id="install">
+  <h2 class="sec-h">Install</h2>
+  <p class="sec-lede">Prebuilt binaries are Linux only — x86-64, aarch64 for ARM boxes and
+    NAS units, and a musl build for old glibc or Alpine. <code>SHA256SUMS</code> ships
+    alongside them.</p>
+  <div class="pill-row">
+    <span class="pill">Linux</span><span class="pill">Docker</span><span class="pill">From source</span>
+  </div>
+<pre><span class="c"># a release binary</span>
+tar xzf kalends-&lt;version&gt;-x86_64-unknown-linux-gnu.tar.gz
+KALENDS_DATA=./data TZ=Asia/Shanghai ./kalends
+
+<span class="c"># docker — the compose file builds locally, no image is published</span>
+docker build -t kalends:local .
+docker compose -f deploy/compose.yaml up -d
+
+<span class="c"># from source, serves 127.0.0.1:4180 with data in ./data/</span>
+cargo run</pre>
+  <p class="sec-lede">Set <code>TZ</code>. Containers default to UTC and “today” ends up
+    wrong. Everything else lives in the settings page.</p>
+</section>
+
+<section class="sec" id="limits">
+  <h2 class="sec-h">What it is not</h2>
+  <p class="sec-lede">Worth knowing before you install it rather than after.</p>
+  <ul class="limits">
+    <li><b>Single user, by design.</b> No accounts, no permissions. The optional PIN keeps a
+      curious housemate out and nothing more.</li>
+    <li><b>Not meant to face the internet.</b> Put it behind Tailscale or a VPN rather than a
+      public port and a PIN.</li>
+    <li><b>The database has to be on local disk.</b> SQLite locking over SMB or NFS isn't
+      reliable enough to trust with your only copy.</li>
+    <li><b>The interface is Chinese only.</b> There's no i18n layer, so the UI and the CLI
+      output are all in Chinese.</li>
+    <li><b>Search is a plain <code>LIKE</code>.</b> Fine for hundreds of rows; there's no
+      full-text index and no virtual scrolling yet.</li>
+  </ul>
+</section>
+
+<footer class="foot">
+  <span>AGPL-3.0-only · © 2026 Lynthar</span>
+  <a href="https://github.com/Lynthar/Kalends">Source</a>
+  <a href="https://github.com/Lynthar/Kalends/blob/main/README.zh-CN.md">中文说明</a>
+  <a href="https://github.com/Lynthar/Kalends/blob/main/docs/user-guide.md">User guide (Chinese)</a>
+</footer>
+
+</div>
+
+<script src="demo/demo-data.js"></script>
+<script>
+/* 首屏那条时间线读演示快照，天数是引擎算的——快照没加载上就留着 HTML 里的静态几行 */
+(function () {
+  const ov = typeof DEMO_DATA === 'object' && DEMO_DATA['/api/overview'];
+  if (!ov || !ov.upcoming || !ov.upcoming.length) return;
+  const names = {};
+  for (const c of ov.collections || []) names[c.key] = c.name;
+  const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  document.getElementById('tl-rows').innerHTML = ov.upcoming.slice(0, 6).map(u => {
+    const d = u.days_left;
+    return `<div class="tl-row"><span class="tl-days${d <= 7 ? ' near' : ''}">${d}</span>`
+      + `<span class="tl-unit">d</span><span class="tl-name">${esc(u.name)}</span>`
+      + `<span class="tl-kind">${esc(names[u.kind] || u.kind)}</span></div>`;
+  }).join('');
+})();
+</script>
+
+</body>
+</html>

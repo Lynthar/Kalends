@@ -1,0 +1,19 @@
+/* 只读演示的顶部横幅。配色对齐 index.html 的 theme-color，深浅两套各写各的。 */
+.demo-bar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 60;
+  display: flex; flex-wrap: wrap; align-items: center; gap: .55rem;
+  padding: .5rem .9rem; font-size: .82rem; line-height: 1.4;
+  background: #e8f4ee; color: #1d3b33; border-bottom: 1px solid #c4ddd2;
+}
+.demo-tag {
+  font-weight: 600; letter-spacing: .02em;
+  padding: .1rem .45rem; border-radius: 999px;
+  background: #1d3b33; color: #e8f4ee;
+}
+.demo-txt { opacity: .85; }
+.demo-link { color: inherit; text-underline-offset: .2em; }
+
+@media (prefers-color-scheme: dark) {
+  .demo-bar { background: #12241f; color: #cfe6dc; border-bottom-color: #23453b; }
+  .demo-tag { background: #cfe6dc; color: #12241f; }
+}

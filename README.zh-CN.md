@@ -7,6 +7,9 @@
 [![license](https://img.shields.io/github/license/Lynthar/Kalends)](LICENSE)
 [![release](https://img.shields.io/github/v/release/Lynthar/Kalends)](https://github.com/Lynthar/Kalends/releases)
 
+**[在线演示](https://lynthar.github.io/Kalends/demo/)**（只读，数据是合成的）·
+[项目主页](https://lynthar.github.io/Kalends/)
+
 </div>
 
 自托管的续费台账：订阅、SIM 保号、VPS，凡是有下一个日期的都记得下。单二进制单 SQLite 文件。
