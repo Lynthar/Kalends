@@ -16,11 +16,9 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# 演示页不该带这两行：/config.js 服务端就没有这个路由，
 # manifest 的 start_url 指向站点根，在 Pages 的子路径下会装出一个打不开的 PWA
 DROP_LINES = [
     '<link rel="manifest" href="/manifest.webmanifest">',
-    '<script src="/config.js"></script>',
 ]
 
 # 快照必须排在 shim 前面（shim 直接读 DEMO_DATA），两者都要早于 pages.js 的 boot()

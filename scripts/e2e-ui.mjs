@@ -81,6 +81,7 @@ await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
 let msgId = 0;
 const pending = new Map();
 const consoleMsgs = [];
+const badLoads = [];
 ws.onmessage = ev => {
   const m = JSON.parse(ev.data);
   if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); }
@@ -88,6 +89,11 @@ ws.onmessage = ev => {
     consoleMsgs.push(m.params.type + ': ' + m.params.args.map(a => a.value ?? a.description ?? '').join(' '));
   if (m.method === 'Runtime.exceptionThrown')
     consoleMsgs.push('exception: ' + (m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text));
+  // 静态资源 404 既不抛异常也不进 console，只有网络层看得见；业务请求的 4xx 另有断言管
+  if (m.method === 'Network.responseReceived' && m.params.response.status >= 400
+      && ['Document', 'Script', 'Stylesheet', 'Image', 'Font', 'Manifest'].includes(m.params.type)
+      && !m.params.response.url.includes('favicon'))
+    badLoads.push(`${m.params.response.status} ${m.params.type} ${m.params.response.url}`);
   if (m.method === 'Page.javascriptDialogOpening')
     ws.send(JSON.stringify({ id: ++msgId, method: 'Page.handleJavaScriptDialog', params: { accept: true } }));
 };
@@ -123,6 +129,7 @@ const menuClick = async (thSel, itemText) => {
 
 await send('Runtime.enable');
 await send('Page.enable');
+await send('Network.enable');
 await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 2, mobile: false });
 for (let i = 0; i < 50; i++) {
   await sleep(200);
@@ -2875,6 +2882,8 @@ await shot('10-after-wipe');
 
 const errs = consoleMsgs.filter(m => !m.includes('favicon'));
 check('无 console 错误', errs.length === 0, JSON.stringify(errs));
+// 覆盖第 15 节那次整页导航：index.html 引了服务端没有的路径就会在这里现形
+check('静态资源全部取得到', badLoads.length === 0, JSON.stringify(badLoads));
 console.log(failures ? `\n${failures} FAILURES` : '\nALL PASS');
 console.log('截图目录：' + OUT);
 ws.close();
