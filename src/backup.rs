@@ -109,8 +109,8 @@ pub struct RestoreReport {
 }
 
 /// `to` 必须不存在或为空目录：恢复只装配新目录，绝不覆盖在用数据。
-/// 验证三件事：integrity_check（含外键）、user_version 不高于本二进制、covers/logos 引用在位；
-/// 快照在标准 `<数据目录>/backups/` 布局里时，顺带从原数据目录把 covers/logos 复制过来。
+/// 验证三件事：integrity_check（含外键）、user_version 不高于本二进制、logos/ 引用在位；
+/// 快照在标准 `<数据目录>/backups/` 布局里时，顺带从原数据目录把 logos/ 复制过来。
 pub fn restore(from: &Path, to: &Path) -> Result<RestoreReport> {
     if !from.is_file() {
         anyhow::bail!("快照不存在：{}", from.display());

@@ -97,7 +97,7 @@ pub fn i(v: &Value, k: &str) -> Option<i64> {
 }
 
 /// 数据目录里可直接读写的文件名：只放行字母数字与 . _ -，因此拼不出路径分隔符或 `..` 之外的花样。
-/// logo 与 cover 两条静态路径、以及删文件时都走它。
+/// `/logos/{name}` 静态路径与删文件时都走它。
 pub fn safe_name(n: &str) -> bool {
     !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
@@ -195,7 +195,7 @@ async fn overview(State(app): State<App>) -> R {
 /// 生效中的汇率表 + 显示币种。折算全在呈现层做，所以整张表下发给前端。
 async fn fx_get(State(app): State<App>) -> R {
     let conn = app.db.lock().unwrap();
-    Ok(Json(crate::fx::state(&conn)))
+    Ok(Json(crate::fx::state(&conn)?))
 }
 
 /// 手动拉一次实时汇率（默认关着的那条出网，用户在设置页点一下才发生）。
@@ -366,7 +366,7 @@ fn keep_masked_secret(conn: &rusqlite::Connection, k: &str, incoming: &str) -> a
     let Ok(mut v) = serde_json::from_str::<Value>(incoming) else { return Ok(incoming.into()) };
     if v[field].as_str() == Some(SECRET_MASK) {
         // 读不出旧值要报错别吞：把故障当"没存过"会把密钥静默清空
-        let stored = crate::db::get_setting_checked(conn, k)?
+        let stored = crate::db::get_setting(conn, k)?
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
             .and_then(|s| s[field].as_str().map(str::to_string))
             .unwrap_or_default();
@@ -428,7 +428,7 @@ async fn notify_test(State(app): State<App>, Json(b): Json<Value>) -> R {
     let channel = s(&b, "channel").ok_or_else(|| bad("缺少 channel"))?;
     let (tg, mail) = {
         let conn = app.db.lock().unwrap();
-        (notify::telegram_cfg(&conn), notify::email_cfg(&conn))
+        (notify::telegram_cfg(&conn)?, notify::email_cfg(&conn)?)
     };
     let text = "Kalends 通知测试 ✓";
     match channel.as_str() {
@@ -450,7 +450,7 @@ async fn calendar(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Response, ApiError> {
     let conn = app.db.lock().unwrap();
-    let expected = db::get_setting(&conn, "ics.token").unwrap_or_default();
+    let expected = db::get_setting(&conn, "ics.token")?.unwrap_or_default();
     if expected.is_empty() || q.get("token").map(String::as_str) != Some(expected.as_str()) {
         return Ok((StatusCode::UNAUTHORIZED, "unauthorized").into_response());
     }
@@ -532,7 +532,7 @@ mod tests {
             [r#"{"enabled":true,"bot_token":"tok123","chat_id":"1"}"#],
         )
         .unwrap();
-        let stored = crate::db::get_setting(&conn, "notify.telegram").unwrap();
+        let stored = crate::db::get_setting(&conn, "notify.telegram").unwrap().unwrap();
         let masked = mask_secret("notify.telegram", &stored);
         assert!(!masked.contains("tok123") && masked.contains(SECRET_MASK), "{masked}");
         let kept = keep_masked_secret(&conn, "notify.telegram", &masked).unwrap();

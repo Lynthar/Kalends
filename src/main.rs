@@ -51,7 +51,7 @@ async fn health_probe() -> ! {
 }
 
 /// `kalends restore --from <快照> --to <新目录>`：装配并验证一个新数据目录。
-/// 退出码：0=完整；1=失败或引用文件缺失（数据库本身完好，但图标/海报会缺）；2=用法错误。
+/// 退出码：0=完整；1=失败或引用文件缺失（数据库本身完好，但条目图标会缺）；2=用法错误。
 fn restore_cli(rest: &[String]) -> ! {
     fn usage() -> ! {
         eprintln!("用法：kalends restore --from <backups/snapshot-日期.db> --to <新数据目录>");
@@ -76,14 +76,14 @@ fn restore_cli(rest: &[String]) -> ! {
             };
             println!("已恢复 {to}/kalends.db：integrity_check ok，user_version {}（{staleness}）", r.user_version);
             match &r.assets_from {
-                Some(src) => println!("已从 {} 复制 covers/logos 共 {} 个文件", src.display(), r.assets_copied),
-                None => println!("快照不在标准 backups/ 布局里，未能定位原数据目录：请手动复制 covers/ 与 logos/"),
+                Some(src) => println!("已从 {} 复制 logos/ 共 {} 个文件", src.display(), r.assets_copied),
+                None => println!("快照不在标准 backups/ 布局里，未能定位原数据目录：请手动复制 logos/"),
             }
             if r.missing.is_empty() {
-                println!("引用核对：条目引用的图标与海报全部在位（孤儿文件 {} 个，无碍）", r.orphans);
+                println!("引用核对：条目引用的图标全部在位（孤儿文件 {} 个，无碍）", r.orphans);
                 std::process::exit(0);
             }
-            println!("引用核对：{} 个引用文件缺失——数据库完好，但这些条目的图标/海报会缺：", r.missing.len());
+            println!("引用核对：{} 个引用文件缺失——数据库完好，但这些条目的图标会缺：", r.missing.len());
             for m in &r.missing {
                 println!("  {m}");
             }
@@ -160,7 +160,7 @@ async fn pin_gate(State(app): State<App>, req: Request, next: Next) -> Response 
     let required = {
         let conn = app.db.lock().unwrap();
         // 读不出设置 ≠ 没设 PIN：把数据库故障折成空串，门会在最不该开的时候敞开
-        match db::get_setting_checked(&conn, "auth.pin") {
+        match db::get_setting(&conn, "auth.pin") {
             Ok(v) => v.unwrap_or_default(),
             Err(e) => {
                 tracing::error!("pin gate cannot read settings: {e}");

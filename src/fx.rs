@@ -59,10 +59,13 @@ fn baseline() -> BTreeMap<String, f64> {
 }
 
 /// 读设置里存着的实时汇率，叠加到内置表上。
-pub fn rates(conn: &Connection) -> Rates {
+///
+/// # Errors
+/// 设置读不出来是 `Err`；存着的值不是 JSON 对象才当"没有实时值"整份丢掉（内置表照常）。
+pub fn rates(conn: &Connection) -> rusqlite::Result<Rates> {
     let mut map = baseline();
     let mut live = Vec::new();
-    let stored = db::get_setting(conn, "fx.rates").unwrap_or_default();
+    let stored = db::get_setting(conn, "fx.rates")?.unwrap_or_default();
     if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(&stored) {
         for (k, v) in obj {
             if let Some(x) = v.as_f64().filter(|x| *x > 0.0) {
@@ -73,27 +76,33 @@ pub fn rates(conn: &Connection) -> Rates {
         }
     }
     live.sort();
-    Rates { map, live }
+    Ok(Rates { map, live })
 }
 
 /// 显示币种；空串＝不折算，各币种原样分开呈现。
-pub fn display_currency(conn: &Connection) -> String {
-    db::get_setting(conn, "fx.display")
+///
+/// # Errors
+/// 设置读不出来时返回 `Err`，不折成空串——那样会静默变成"不折算"。
+pub fn display_currency(conn: &Connection) -> rusqlite::Result<String> {
+    Ok(db::get_setting(conn, "fx.display")?
         .map(|s| s.trim().to_uppercase())
-        .unwrap_or_default()
+        .unwrap_or_default())
 }
 
 /// 给前端的一份完整状态：折算全在呈现层做，所以表和元信息都下发给它。
-pub fn state(conn: &Connection) -> Value {
-    let r = rates(conn);
-    json!({
-        "display": display_currency(conn),
+///
+/// # Errors
+/// 任一项设置读不出来即 `Err`（接口 500），不下发一份缺项的表。
+pub fn state(conn: &Connection) -> rusqlite::Result<Value> {
+    let r = rates(conn)?;
+    Ok(json!({
+        "display": display_currency(conn)?,
         "rates": r.map,
         "live": r.live,
-        "fetched_at": db::get_setting(conn, "fx.fetched_at").unwrap_or_default(),
+        "fetched_at": db::get_setting(conn, "fx.fetched_at")?.unwrap_or_default(),
         "baseline_period": BASELINE_PERIOD,
         "source": SOURCE_LABEL,
-    })
+    }))
 }
 
 pub const SOURCE_LABEL: &str = "欧洲央行参考汇率（Frankfurter）";
@@ -102,9 +111,10 @@ const SOURCE_URL: &str = "https://api.frankfurter.dev/v1/latest?base=USD";
 /// 手动拉一次实时汇率：默认关着的出网，用户在设置页点一下才发生、不后台轮询。
 /// 走 notify::http_client 带上超时与 meta.proxy。
 pub async fn refresh(conn: &crate::Db) -> Result<Value> {
+    // 代理设置读不出来就整个不出网：折成空串等于绕过用户配的代理直连，而直连成功时无人知晓
     let proxy = {
         let c = conn.lock().unwrap();
-        db::get_setting(&c, "meta.proxy").unwrap_or_default()
+        db::get_setting(&c, "meta.proxy")?.unwrap_or_default()
     };
     let client = crate::notify::http_client(&proxy)?;
     // 显式带 UA：被 UA 规则拦掉时表现是 403 而不是网络错误，不带名号看不出所以然
@@ -155,7 +165,7 @@ pub async fn refresh(conn: &crate::Db) -> Result<Value> {
         tx.commit()?;
     }
     let c = conn.lock().unwrap();
-    Ok(state(&c))
+    Ok(state(&c)?)
 }
 
 #[cfg(test)]
@@ -183,12 +193,12 @@ mod tests {
     fn live_rates_are_layered_over_the_builtin_table() {
         let c = conn();
         // 没拉过实时汇率时，生效的就是内置表，live 是空的
-        let r = rates(&c);
+        let r = rates(&c).unwrap();
         assert_eq!(r.live, Vec::<String>::new());
         assert_eq!(r.map.get("CNY"), baseline().get("CNY"));
 
         put(&c, "fx.rates", r#"{"cny": 7.5, "TWD": 31.2}"#);
-        let r = rates(&c);
+        let r = rates(&c).unwrap();
         assert_eq!(r.map.get("CNY"), Some(&7.5), "实时值要盖过内置值，且币种码大小写不敏感");
         assert_eq!(r.map.get("TWD"), Some(&31.2), "内置表没有的币种也要收下");
         assert_eq!(r.map.get("EUR"), baseline().get("EUR"), "没拉到的币种回落内置值");
@@ -200,7 +210,7 @@ mod tests {
         let c = conn();
         // 非正数与写不成样子的值一律忽略——0 会把折算除成 inf，负数会渲染出负金额
         put(&c, "fx.rates", r#"{"CNY": 0, "EUR": -1, "JPY": "很多", "HKD": 7.9}"#);
-        let r = rates(&c);
+        let r = rates(&c).unwrap();
         assert_eq!(r.map.get("CNY"), baseline().get("CNY"));
         assert_eq!(r.map.get("EUR"), baseline().get("EUR"));
         assert_eq!(r.map.get("JPY"), baseline().get("JPY"));
@@ -208,14 +218,14 @@ mod tests {
         assert_eq!(r.live, vec!["HKD".to_string()]);
 
         put(&c, "fx.rates", "这不是 JSON");
-        assert_eq!(rates(&c).map, baseline(), "整份存坏了就当没有，别把表清空");
+        assert_eq!(rates(&c).unwrap().map, baseline(), "整份存坏了就当没有，别把表清空");
     }
 
     #[test]
     fn display_currency_is_normalised_and_empty_means_no_conversion() {
         let c = conn();
-        assert_eq!(display_currency(&c), "");
+        assert_eq!(display_currency(&c).unwrap(), "");
         put(&c, "fx.display", " cny ");
-        assert_eq!(display_currency(&c), "CNY");
+        assert_eq!(display_currency(&c).unwrap(), "CNY");
     }
 }

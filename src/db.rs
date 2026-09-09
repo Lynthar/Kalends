@@ -72,14 +72,9 @@ fn pre_migration_snapshot(conn: &Connection, data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn get_setting(conn: &Connection, key: &str) -> Option<String> {
-    conn.query_row("SELECT value FROM settings WHERE key=?1", [key], |r| r.get(0))
-        .ok()
-}
-
-/// 与 `get_setting` 的区别是**区分「没这个键」与「读不出来」**。认证边界（PIN 门）必须用
-/// 它：把数据库故障当成"没设 PIN"，门就在最不该开的时候敞开了。
-pub fn get_setting_checked(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+/// 读一项设置。**`Err`（读不出来）与 `Ok(None)`（没这个键）不许折平**：把数据库故障
+/// 当成"没设"，PIN 门就在最不该开的时候敞开、提醒会静默停摆且日志零字。
+pub fn get_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
     use rusqlite::OptionalExtension;
     conn.query_row("SELECT value FROM settings WHERE key=?1", [key], |r| r.get(0))
         .optional()
@@ -369,24 +364,19 @@ mod tests {
         assert!(migrate(&conn).is_ok());
     }
 
-    /// 「没这个键」与「读不出来」必须分开：`get_setting` 把两者都折成 None，
-    /// PIN 门拿 None 当"没设 PIN"——settings 表一坏，门就开了。
+    /// 「没这个键」与「读不出来」必须分开：折成同一个 None，PIN 门就拿数据库故障当
+    /// "没设 PIN"——settings 表一坏，门就开了。
     #[test]
     fn a_broken_settings_table_reads_as_an_error_not_as_no_pin() {
         let conn = fresh_in_memory().unwrap();
-        assert_eq!(get_setting_checked(&conn, "auth.pin").unwrap(), None);
+        assert_eq!(get_setting(&conn, "auth.pin").unwrap(), None);
         conn.execute(
             "INSERT INTO settings(key,value) VALUES('auth.pin','1234')",
             [],
         )
         .unwrap();
-        assert_eq!(
-            get_setting_checked(&conn, "auth.pin").unwrap(),
-            Some("1234".into())
-        );
+        assert_eq!(get_setting(&conn, "auth.pin").unwrap(), Some("1234".into()));
         conn.execute_batch("DROP TABLE settings").unwrap();
-        assert!(get_setting_checked(&conn, "auth.pin").is_err());
-        // 旧函数在同一故障下给的是 None——这正是 fail-open 的样子，别再有人把门改回去
-        assert_eq!(get_setting(&conn, "auth.pin"), None);
+        assert!(get_setting(&conn, "auth.pin").is_err());
     }
 }

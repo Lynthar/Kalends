@@ -402,9 +402,9 @@ tr:hover .rgsel, .grid.selecting .rgsel, .rgsel:checked { opacity: 1; }
 tr.selrow td { background: var(--aqua-soft); }
 tr.selrow td.c0 { background: var(--aqua-soft); }
 /* 拖动中的落点提示：画在行的上/下缘 */
-tr.rdrag td { opacity: .45; }
-tr.drop-a td { box-shadow: inset 0 2px 0 var(--aqua); }
-tr.drop-b td { box-shadow: inset 0 -2px 0 var(--aqua); }
+tr.dragging td { opacity: .45; }
+tr.drop-before td { box-shadow: inset 0 2px 0 var(--aqua); }
+tr.drop-after td { box-shadow: inset 0 -2px 0 var(--aqua); }
 
 /* 批量操作条：勾选任意行后浮出 */
 #bulkbar {
@@ -419,8 +419,8 @@ tr.drop-b td { box-shadow: inset 0 -2px 0 var(--aqua); }
 .btn.danger { background: var(--coral-soft); color: var(--coral); border-color: transparent; }
 .btn.danger:hover { background: var(--coral); color: #fff; transform: translateY(-1px); }
 th.dragging { opacity: .45; }
-th.drop-l { box-shadow: inset 3px 0 0 var(--aqua); }
-th.drop-r { box-shadow: inset -3px 0 0 var(--aqua); }
+th.drop-before { box-shadow: inset 3px 0 0 var(--aqua); }
+th.drop-after { box-shadow: inset -3px 0 0 var(--aqua); }
 
 /* 值标签：同值同色（哈希定色）。造型按 Notion 实测：半透明色底、4px 圆角、20px 高 */
 .tag {
@@ -512,8 +512,8 @@ th.drop-r { box-shadow: inset -3px 0 0 var(--aqua); }
 .cp-field .fp-q { width: 100%; }
 .cp-foot { text-align: right; margin-top: .45rem; }
 .opt-row { display: flex; align-items: center; gap: .15rem; padding: .12rem 0; cursor: grab; }
-.opt-row.drop-t { box-shadow: 0 -2px 0 var(--aqua); }
-.opt-row.drop-b { box-shadow: 0 2px 0 var(--aqua); }
+.opt-row.drop-before { box-shadow: 0 -2px 0 var(--aqua); }
+.opt-row.drop-after { box-shadow: 0 2px 0 var(--aqua); }
 .opt-row .fp-v { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .opt-row .fp-q { width: 100%; }
 .opt-add { margin-top: .4rem; }
@@ -739,8 +739,8 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
 /* 新建库入口：与表标签同排，但读起来是动作不是某张表 */
 /* 库顺序：拖标签换位，落点标记与列序拖动同一套语言 */
 .tab.dragging { opacity: .45; }
-.tab.drop-l { box-shadow: inset 3px 0 0 var(--aqua); }
-.tab.drop-r { box-shadow: inset -3px 0 0 var(--aqua); }
+.tab.drop-before { box-shadow: inset 3px 0 0 var(--aqua); }
+.tab.drop-after { box-shadow: inset -3px 0 0 var(--aqua); }
 .tab.tab-add { color: var(--ink-2); opacity: .75; }
 .tab.tab-add:hover { color: var(--aqua-deep); opacity: 1; }
 .tab.tab-add::after { display: none; }

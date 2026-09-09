@@ -23,23 +23,38 @@ pub struct EmailCfg {
     pub to: String,
 }
 
-pub fn telegram_cfg(conn: &Connection) -> Option<TelegramCfg> {
-    let v: Value = serde_json::from_str(&db::get_setting(conn, "notify.telegram")?).ok()?;
+/// # Errors
+/// 设置读不出来是 `Err`，不折成「渠道没开」——那样提醒会静默停摆、日志零字。
+/// `Ok(None)` 只表示渠道关着、存着的值不是 JSON，或必填项没填全。
+pub fn telegram_cfg(conn: &Connection) -> Result<Option<TelegramCfg>> {
+    let Some(raw) = db::get_setting(conn, "notify.telegram")? else {
+        return Ok(None);
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&raw) else {
+        return Ok(None);
+    };
     if !v["enabled"].as_bool().unwrap_or(false) {
-        return None;
+        return Ok(None);
     }
     let cfg = TelegramCfg {
         bot_token: v["bot_token"].as_str().unwrap_or("").trim().to_string(),
         chat_id: v["chat_id"].as_str().unwrap_or("").trim().to_string(),
         proxy: v["proxy"].as_str().unwrap_or("").trim().to_string(),
     };
-    (!cfg.bot_token.is_empty() && !cfg.chat_id.is_empty()).then_some(cfg)
+    Ok((!cfg.bot_token.is_empty() && !cfg.chat_id.is_empty()).then_some(cfg))
 }
 
-pub fn email_cfg(conn: &Connection) -> Option<EmailCfg> {
-    let v: Value = serde_json::from_str(&db::get_setting(conn, "notify.email")?).ok()?;
+/// # Errors
+/// 同 `telegram_cfg`：读不出设置是 `Err`，不是「渠道没开」。
+pub fn email_cfg(conn: &Connection) -> Result<Option<EmailCfg>> {
+    let Some(raw) = db::get_setting(conn, "notify.email")? else {
+        return Ok(None);
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&raw) else {
+        return Ok(None);
+    };
     if !v["enabled"].as_bool().unwrap_or(false) {
-        return None;
+        return Ok(None);
     }
     let cfg = EmailCfg {
         host: v["host"].as_str().unwrap_or("").trim().to_string(),
@@ -51,7 +66,7 @@ pub fn email_cfg(conn: &Connection) -> Option<EmailCfg> {
         from: v["from"].as_str().unwrap_or("").trim().to_string(),
         to: v["to"].as_str().unwrap_or("").trim().to_string(),
     };
-    (!cfg.host.is_empty() && !cfg.from.is_empty() && !cfg.to.is_empty()).then_some(cfg)
+    Ok((!cfg.host.is_empty() && !cfg.from.is_empty() && !cfg.to.is_empty()).then_some(cfg))
 }
 
 /// 出网请求（Telegram / 汇率 / 取图标共用）。**必须带超时**：reqwest 默认既没有连接超时
@@ -322,8 +337,10 @@ impl SentLog {
 /// 摘要时刻，恒为零填充的 `HH:MM`。到点判定是**字符串**比较，没零填充的 `"9:00"`
 /// 会让 `"23:59" >= "9:00"` 为假、摘要永不触发且看不出异常；界面的 `<input type=time>`
 /// 写不出这种值，但设置接口收任意字符串，所以在读出口补齐。
-fn digest_at(conn: &Connection) -> String {
-    normalize_hhmm(&db::get_setting(conn, "notify.digest_time").unwrap_or_default())
+fn digest_at(conn: &Connection) -> rusqlite::Result<String> {
+    Ok(normalize_hhmm(
+        &db::get_setting(conn, "notify.digest_time")?.unwrap_or_default(),
+    ))
 }
 
 fn normalize_hhmm(raw: &str) -> String {
@@ -438,8 +455,8 @@ pub async fn tick(db: &Db) -> Result<()> {
         let conn = db.lock().unwrap();
         // 渠道关着也要清：留下的失败行正是渠道坏掉那段时间攒的
         prune_failed(&conn)?;
-        let tg = telegram_cfg(&conn);
-        let mail = email_cfg(&conn);
+        let tg = telegram_cfg(&conn)?;
+        let mail = email_cfg(&conn)?;
         let mut channels: Vec<Channel> = Vec::new();
         if tg.is_some() {
             channels.push(Channel::Telegram);
@@ -450,13 +467,13 @@ pub async fn tick(db: &Db) -> Result<()> {
         if channels.is_empty() {
             return Ok(());
         }
-        let thresholds: Vec<i64> = db::get_setting(&conn, "notify.thresholds")
+        let thresholds: Vec<i64> = db::get_setting(&conn, "notify.thresholds")?
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_else(|| vec![14, 7, 3, 1, 0]);
-        let window: i64 = db::get_setting(&conn, "notify.window_days")
+        let window: i64 = db::get_setting(&conn, "notify.window_days")?
             .and_then(|s| s.parse().ok())
             .unwrap_or(14);
-        let digest_time = digest_at(&conn);
+        let digest_time = digest_at(&conn)?;
         let now_hhmm = chrono::Local::now().format("%H:%M").to_string();
         let today = engine::today().to_string();
         let ups = engine::upcoming(&conn)?;

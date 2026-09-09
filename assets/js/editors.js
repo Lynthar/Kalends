@@ -11,9 +11,6 @@ async function patchRow(tab, it, patch) {
   } catch (err) { toast(err.message, true); }
 }
 
-// 复合格与字段名映射；没列出的格按列的有效类型走通用编辑器（字段名=列键）
-const CELL_SPEC = {};
-
 // 自定义列的值写进 extra；空值直接摘掉键
 function extraPatch(it, k, v) {
   const ex = { ...(it.extra || {}) };
@@ -32,8 +29,7 @@ function cellPopShell(td, title) {
 // 多输入迷你表单（复合格与通用 text/num/date 共用）
 function inputsEditor(tab, it, td, fieldsDef, save) {
   const box = cellPopShell(td, colLabel(tab, td.dataset.k));
-  // 单输入时浮层标题已经是列名了，格内再标一次就是「价格」上下各一遍；
-  // 复合格（媒体的标题 / 又名）两个输入名字不同，那才需要各自的标签
+  // 单输入时浮层标题已经是列名了，格内再标一次就是「价格」上下各一遍
   const labelled = fieldsDef.length > 1;
   for (const [f, label, type] of fieldsDef) {
     const wrap = document.createElement('label');
@@ -161,8 +157,6 @@ function cycleEditor(tab, it, td) {
   sel.addEventListener('change', syncDays);
   syncDays();
   box.querySelector('.cp-foot button').onclick = () => {
-    // 选了自定义天数却不填数：既算不出到期日，周期还会显示成 "Every 0 days"
-    if (sel.value === 'days' && !(+days.value > 0)) { toast('自定义周期要填天数', true); return; }
     // 天数清空写 null（键缺席＝保持原值，见 patchRow）
     const patch = { cycle: sel.value, cycle_days: days.value === '' ? null : +days.value };
     closePop();
@@ -281,7 +275,6 @@ function openCellPop(tab, it, k, td) {
   popKey = id;
   const col = COLS[tab][k];
   if (!col) return;
-  const spec = CELL_SPEC[tab]?.[k] || {};
   const t = colType(tab, k);
   const toExtra = inExtra(col);
   // 模板列（VPS 规格）虽然是算出来的，但它的每一部分都是可写的真字段——
@@ -294,15 +287,13 @@ function openCellPop(tab, it, k, td) {
   if (k === 'cycle') return cycleEditor(tab, it, td);
   // 费用也是：金额 + 币种（币种并进了这一格，不再单独占一列）
   if (k === 'price' && col.src === 'col') return priceEditor(tab, it, td);
-  const save = v => patchRow(tab, it, toExtra ? extraPatch(it, k, v) : { [spec.f || k]: v });
-  if (spec.inputs) return inputsEditor(tab, it, td, spec.inputs, patch => patchRow(tab, it, patch));
+  const save = v => patchRow(tab, it, toExtra ? extraPatch(it, k, v) : { [k]: v });
   // 这一类型专属的编辑器（单选/状态点值即存、多选勾选即存）由类型表给；没有就落到下面的通用框
   const own = TYPES[t]?.editor;
   if (own) return own({ tab, it, td, k, col, toExtra, save });
-  const f = spec.f || k;
   const type = TYPES[t]?.input || 'text';
-  return inputsEditor(tab, it, td, [[f, colLabel(tab, k), type]], patch => {
-    if (toExtra) return patchRow(tab, it, extraPatch(it, k, patch[f] ?? ''));
+  return inputsEditor(tab, it, td, [[k, colLabel(tab, k), type]], patch => {
+    if (toExtra) return patchRow(tab, it, extraPatch(it, k, patch[k] ?? ''));
     return patchRow(tab, it, patch);
   });
 }

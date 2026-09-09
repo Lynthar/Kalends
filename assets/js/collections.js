@@ -86,44 +86,28 @@ function colFromField(key, f) {
 }
 
 /* ── 库顺序：拖标签换位，落到 collections.pos（跨设备），与本机列序不是一回事 ── */
-let dragColl = null;
-const clearTabMarks = () =>
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('drop-l', 'drop-r', 'dragging'));
+// 库序落库只此一条：拖标签与库设置里的「前移 / 后移」写同一个端点，别再各写一份
+async function putCollOrder(keys) {
+  try {
+    await api('/api/collections/order', {
+      method: 'PUT', body: JSON.stringify({ ids: keys.map(k => collOf(k).id) }),
+    });
+    await loadAll();
+  } catch (err) { toast(err.message, true); }
+}
 
 function initTabDrag(btn, key) {
   btn.draggable = true;
-  btn.addEventListener('dragstart', e => {
-    dragColl = key;
-    e.dataTransfer.effectAllowed = 'move';
-    btn.classList.add('dragging');
+  reorderDnD(btn, {
+    group: 'coll-tab',
+    axis: 'x',
+    key,
+    onDrop: (from, after) => {
+      const order = colls().map(c => c.key).filter(k => k !== from);
+      order.splice(order.indexOf(key) + (after ? 1 : 0), 0, from);
+      putCollOrder(order);
+    },
   });
-  btn.addEventListener('dragover', e => {
-    if (!dragColl || dragColl === key) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    const r = btn.getBoundingClientRect();
-    const after = e.clientX > r.left + r.width / 2;
-    btn.classList.toggle('drop-r', after);
-    btn.classList.toggle('drop-l', !after);
-  });
-  btn.addEventListener('dragleave', () => btn.classList.remove('drop-l', 'drop-r'));
-  btn.addEventListener('drop', async e => {
-    e.preventDefault();
-    const after = btn.classList.contains('drop-r');
-    const moved = dragColl;
-    dragColl = null;
-    clearTabMarks();
-    if (!moved || moved === key) return;
-    const order = colls().map(c => c.key).filter(k => k !== moved);
-    order.splice(order.indexOf(key) + (after ? 1 : 0), 0, moved);
-    try {
-      await api('/api/collections/order', {
-        method: 'PUT', body: JSON.stringify({ ids: order.map(k => collOf(k).id) }),
-      });
-      await loadAll();
-    } catch (err) { toast(err.message, true); }
-  });
-  btn.addEventListener('dragend', () => { dragColl = null; clearTabMarks(); });
 }
 
 /* ── 库的 DOM：标签按钮 + 表格容器 + 由字段生成的表头 ── */
@@ -278,7 +262,7 @@ function renderColl(key) {
         const note = [sub, cyc].filter(Boolean).join(' · ');
         return `<td class="amt">${esc(main)}${note ? `<div class="muted" style="font-size:.72rem">${esc(note)}</div>` : ''}</td>`;
       }
-      // 有形状的三类的渲染在 cellVal 里（媒体的自定义列共用同一份，别在这儿另写一遍）
+      // 有形状的三类的渲染在 cellVal 里（所有库共用同一份，别在这儿另写一遍）
       // 模板列单列一支：它在 COLS 里被映射成 text，走 cellVal 会连带吃到"文本列可切换呈现"
       if (f.ftype === 'tpl') return `<td class="cdate">${esc(v || '')}</td>`;
       // 其余一律：class 与要不要 title 由类型表说了算，内容一律交给 cellVal
@@ -415,7 +399,7 @@ function openItemDialog(key, it) {
   d.showModal();
 }
 
-/* 一个字段 → 一枚表单控件（库表单与媒体自定义列共用）。**一个 label 只配一枚控件**：
+/* 一个字段 → 一枚表单控件（所有库的表单与自定义列共用）。**一个 label 只配一枚控件**：
    多选那种一串控件用 div[role=group]+aria-labelledby（嵌套 label 规范不允许、读屏
    关联也错）；栅格样式因此要认 .field（.fgrid label, .fgrid .field）。 */
 let grpSeq = 0;
@@ -620,8 +604,6 @@ document.addEventListener('submit', async e => {
   if (!key) return;
   const body = itemBody(key, row || {});
   if (!body.name) { toast('名称不能为空', true); return; }
-  // 与就地编辑器同一条规矩：选了自定义天数却不填数，既算不出到期日，周期还显示成 "Every 0 days"
-  if (body.cycle === 'days' && !(+body.cycle_days > 0)) { toast('自定义周期要填天数', true); return; }
   try {
     if (id) await api(`/api/items/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
     else await api(`/api/collections/${encodeURIComponent(key)}/items`, { method: 'POST', body: JSON.stringify(body) });
@@ -729,7 +711,6 @@ function fillCollFields(c) {
       fillCollFields(c);
     } catch (err) { toast(err.message, true); }
   };
-  let from = null;
   fs.forEach((f, idx) => {
     const row = document.createElement('div');
     row.className = 'opt-row';
@@ -771,30 +752,19 @@ function fillCollFields(c) {
         fillCollFields(c);
       } catch (err) { toast(err.message, true); e.target.checked = !on; }
     };
-    row.addEventListener('dragstart', e => { from = idx; e.dataTransfer.effectAllowed = 'move'; });
-    row.addEventListener('dragover', e => {
-      if (from == null || from === idx) return;
-      e.preventDefault();
-      const r = row.getBoundingClientRect();
-      const after = e.clientY > r.top + r.height / 2;
-      row.classList.toggle('drop-b', after);
-      row.classList.toggle('drop-t', !after);
+    reorderDnD(row, {
+      group: 'coll-field',
+      axis: 'y',
+      key: idx,
+      onDrop: (from, after) => {
+        const keys = fs.map(x => x.key);
+        const [moved] = keys.splice(from, 1);
+        let at = idx + (after ? 1 : 0);
+        if (from < at) at--;
+        keys.splice(at, 0, moved);
+        apply({ tbl: c.key, keys });
+      },
     });
-    row.addEventListener('dragleave', () => row.classList.remove('drop-t', 'drop-b'));
-    row.addEventListener('drop', e => {
-      e.preventDefault();
-      const after = row.classList.contains('drop-b');
-      row.classList.remove('drop-t', 'drop-b');
-      if (from == null || from === idx) return;
-      const keys = fs.map(x => x.key);
-      const [moved] = keys.splice(from, 1);
-      let at = idx + (after ? 1 : 0);
-      if (from < at) at--;
-      keys.splice(at, 0, moved);
-      from = null;
-      apply({ tbl: c.key, keys });
-    });
-    row.addEventListener('dragend', () => { from = null; });
     list.appendChild(row);
   });
 }
@@ -816,17 +786,12 @@ async function openCollDialog(c) {
   const orderRow = $('#coll-order-row');
   orderRow.hidden = !c;
   if (c) {
-    const shift = async dir => {
+    const shift = dir => {
       const order = colls().map(x => x.key);
       const i = order.indexOf(c.key), j = i + dir;
       if (i < 0 || j < 0 || j >= order.length) return;
       [order[i], order[j]] = [order[j], order[i]];
-      try {
-        await api('/api/collections/order', {
-          method: 'PUT', body: JSON.stringify({ ids: order.map(k => collOf(k).id) }),
-        });
-        await loadAll();
-      } catch (err) { toast(err.message, true); }
+      putCollOrder(order);
     };
     $('#coll-mv-l').onclick = () => shift(-1);
     $('#coll-mv-r').onclick = () => shift(1);

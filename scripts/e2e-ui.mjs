@@ -113,6 +113,9 @@ const check = (label, cond, extra = '') => {
   console.log((cond ? 'PASS ' : 'FAIL ') + label + (cond ? '' : '  ' + extra));
   if (!cond) failures++;
 };
+// 前提不成立时的唯一出路：跳过并说明原因，不计入失败数。恒红的断言会把 ALL PASS
+// 从二值信号变成"要人工判读"，久了就养成无视红字的习惯
+const skip = (label, why) => console.log(`SKIP ${label}  ——  ${why}`);
 // 点表头 → 菜单 → 点条目
 const menuClick = async (thSel, itemText) => {
   await evl(`document.querySelector('${thSel}').click()`);
@@ -394,7 +397,27 @@ check('拖后 fixed 布局', await evl(`document.querySelector('#view-subs table
 const wAfter = await evl(`Math.round(document.querySelector('#view-subs th[data-k="name"]').getBoundingClientRect().width)`);
 check('列宽 +60px', Math.abs(wAfter - wBefore - 60) <= 3, `before=${wBefore} after=${wAfter}`);
 check('表宽=列宽和', Math.abs(await tableW() - await thWidthSum()) <= 2, `table=${await tableW()} sum=${await thWidthSum()}`);
-check('操作列按钮未截断', await evl(`(() => { const td = document.querySelector('#subs-body tr td:last-child'); return td.scrollWidth <= td.clientWidth + 2; })()`) === true);
+// 这条量的是文字度量，前提是 --sans 栈点名的字体至少有一个装着；一个都没有的机器上
+// 它恒红且与改动无关。探针：同一串字用「候选字体, monospace」与纯 monospace 各量一次宽度
+const NAMED_SANS = ['Avenir Next', 'Segoe UI Variable Text', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei'];
+const sansInstalled = await evl(`(() => {
+  const probe = family => {
+    const s = document.createElement('span');
+    s.textContent = '编辑续费删除MMMWWWiiil';
+    s.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;font-size:72px;font-family:' + family;
+    document.body.appendChild(s);
+    const w = s.getBoundingClientRect().width;
+    s.remove();
+    return w;
+  };
+  const base = probe('monospace');
+  return ${JSON.stringify(NAMED_SANS)}.some(f => probe('"' + f + '", monospace') !== base);
+})()`);
+if (sansInstalled) {
+  check('操作列按钮未截断', await evl(`(() => { const td = document.querySelector('#subs-body tr td:last-child'); return td.scrollWidth <= td.clientWidth + 2; })()`) === true);
+} else {
+  skip('操作列按钮未截断', `--sans 栈点名的字体本机一个都没有（${NAMED_SANS.join(' / ')}），量出来的宽度不作数`);
+}
 // 窄拖到底：被拖列钳在 52px，邻列宽不被摊改，整表收窄且不左溢
 const statusWBefore = await evl(`Math.round(document.querySelector('#view-subs th[data-k="status"]').getBoundingClientRect().width)`);
 await dragW(-5000);
@@ -1515,6 +1538,22 @@ await shot('12-ledger');
 await evl(`document.querySelector('#dlg-settings').close()`);
 await sleep(250);
 
+/* 17.6b. 存着的渠道配置解析不出来时，表单会渲染成「渠道关着、字段全空」——用户一保存，
+   settingsBody() 就用这些空值把凭据覆盖掉。停掉保存、停掉那一栏、说出原因。 */
+await evl(`(() => { window._tgStash = state.settings['notify.telegram']; state.settings['notify.telegram'] = '不是 JSON'; openSettings(); })()`);
+await sleep(500);
+check('坏配置时保存键停用', await evl(`document.querySelector('#form-settings button[type=submit]').disabled`) === true);
+check('坏配置时那一栏也停用', await evl(`document.querySelector('#form-settings [name=tg_enabled]').closest('fieldset').disabled`) === true);
+check('坏配置时说出了原因', await evl(`document.querySelector('#toast').textContent.includes('读不出来')`) === true);
+await evl(`document.querySelector('#dlg-settings').close()`);
+await evl(`(() => { state.settings['notify.telegram'] = window._tgStash; openSettings(); })()`);
+await sleep(500);
+check('配置读得回来时保存键恢复', await evl(`document.querySelector('#form-settings button[type=submit]').disabled`) === false);
+await evl(`document.querySelector('#dlg-settings').close()`);
+// 上面那条错误提示是本段期望的产物（err 态挂 4.2 秒），收掉它别飘进后面的断言
+await evl(`(() => { const t = document.querySelector('#toast'); clearTimeout(t._h); t.hidden = true; t.classList.remove('err'); })()`);
+await sleep(250);
+
 /* 17.7. 子行归属此前只能靠接口改：详情表单里根本没有「父条目」这一项，
    界面上既建不出「服务 → 套餐档位」的比价结构，也解不开已有的。 */
 const parentRows = await (await fetch(APP + 'api/collections/subs/items')).json();
@@ -1869,6 +1908,31 @@ check('停用的手柄给出了原因',
 await evl(`setSort('subs', 'price', null)`);
 await sleep(300);
 check('清掉排序后手柄又能拖', await evl(`!!document.querySelector('#subs-body .rgrip.off')`) === false);
+
+/* 17.17b. 真走一遍拖放事件：上面几条都是直接调 moveRow/applyRowOrder，绕开了 dragstart→
+   dragover→drop 这一段。行拖动要先按住手柄才开得动，所以第一步是 mousedown。 */
+const rowDragIds = await evl(`[...document.querySelectorAll('#subs-body tr:not(.subrow)')].map(t => +t.dataset.id)`);
+const rowDrag2 = async (srcId, dstId, toBottom) => evl(`(() => {
+  const src = document.querySelector('#subs-body tr[data-id="${srcId}"]');
+  const dst = document.querySelector('#subs-body tr[data-id="${dstId}"]');
+  src.querySelector('[data-grip]').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+  const dt = new DataTransfer();
+  src.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+  const r = dst.getBoundingClientRect();
+  const y = ${toBottom} ? r.bottom - 2 : r.top + 2;
+  dst.dispatchEvent(new DragEvent('dragover', { bubbles: true, dataTransfer: dt, clientY: y }));
+  dst.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: dt, clientY: y }));
+  src.dispatchEvent(new DragEvent('dragend', { bubbles: true }));
+})()`);
+await rowDrag2(rowDragIds[0], rowDragIds[1], true);
+await sleep(800);
+check('拖放事件真能换行序', (await evl(`[...document.querySelectorAll('#subs-body tr:not(.subrow)')].map(t => +t.dataset.id)`))[1] === rowDragIds[0],
+  JSON.stringify(await evl(`[...document.querySelectorAll('#subs-body tr:not(.subrow)')].map(t => +t.dataset.id)`)));
+check('拖完不留标记', await evl(`!document.querySelector('.dragging, .drop-before, .drop-after')`) === true);
+await rowDrag2(rowDragIds[0], rowDragIds[1], false);
+await sleep(800);
+check('反向拖回原位', JSON.stringify(await evl(`[...document.querySelectorAll('#subs-body tr:not(.subrow)')].map(t => +t.dataset.id)`))
+  === JSON.stringify(rowDragIds));
 
 /* 17.18. 键盘挪行：手柄不进 Tab 序（一行一个停靠点已经够多），改用复选框上的 Alt+↑/↓。 */
 const kbBefore = await evl(`[...document.querySelectorAll('#subs-body tr:not(.subrow)')].map(t => +t.dataset.id)`);

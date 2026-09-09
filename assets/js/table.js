@@ -9,10 +9,6 @@ const CYCLE_RANK = { weekly: 7, monthly: 30, quarterly: 91, semiannual: 182, ann
 // 周期列按周期长短排序：文案的字母序（Annual < Custom < Monthly）对读者没有意义
 const cycleRank = it => it.cycle === 'days' ? (it.cycle_days ?? null) : (CYCLE_RANK[it.cycle] ?? null);
 const dayDiff = (a, b) => Math.round((a - b) / 864e5);
-const todayDate = () => new Date((state.overview?.today || '1970-01-01') + 'T00:00:00');
-
-
-
 const cycleText = it => it.cycle === 'days' ? `Every ${it.cycle_days ?? '?'} days` : (CYCLE_LABEL[it.cycle] || '');
 
 // Notion 式彩色标签：值哈希定色，同值全站同色
@@ -21,8 +17,6 @@ function tagHash(s) {
   for (const c of String(s)) h = (h * 31 + c.codePointAt(0)) >>> 0;
   return h % 10;
 }
-const tag = v => v ? `<span class="tag t${tagHash(v)}">${esc(v)}</span>` : '';
-const tags = arr => (arr || []).map(tag).join('');
 const splitVals = s => String(s).split(/[,，、/]+/).map(x => x.trim()).filter(Boolean);
 
 // 状态词的语义定色（Notion status 式），未列出的词走默认灰底
@@ -74,8 +68,8 @@ function sanitizeFilters(tab) {
   }
 }
 
-/* 单元格渲染**只此一处**（库的列与媒体的自定义列共用）：写成两份的下场是同名同类型
-   的列在两张表里长得不一样。怎么渲染由类型表的 cell 说了算，没写就是转义纯文本。 */
+/* 单元格渲染**只此一处**，所有库共用：写成两份的下场是同名同类型的列在两张表里长得
+   不一样。怎么渲染由类型表的 cell 说了算，没写就是转义纯文本。 */
 function cellVal(tab, k, v) {
   if (v == null || v === '') return '';
   const cell = TYPES[colType(tab, k)]?.cell;
@@ -480,45 +474,23 @@ function initColResize(tab, th) {
 }
 
 /* 列序拖动（Notion 式）：拖表头换位，操作列固定在最后 */
-let dragTab = null, dragK = null;
-
-function clearDropMarks(tab) {
-  $(HEAD_SEL[tab]).querySelectorAll('th').forEach(t => t.classList.remove('drop-l', 'drop-r', 'dragging'));
-}
-
 function initColDrag(tab, th) {
   th.draggable = true;
-  th.addEventListener('dragstart', e => {
-    if (e.target.closest?.('.rhandle')) { e.preventDefault(); return; }
-    dragTab = tab;
-    dragK = th.dataset.k;
-    e.dataTransfer.effectAllowed = 'move';
-    closePop();
-    th.classList.add('dragging');
+  reorderDnD(th, {
+    group: 'col:' + tab,
+    axis: 'x',
+    key: th.dataset.k,
+    // 列宽手柄长在 th 里，从它起手是调宽不是换位
+    onStart: e => { if (e.target.closest?.('.rhandle')) return false; closePop(); },
+    onDrop: (from, after) => {
+      const cur = validOrder(tab) || colKeys(tab);
+      const o = cur.filter(x => x !== from);
+      o.splice(o.indexOf(th.dataset.k) + (after ? 1 : 0), 0, from);
+      views[tab].order = o;
+      saveViews();
+      RENDER[tab]();
+    },
   });
-  th.addEventListener('dragover', e => {
-    if (dragTab !== tab || dragK === th.dataset.k) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    const r = th.getBoundingClientRect();
-    const after = e.clientX > r.left + r.width / 2;
-    th.classList.toggle('drop-r', after);
-    th.classList.toggle('drop-l', !after);
-  });
-  th.addEventListener('dragleave', () => th.classList.remove('drop-l', 'drop-r'));
-  th.addEventListener('drop', e => {
-    e.preventDefault();
-    if (dragTab !== tab) return;
-    const after = th.classList.contains('drop-r');
-    const cur = validOrder(tab) || colKeys(tab);
-    const o = cur.filter(x => x !== dragK);
-    o.splice(o.indexOf(th.dataset.k) + (after ? 1 : 0), 0, dragK);
-    views[tab].order = o;
-    saveViews();
-    clearDropMarks(tab);
-    RENDER[tab]();
-  });
-  th.addEventListener('dragend', () => clearDropMarks(tab));
 }
 
 function validOrder(tab) {
@@ -610,8 +582,6 @@ function bindSelectAll(tab, g) {
   };
 }
 
-let rowDrag = null;   // {tab, id}
-
 // 拖手的点击菜单：菜单保持打开可连点；行重绘后按 id 继续生效，不吃 DOM 的巧
 function openRowMenu(tab, id, anchor) {
   const key = `rowmove:${tab}:${id}`;
@@ -656,35 +626,16 @@ function bindRowGutter(tab, tr, g) {
     e.stopPropagation();
     openRowMenu(tab, id, grip);
   };
+  // 行默认拖不动：整行可拖会把「选中一段文字」变成拖行，按住手柄才开
   grip.onmousedown = () => { tr.draggable = true; };
-  tr.ondragstart = e => {
-    if (!tr.draggable) return;
-    rowDrag = { tab, id };
-    e.dataTransfer.effectAllowed = 'move';
-    closePop();
-    tr.classList.add('rdrag');
-  };
-  tr.ondragover = e => {
-    if (!rowDrag || rowDrag.tab !== tab || rowDrag.id === id) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    const r = tr.getBoundingClientRect();
-    const after = e.clientY > r.top + r.height / 2;
-    tr.classList.toggle('drop-b', after);
-    tr.classList.toggle('drop-a', !after);
-  };
-  tr.ondragleave = () => tr.classList.remove('drop-a', 'drop-b');
-  tr.ondrop = e => {
-    e.preventDefault();
-    const after = tr.classList.contains('drop-b');
-    tr.classList.remove('drop-a', 'drop-b');
-    if (rowDrag?.tab === tab) applyRowOrder(tab, moveRow(tab, rowDrag.id, id, after));
-  };
-  tr.ondragend = () => {
-    tr.draggable = false;
-    for (const x of tbodyOf(tab)?.rows || []) x.classList.remove('rdrag', 'drop-a', 'drop-b');
-    rowDrag = null;
-  };
+  reorderDnD(tr, {
+    group: 'row:' + tab,
+    axis: 'y',
+    key: id,
+    onStart: () => { if (!tr.draggable) return false; closePop(); },
+    onDrop: (from, after) => applyRowOrder(tab, moveRow(tab, from, id, after)),
+  });
+  tr.addEventListener('dragend', () => { tr.draggable = false; });
 }
 
 /* 全表（不经筛选）的手动序：顶层按 pos，子行紧跟各自的父行。

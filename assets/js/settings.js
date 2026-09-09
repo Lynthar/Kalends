@@ -44,8 +44,9 @@ function openSettings() {
   f.window_days.value = st['notify.window_days'] || '14';
   syncFxPanel();
   let tg = {}, em = {};
-  try { tg = JSON.parse(st['notify.telegram'] || '{}'); } catch {}
-  try { em = JSON.parse(st['notify.email'] || '{}'); } catch {}
+  const broken = [];
+  try { tg = JSON.parse(st['notify.telegram'] || '{}'); } catch { broken.push('Telegram'); }
+  try { em = JSON.parse(st['notify.email'] || '{}'); } catch { broken.push('邮件'); }
   f.tg_enabled.checked = !!tg.enabled;
   f.tg_token.value = tg.bot_token || '';
   f.tg_chat.value = tg.chat_id || '';
@@ -59,6 +60,12 @@ function openSettings() {
   f.em_from.value = em.from || '';
   f.em_to.value = em.to || '';
   $('#ics-url').value = `${location.origin}/calendar.ics?token=${st['ics.token'] || ''}`;
+  // 存着的渠道配置解析不出来时，上面那圈会把它渲染成「渠道关着、字段全空」——用户一保存，
+  // settingsBody() 就用这些空值把凭据覆盖掉。停掉保存并说出来，别让它悄悄发生
+  f.tg_enabled.closest('fieldset').disabled = broken.includes('Telegram');
+  f.em_enabled.closest('fieldset').disabled = broken.includes('邮件');
+  $('#form-settings').querySelector('button[type=submit]').disabled = broken.length > 0;
+  if (broken.length) toast(`存着的${broken.join(' 与 ')}配置读不出来，先别保存：保存会用空值盖掉凭据`, true);
   $('#dlg-settings').showModal();
   loadLedger();
   loadNotifyLog(); // 不挡对话框，读回来再填

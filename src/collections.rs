@@ -11,7 +11,7 @@ use axum::{
     Json, Router,
 };
 use chrono::NaiveDate;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 use crate::api::{bad, extra_json, extra_str, f, i, missing, s, safe_name, ApiError, R};
@@ -999,7 +999,8 @@ const WRITE_COLS: &str = "name,parent_id,status,price,currency,cycle,cycle_days,
 
 /// 条目写入口的校验：出现的键必须是它该有的类型（`api::check_shape`），logo 带非空值
 /// 直接拒——`null`/`""` 按「不在可写集」忽略，整行回读再 PATCH 回来的用法才过得去。
-fn check_item_shape(b: &Value) -> anyhow::Result<()> {
+/// `cur` 是这一行的现值（新建时 `None`），只给跨字段规则用；类型校验仍只看 `b`。
+fn check_item_shape(b: &Value, cur: Option<&Value>) -> anyhow::Result<()> {
     if b.get("logo").is_some_and(|v| !(v.is_null() || v.as_str() == Some(""))) {
         return Err(bad("图标不走这里：上传/抓取/清除各有专用端点"));
     }
@@ -1008,7 +1009,18 @@ fn check_item_shape(b: &Value) -> anyhow::Result<()> {
         &["name", "status", "currency", "cycle", "next_renewal", "last_renewed", "url", "notes"],
         &["parent_id", "cycle_days"],
         &["price"],
-    )
+    )?;
+    // cycle='days' 缺天数就算不出到期日，周期还显示成 "Every 0 days"。只在请求碰了这两个
+    // 键之一时判：拿整行去判，库里一个陈年坏值就能把这行锁死，改别的字段都会被 400
+    if b.get("cycle").is_some() || b.get("cycle_days").is_some() {
+        let pick = |k: &str| b.get(k).or_else(|| cur.and_then(|c| c.get(k)));
+        if pick("cycle").and_then(Value::as_str) == Some("days")
+            && !pick("cycle_days").and_then(Value::as_i64).is_some_and(|d| d >= 1)
+        {
+            return Err(bad("自定义周期要填天数"));
+        }
+    }
+    Ok(())
 }
 
 /// 子行只有两层（服务 → 档位）：父行自己不能再有父行，本条目已有子行时也不能再挂到别人下面。
@@ -1042,7 +1054,7 @@ fn check_parent(conn: &Connection, coll: i64, id: Option<i64>, parent: Option<i6
 }
 
 pub fn insert_item(conn: &Connection, coll: i64, b: &Value) -> anyhow::Result<i64> {
-    check_item_shape(b)?;
+    check_item_shape(b, None)?;
     check_parent(conn, coll, None, i(b, "parent_id"))?;
     let mut b = b.clone();
     normalize_shaped_fields(conn, coll, &mut b)?;
@@ -1090,10 +1102,10 @@ pub fn merge_over(cur: &Value, b: &Value, cols: impl Iterator<Item = &'static st
 }
 
 pub fn update_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<()> {
-    check_item_shape(b)?;
     let cur = conn
         .query_row(&format!("SELECT {ITEM_COLS} FROM items WHERE id=?1"), [id], item_row)
         .map_err(|_| missing("条目不存在"))?;
+    check_item_shape(b, Some(&cur))?;
     let coll = cur["collection_id"].as_i64().unwrap_or_default();
     // 规范化**只作用在这次请求带来的键上**，所以要赶在合并之前：拿合并后的整行去过校验，
     // 等于让库里一个陈年坏值（接口或导入脚本造得出来）把这一行永久锁死——
@@ -1134,9 +1146,11 @@ async fn items_update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json
 }
 
 pub fn delete_item(app: &App, conn: &Connection, id: i64) -> anyhow::Result<()> {
+    // 读不出图标名就整条别删：当成"没图标"删掉行，文件成孤儿且无人知晓。行不存在仍是幂等成功
     let logo: Option<String> = conn
         .query_row("SELECT logo FROM items WHERE id=?1", [id], |r| r.get(0))
-        .unwrap_or(None);
+        .optional()?
+        .flatten();
     conn.execute("DELETE FROM items WHERE id=?1", [id])?;
     remove_logo_file(app, logo);
     Ok(())
@@ -1190,9 +1204,11 @@ async fn items_bulk_delete(State(app): State<App>, Json(b): Json<Value>) -> R {
     // 报真正删掉的条数，不是请求里的 id 个数——不存在的 id 也算进去的话，这个数字就是编的
     let mut deleted = 0usize;
     for id in &ids {
+        // 读不出图标名就整批回滚，别把它当成"没图标"——那样文件成孤儿且无人知晓
         let logo: Option<String> = tx
             .query_row("SELECT logo FROM items WHERE id=?1", [id], |r| r.get(0))
-            .unwrap_or(None);
+            .optional()?
+            .flatten();
         logos.push(logo);
         deleted += tx.execute("DELETE FROM items WHERE id=?1", [id])?;
     }
@@ -1648,7 +1664,8 @@ async fn logo_fetch(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<V
             return Err(missing("条目不存在").into());
         };
         let raw = s(&b, "url").or(stored).unwrap_or_default();
-        (raw, crate::db::get_setting(&conn, "meta.proxy").unwrap_or_default())
+        // 代理读不出来就整个不出网：折成空串等于绕过用户配的代理直连，而直连成功时无人知晓
+        (raw, crate::db::get_setting(&conn, "meta.proxy")?.unwrap_or_default())
     };
     if raw.trim().is_empty() {
         return Err(bad("这个条目还没有网址").into());
@@ -1741,7 +1758,7 @@ async fn logo_clear(State(app): State<App>, Path(id): Path<i64>) -> R {
     Ok(Json(json!({ "ok": true })))
 }
 
-// 与媒体封面同款：文件名白名单 + 静态读 + 长缓存
+// 文件名先过 safe_name 再拼路径：放行分隔符或 `..` 就是一次任意文件读
 async fn logo_file(State(app): State<App>, Path(name): Path<String>) -> Result<Response, ApiError> {
     if !safe_name(&name) {
         return Ok(StatusCode::NOT_FOUND.into_response());
@@ -2105,6 +2122,56 @@ mod tests {
     fn the_first_template_is_the_blank_one() {
         assert_eq!(TEMPLATES[0].id, "blank");
         assert!(TEMPLATES[0].extra.is_empty());
+    }
+
+    /// `cycle='days'` 缺天数就算不出到期日、周期还显示成 "Every 0 days"，规则的权威在
+    /// 写入口不在浏览器。**只在请求碰了这两个键之一时判**：拿整行去判，库里一个陈年坏值
+    /// 就能把这行永久锁死，改别的字段都会被 400。
+    #[test]
+    fn a_custom_cycle_without_a_day_count_is_refused_at_the_write_entry() {
+        let conn = crate::db::fresh_in_memory().unwrap();
+        let coll: i64 = conn
+            .query_row("SELECT id FROM collections WHERE key='subs'", [], |r| r.get(0))
+            .unwrap();
+        assert!(insert_item(&conn, coll, &json!({ "name": "A", "cycle": "days" })).is_err());
+        assert!(
+            insert_item(&conn, coll, &json!({ "name": "A", "cycle": "days", "cycle_days": 0 }))
+                .is_err()
+        );
+        let id =
+            insert_item(&conn, coll, &json!({ "name": "A", "cycle": "days", "cycle_days": 30 }))
+                .unwrap();
+        // 只改周期不带天数：现值够格就该放行，否则改不了自己的行
+        update_item(&conn, id, &json!({ "cycle": "days" })).unwrap();
+        assert!(update_item(&conn, id, &json!({ "cycle_days": null })).is_err());
+
+        // 绕开写入口塞一个陈年坏行：不碰这两个键的编辑照样过得去
+        conn.execute(
+            "INSERT INTO items(collection_id,name,status,cycle) VALUES(?1,'旧行','Active','days')",
+            [coll],
+        )
+        .unwrap();
+        let old = conn.last_insert_rowid();
+        update_item(&conn, old, &json!({ "notes": "改个备注" })).unwrap();
+        assert!(update_item(&conn, old, &json!({ "cycle": "days" })).is_err());
+    }
+
+    /// 模板落表的字段类型没有任何一道运行时检查（`seed_fields` 原样插进 fields 表）。
+    /// `FTYPES` 是「新建列」能建的那些，模板另外用得起 `tpl`（只读、由模板串算出）；
+    /// 类型写错了列只会哑在那儿——渲染退化成文本、筛选与就地编辑全不认。
+    #[test]
+    fn template_fields_only_use_types_the_system_knows() {
+        for t in TEMPLATES {
+            for f in t.extra {
+                assert!(
+                    crate::fields::FTYPES.contains(&f.ftype) || f.ftype == "tpl",
+                    "模板 {} 的字段 {} 用了没人接的类型 {}",
+                    t.id,
+                    f.key,
+                    f.ftype
+                );
+            }
+        }
     }
 
     /// 电话号码只拦真正的垃圾，不拦"位数偏少"——`+44` 这类残缺值是既有数据，

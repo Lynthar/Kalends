@@ -16,8 +16,11 @@ const VIEWS_KEY = 'kalends.views.v1';
 const views = { subs: {}, sims: {}, vps: {} };
 try { Object.assign(views, JSON.parse(localStorage.getItem(VIEWS_KEY) || '{}')); } catch {}
 for (const t of ['subs', 'sims', 'vps']) views[t] = { sort: null, filters: {}, q: '', widths: {}, order: null, hiddenCols: [], types: {}, keys: null, collapsed: [], ...views[t] };
+// 存不进去（隐私模式 / 配额满）只丢本机偏好，不该打断操作；但要留一句，
+// 否则「列宽设了下次又没了」永远查不出所以然
 function saveViews() {
-  try { localStorage.setItem(VIEWS_KEY, JSON.stringify(views)); } catch {}
+  try { localStorage.setItem(VIEWS_KEY, JSON.stringify(views)); }
+  catch (e) { console.warn('视图偏好存不进 localStorage，本机设置不会保留：', e); }
 }
 
 const CYCLE_LABEL = {
@@ -97,6 +100,57 @@ function safeUrl(u) {
     const p = new URL(u);
     return (p.protocol === 'http:' || p.protocol === 'https:') ? p.href : '';
   } catch { return ''; }
+}
+
+/* 拖放换位的公共仪式，五处共用（库标签 / 表头列 / 表格行 / 库字段列表 / 词表选项）。
+   标记类只有 drop-before / drop-after 一对，前后由指针落在中点哪一侧定、轴向只决定量 x 还是 y，
+   各处的样式差别留在 CSS 里。调用方只给身份与落点处置，别再各写一遍这套事件。 */
+let dndFrom = null;
+
+// 抹标记要抹全场：dragend 只落在拖动源上，而源常常在落库重绘里被换掉、根本不触发
+function clearDndMarks() {
+  for (const el of document.querySelectorAll('.dragging, .drop-before, .drop-after')) {
+    el.classList.remove('dragging', 'drop-before', 'drop-after');
+  }
+}
+
+/**
+ * @param {Element} el 参与换位的元素；`draggable` 由调用方自己置（行拖动是按住手柄才开）
+ * @param {object} o
+ * @param {string} o.group 同组之间才收得下。**跨组必须给不同的名字**——五处共用一份拖动
+ *   状态，同名就等于允许把一个标签拖进字段列表，落点处置会拿到一个它读不懂的 key
+ * @param {'x'|'y'} o.axis 量哪个方向的中点
+ * @param {*} o.key 本元素在组内的身份，原样交回 onDrop
+ * @param {(e:DragEvent)=>*} [o.onStart] 起手钩子，**返回 false 即取消这次拖动**
+ * @param {(from:*, after:boolean)=>void} o.onDrop 落点处置：把 from 放到本元素前/后
+ */
+function reorderDnD(el, { group, axis, key, onDrop, onStart }) {
+  const ok = f => f != null && f.group === group && f.key !== key;
+  el.addEventListener('dragstart', e => {
+    if (onStart?.(e) === false) { e.preventDefault(); return; }
+    dndFrom = { group, key };
+    e.dataTransfer.effectAllowed = 'move';
+    el.classList.add('dragging');
+  });
+  el.addEventListener('dragover', e => {
+    if (!ok(dndFrom)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const r = el.getBoundingClientRect();
+    const after = axis === 'x' ? e.clientX > r.left + r.width / 2 : e.clientY > r.top + r.height / 2;
+    el.classList.toggle('drop-after', after);
+    el.classList.toggle('drop-before', !after);
+  });
+  el.addEventListener('dragleave', () => el.classList.remove('drop-before', 'drop-after'));
+  el.addEventListener('drop', e => {
+    e.preventDefault();
+    const after = el.classList.contains('drop-after');
+    const from = dndFrom;
+    dndFrom = null;
+    clearDndMarks();
+    if (ok(from)) onDrop(from.key, after);
+  });
+  el.addEventListener('dragend', () => { dndFrom = null; clearDndMarks(); });
 }
 
 async function loadAll() {
@@ -197,7 +251,8 @@ function renderUpcoming() {
 
 function toggleUpFold() {
   state.upFolded = !state.upFolded;
-  try { localStorage.setItem('kalends.upfold', state.upFolded ? '1' : '0'); } catch {}
+  try { localStorage.setItem('kalends.upfold', state.upFolded ? '1' : '0'); }
+  catch (e) { console.warn('折叠状态存不进 localStorage，下次开页会回到默认：', e); }
   renderUpcoming();
 }
 

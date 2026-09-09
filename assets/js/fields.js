@@ -104,7 +104,6 @@ function openOptionsPop(tab, k, anchor) {
     RENDER[tab]();
     reopen();
   };
-  let dragFrom = null;
   shown.forEach((o, idx) => {
     const x = o.v;
     const row = document.createElement('div');
@@ -125,33 +124,19 @@ function openOptionsPop(tab, k, anchor) {
     };
     row.querySelector('[data-up]').onclick = () => move(-1);
     row.querySelector('[data-dn]').onclick = () => move(1);
-    row.addEventListener('dragstart', e => {
-      dragFrom = idx;
-      e.dataTransfer.effectAllowed = 'move';
+    reorderDnD(row, {
+      group: 'field-option',
+      axis: 'y',
+      key: idx,
+      onDrop: (from, after) => {
+        const next = shown.map(s => ({ ...s }));
+        const [moved] = next.splice(from, 1);
+        let at = idx + (after ? 1 : 0);
+        if (from < at) at--;
+        next.splice(at, 0, moved);
+        commitList(next);
+      },
     });
-    row.addEventListener('dragover', e => {
-      if (dragFrom == null || dragFrom === idx) return;
-      e.preventDefault();
-      const r = row.getBoundingClientRect();
-      const after = e.clientY > r.top + r.height / 2;
-      row.classList.toggle('drop-b', after);
-      row.classList.toggle('drop-t', !after);
-    });
-    row.addEventListener('dragleave', () => row.classList.remove('drop-t', 'drop-b'));
-    row.addEventListener('drop', e => {
-      e.preventDefault();
-      const after = row.classList.contains('drop-b');
-      row.classList.remove('drop-t', 'drop-b');
-      if (dragFrom == null || dragFrom === idx) return;
-      const next = shown.map(s => ({ ...s }));
-      const [moved] = next.splice(dragFrom, 1);
-      let at = idx + (after ? 1 : 0);
-      if (dragFrom < at) at--;
-      next.splice(at, 0, moved);
-      dragFrom = null;
-      commitList(next);
-    });
-    row.addEventListener('dragend', () => { dragFrom = null; });
     row.querySelector('[data-color]').onclick = () => {
       // 换成十色色板行；自动=清掉指定色回到哈希。原位改色，不改变次序
       row.innerHTML = '';
@@ -354,8 +339,8 @@ function openHeadMenu(tab, th) {
   // 列序与列宽的单指针替代（WCAG 2.5.7）走子菜单：直铺四项会撑破菜单的 max-height
   //（上一回「删除列/重命名列」就是这么把末项挤进滚动条的，e2e 钉着整份可见）。
   items.push({ ic: '⇄', t: '移列与调宽…', act: () => openMovePop(tab, th), keepPop: true });
-  // 详情入口那一列不给隐藏：⤢ 与子行折叠钮都长在这一格里，撤掉整表就没了全表单入口。
-  // 库是名称列（后端 PUT /api/fields/{id} 同样拒绝 shown=0），媒体是标题列——两边都要守。
+  // 详情入口那一列（名称列）不给隐藏：⤢ 与子行折叠钮都长在这一格里，撤掉整表就没了
+  // 全表单入口。后端 PUT /api/fields/{id} 同样拒绝 shown=0，两边都要守。
   if (k !== entryKey(tab)) {
     items.push({ ic: '⊘', t: '隐藏此列（仅本机）', act: () => {
       v.hiddenCols = [...(v.hiddenCols || []), k];

@@ -13,7 +13,8 @@ use crate::api::{bad, missing, s, R};
 use crate::App;
 
 /// 可建的列类型。`star` 已撤掉：它只是"数字加个星形壳"——要打分用 `num`，要档位用 `sel`。
-const FTYPES: &[&str] = &["text", "num", "sel", "multi", "date", "tel", "url", "email"];
+pub(crate) const FTYPES: &[&str] =
+    &["text", "num", "sel", "multi", "date", "tel", "url", "email"];
 
 /// tbl 是库键（字段值在 items.extra，按 collection_id 圈定）；库表已泛化，不再有按表名写死的映射。
 fn owner(conn: &Connection, tbl: &str) -> anyhow::Result<i64> {
