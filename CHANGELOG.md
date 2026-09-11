@@ -10,6 +10,8 @@ Kalends is now the renewal tracker alone. The media library moved to its own pro
 
 **Removed**: the media pages and API (`/api/media`, `/api/tmdb/*`, `/covers`), the `KALENDS_MODULES` module switch and `/config.js`, and the TMDB key setting. Outbound traffic is down to exchange-rate refreshes, favicon fetches and your notification channels.
 
+**Fixed**: a failed settings read no longer passes for "not set". The notifier stops with a warning instead of silently skipping a run, exchange-rate and logo fetches refuse to go out when the configured proxy cannot be read, deleting an entry rolls back instead of orphaning its logo, the settings form refuses to save over a channel config it could not read, and a `days` cycle must carry a day count.
+
 ## v0.1.0
 
 First tagged build. Kalends is a self-hosted ledger for things that renew: subscriptions, SIM keep-alives, VPS boxes, and whatever else you care to define. A media library sits alongside it. The code has been running as my own ledger for a few months and did not change for the release — it just has binaries now.
