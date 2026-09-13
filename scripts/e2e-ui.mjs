@@ -1459,6 +1459,9 @@ await sleep(500);
 check('窗口=全部时「更远期」按 hidden 属性隐藏',
   await evl(`document.querySelector('#up-more').hasAttribute('hidden')`) === true
   && await evl(`getComputedStyle(document.querySelector('#up-more')).display`) === 'none');
+// 「全部」不是整数：服务端拒掉它的话界面当场正确、刷新就回旧窗口
+const stAll = await (await fetch(APP + 'api/settings')).json();
+check('窗口=全部落到了服务端', stAll['ui.upcoming_days'] === 'all', stAll['ui.upcoming_days']);
 await evl(`(() => { const s = document.querySelector('#up-window'); s.value = '7'; s.dispatchEvent(new Event('change')); })()`);
 await sleep(500);
 check('窗口收窄后「更远期」出现',

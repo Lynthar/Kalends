@@ -286,6 +286,7 @@ fn check_setting(k: &str, v: &str) -> anyhow::Result<()> {
         .then_some(())
         .ok_or_else(|| bad("PIN 只收字母与数字（至多 64 位）；留空＝不设门")),
         "notify.window_days" => int_in(1, 3650, "摘要窗口"),
+        "ui.upcoming_days" if v == "all" => Ok(()), // 到期栏下拉的「全部」档
         "ui.upcoming_days" => int_in(1, 3650, "到期窗口"),
         "notify.digest_time" => (v.is_ascii()
             && v.len() == 5
@@ -499,6 +500,10 @@ mod tests {
         ok("notify.window_days", "14");
         no("notify.window_days", "0");
         no("notify.window_days", "x");
+        ok("ui.upcoming_days", "30");
+        ok("ui.upcoming_days", "all");
+        no("ui.upcoming_days", "forever");
+        no("ui.upcoming_days", "0");
         ok("notify.digest_time", "09:00");
         no("notify.digest_time", "9:00");
         no("notify.digest_time", "24:00");
