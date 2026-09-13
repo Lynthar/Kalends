@@ -32,16 +32,20 @@ $('#fx-refresh').onclick = async e => {
   btn.textContent = '拉取实时汇率';
 };
 
+// SMTP 端口的默认值住在声明的 notify.email JSON 里，不另设一项
+const smtpPortDefault = () => JSON.parse(state.defaults['notify.email']).port;
+
 function openSettings() {
-  const st = state.settings;
+  const st = state.settings, D = state.defaults;
   const f = $('#form-settings').elements;
   f.pin.value = st['auth.pin'] || '';
   f.meta_proxy.value = st['meta.proxy'] || '';
+  f.thresholds.placeholder = JSON.parse(D['notify.thresholds']).join(',');
   try {
     f.thresholds.value = JSON.parse(st['notify.thresholds'] || '[]').join(',');
   } catch { f.thresholds.value = ''; }
-  f.digest_time.value = st['notify.digest_time'] || '09:00';
-  f.window_days.value = st['notify.window_days'] || '14';
+  f.digest_time.value = st['notify.digest_time'] || D['notify.digest_time'];
+  f.window_days.value = st['notify.window_days'] || D['notify.window_days'];
   syncFxPanel();
   let tg = {}, em = {};
   const broken = [];
@@ -53,7 +57,8 @@ function openSettings() {
   f.tg_proxy.value = tg.proxy || '';
   f.em_enabled.checked = !!em.enabled;
   f.em_host.value = em.host || '';
-  f.em_port.value = em.port || 465;
+  f.em_port.placeholder = smtpPortDefault();
+  f.em_port.value = em.port || smtpPortDefault();
   f.em_starttls.checked = !!em.starttls;
   f.em_user.value = em.username || '';
   f.em_pass.value = em.password || '';
@@ -141,7 +146,7 @@ function localTime(s) {
 }
 
 function settingsBody() {
-  const f = $('#form-settings').elements;
+  const f = $('#form-settings').elements, D = state.defaults;
   // 空串必须先滤掉：`Number('')` 是 0，混进来就成了「只在到期当天提醒」，而界面上看不出来
   //（清空这一栏、或末尾多打一个逗号都会撞上）。留空是合法配置——后端认 `[]` ＝只发每日摘要，
   // 拿默认值把它顶回去，这条配置在界面上就永远表达不出来
@@ -151,15 +156,15 @@ function settingsBody() {
     'auth.pin': f.pin.value.replace(/[^A-Za-z0-9]/g, ''),
     'meta.proxy': f.meta_proxy.value.trim(),
     'notify.thresholds': JSON.stringify(thresholds),
-    'notify.digest_time': f.digest_time.value || '09:00',
-    'notify.window_days': String(+f.window_days.value || 14),
+    'notify.digest_time': f.digest_time.value || D['notify.digest_time'],
+    'notify.window_days': String(+f.window_days.value || D['notify.window_days']),
     'fx.display': f.fx_display.value,
     'notify.telegram': JSON.stringify({
       enabled: f.tg_enabled.checked, bot_token: f.tg_token.value.trim(),
       chat_id: f.tg_chat.value.trim(), proxy: f.tg_proxy.value.trim(),
     }),
     'notify.email': JSON.stringify({
-      enabled: f.em_enabled.checked, host: f.em_host.value.trim(), port: +f.em_port.value || 465,
+      enabled: f.em_enabled.checked, host: f.em_host.value.trim(), port: +f.em_port.value || smtpPortDefault(),
       starttls: f.em_starttls.checked, username: f.em_user.value.trim(), password: f.em_pass.value,
       from: f.em_from.value.trim(), to: f.em_to.value.trim(),
     }),

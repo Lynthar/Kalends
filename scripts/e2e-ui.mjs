@@ -1462,6 +1462,10 @@ check('窗口=全部时「更远期」按 hidden 属性隐藏',
 // 「全部」不是整数：服务端拒掉它的话界面当场正确、刷新就回旧窗口
 const stAll = await (await fetch(APP + 'api/settings')).json();
 check('窗口=全部落到了服务端', stAll['ui.upcoming_days'] === 'all', stAll['ui.upcoming_days']);
+// 下拉的每一档服务端都得收下：前端再加一档、服务端没跟，就在这里红
+for (const w of await evl(`[...document.querySelectorAll('#up-window option')].map(o => o.value)`)) {
+  check(`到期窗口档位 ${w} 服务端收下`, (await put('/api/settings', { 'ui.upcoming_days': w })).ok);
+}
 await evl(`(() => { const s = document.querySelector('#up-window'); s.value = '7'; s.dispatchEvent(new Event('change')); })()`);
 await sleep(500);
 check('窗口收窄后「更远期」出现',
@@ -2818,6 +2822,28 @@ check('阈值栏：清空给 []，末尾多个逗号也不会多出一个 0 档'
   f.thresholds.value = was;
   return empty + ' | ' + trailing;
 })()`) === '[] | [14,7]');
+// ⑤b 清空摘要时刻 / 摘要窗口 / SMTP 端口＝回默认，而默认只有服务端声明的那一份，占位串同理：
+//    前端再长出一份字面量且与声明不一致，就在这里红
+const dfDecl = await (await fetch(APP + 'api/settings/defaults')).json();
+check('占位串来自服务端声明', await evl(`(() => {
+  const f = document.querySelector('#form-settings').elements;
+  return f.thresholds.placeholder + ' | ' + f.em_port.placeholder;
+})()`) === `${JSON.parse(dfDecl['notify.thresholds']).join(',')} | ${JSON.parse(dfDecl['notify.email']).port}`);
+const dfCleared = await evl(`(() => {
+  const f = document.querySelector('#form-settings').elements;
+  const was = [f.digest_time.value, f.window_days.value, f.em_port.value];
+  [f.digest_time.value, f.window_days.value, f.em_port.value] = ['', '', ''];
+  const b = settingsBody();
+  [f.digest_time.value, f.window_days.value, f.em_port.value] = was;
+  return { 'notify.digest_time': b['notify.digest_time'], 'notify.window_days': b['notify.window_days'], 'notify.email': b['notify.email'] };
+})()`);
+const dfBefore = await (await fetch(APP + 'api/settings')).json();
+check('清空后的三项服务端收下', (await put('/api/settings', dfCleared)).ok);
+const dfAfter = await (await fetch(APP + 'api/settings')).json();
+check('清空摘要时刻＝声明的默认', dfAfter['notify.digest_time'] === dfDecl['notify.digest_time'], dfAfter['notify.digest_time']);
+check('清空摘要窗口＝声明的默认', dfAfter['notify.window_days'] === dfDecl['notify.window_days'], dfAfter['notify.window_days']);
+check('清空 SMTP 端口＝声明的默认', JSON.parse(dfAfter['notify.email']).port === JSON.parse(dfDecl['notify.email']).port, dfAfter['notify.email']);
+await put('/api/settings', { 'notify.digest_time': dfBefore['notify.digest_time'], 'notify.window_days': dfBefore['notify.window_days'], 'notify.email': dfBefore['notify.email'] });
 await evl(`document.querySelector('#dlg-settings').close()`);
 await sleep(200);
 

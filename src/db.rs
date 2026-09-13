@@ -3,6 +3,8 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::Connection;
 
+use crate::settings::{self, Seed};
+
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_renewal_center.sql"),
     include_str!("../migrations/0002_media.sql"),
@@ -80,34 +82,19 @@ pub fn get_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<Stri
         .optional()
 }
 
-/// 首次启动播种默认设置（已存在的键不覆盖）。
+/// 首次启动播种默认设置（已存在的键不覆盖）；键与值都来自 `settings::SPECS`。
 pub fn seed_defaults(conn: &Connection) -> Result<()> {
-    let ics_token: String =
-        conn.query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))?;
-    let defaults: [(&str, String); 10] = [
-        ("auth.pin", String::new()),
-        ("meta.proxy", String::new()),
-        ("notify.thresholds", "[14,7,3,1,0]".into()),
-        ("notify.digest_time", "09:00".into()),
-        ("notify.window_days", "14".into()),
-        (
-            "notify.telegram",
-            r#"{"enabled":false,"bot_token":"","chat_id":"","proxy":""}"#.into(),
-        ),
-        (
-            "notify.email",
-            r#"{"enabled":false,"host":"","port":465,"starttls":false,"username":"","password":"","from":"","to":""}"#.into(),
-        ),
-        ("ics.token", ics_token),
-        // 折算显示：空＝不折算，各币种分开呈现（原币入账那条永远不变）
-        ("fx.display", String::new()),
-        // 实时汇率默认关着：这一格为空就一直用 fx.rs 里的内置平均汇率
-        ("fx.rates", String::new()),
-    ];
-    for (k, v) in &defaults {
+    for s in settings::SPECS {
+        let value: String = match s.seed {
+            Seed::Fixed(v) => v.into(),
+            Seed::RandomHex16 => {
+                conn.query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))?
+            }
+            Seed::Never => continue,
+        };
         conn.execute(
             "INSERT OR IGNORE INTO settings(key,value) VALUES(?1,?2)",
-            rusqlite::params![k, v],
+            rusqlite::params![s.key, value],
         )?;
     }
     Ok(())

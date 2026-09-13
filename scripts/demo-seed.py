@@ -33,6 +33,7 @@ def day(offset):
 EXPORT_PATHS = [
     '/api/overview',
     '/api/settings',
+    '/api/settings/defaults',
     '/api/fx',
     '/api/fields',
     '/api/collections',

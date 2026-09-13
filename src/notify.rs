@@ -3,7 +3,7 @@ use rusqlite::{params, Connection};
 use serde_json::Value;
 use std::collections::HashSet;
 
-use crate::{db, engine, Db};
+use crate::{db, engine, settings, Db};
 
 #[derive(Clone)]
 pub struct TelegramCfg {
@@ -59,7 +59,7 @@ pub fn email_cfg(conn: &Connection) -> Result<Option<EmailCfg>> {
     let cfg = EmailCfg {
         host: v["host"].as_str().unwrap_or("").trim().to_string(),
         // 超出 u16 的端口按没填算，回落默认——`as u16` 会环绕成一个没人配过的端口号
-        port: v["port"].as_u64().and_then(|p| u16::try_from(p).ok()).unwrap_or(465),
+        port: v["port"].as_u64().and_then(|p| u16::try_from(p).ok()).unwrap_or_else(settings::smtp_port_default),
         starttls: v["starttls"].as_bool().unwrap_or(false),
         username: v["username"].as_str().unwrap_or("").trim().to_string(),
         password: v["password"].as_str().unwrap_or("").to_string(),
@@ -350,7 +350,7 @@ fn normalize_hhmm(raw: &str) -> String {
         parts.next().and_then(|m| m.trim().parse::<u32>().ok()),
     ) {
         (Some(h), Some(m)) if h < 24 && m < 60 => format!("{h:02}:{m:02}"),
-        _ => "09:00".into(),
+        _ => settings::digest_time_default().into(),
     }
 }
 
@@ -469,10 +469,10 @@ pub async fn tick(db: &Db) -> Result<()> {
         }
         let thresholds: Vec<i64> = db::get_setting(&conn, "notify.thresholds")?
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_else(|| vec![14, 7, 3, 1, 0]);
+            .unwrap_or_else(settings::thresholds_default);
         let window: i64 = db::get_setting(&conn, "notify.window_days")?
             .and_then(|s| s.parse().ok())
-            .unwrap_or(14);
+            .unwrap_or_else(settings::window_days_default);
         let digest_time = digest_at(&conn)?;
         let now_hhmm = chrono::Local::now().format("%H:%M").to_string();
         let today = engine::today().to_string();

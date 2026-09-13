@@ -123,7 +123,7 @@
   <form id="form-settings" method="dialog">
     <h3>设置</h3>
     <div class="fgrid">
-      <label>提醒阈值（提前天数，留空＝只发每日摘要）<input name="thresholds" placeholder="14,7,3,1,0"></label>
+      <label>提醒阈值（提前天数，留空＝只发每日摘要）<input name="thresholds"></label>
       <label>摘要发送时间<input name="digest_time" type="time"></label>
       <label>摘要窗口（天）<input name="window_days" type="number" min="1"></label>
     </div>
@@ -152,7 +152,7 @@
       <legend><label class="check"><input type="checkbox" name="em_enabled">邮件（SMTP）</label></legend>
       <div class="fgrid">
         <label>服务器<input name="em_host" placeholder="smtp.example.com"></label>
-        <label>端口<input name="em_port" type="number" placeholder="465"></label>
+        <label>端口<input name="em_port" type="number"></label>
         <label class="check span2"><input type="checkbox" name="em_starttls">STARTTLS（587 端口时勾选）</label>
         <label>用户名<input name="em_user" autocomplete="off"></label>
         <label>密码<input name="em_pass" type="password" autocomplete="off"></label>

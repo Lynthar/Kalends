@@ -10,7 +10,7 @@ use axum::{
 use rusqlite::params;
 use serde_json::{json, Value};
 
-use crate::{db, engine, ics, notify, App};
+use crate::{db, engine, ics, notify, settings, App};
 
 #[derive(Debug)] // 错误类型该是 Debug 的；测试里 unwrap 一个 Result<_, ApiError> 也要靠它
 pub struct ApiError(anyhow::Error);
@@ -66,6 +66,7 @@ pub fn core_router() -> Router<App> {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/settings", get(settings_get).put(settings_put))
+        .route("/api/settings/defaults", get(settings_defaults))
         .route("/api/backup", post(backup_run))
 }
 
@@ -268,77 +269,10 @@ async fn notify_log(State(app): State<App>) -> R {
     Ok(Json(json!(notify_log_rows(&conn)?)))
 }
 
-/// 已知键按形状拦、不认识的键照存。只拦「一眼可辨的垃圾」——写坏了会静默出事的那几类
-///（端口环绕、阈值解析失败回默认、空 ICS 令牌把日历开给所有人）；R3-#6 的拍板仍然成立：
-/// 键白名单会把「漏登记的键」变成「永远存不进去且不报错」。
+/// 已知键按形状拦、不认识的键照存：键白名单会把「漏登记的键」变成
+/// 「永远存不进去且不报错」。每个键的规则在 `settings::SPECS`。
 fn check_setting(k: &str, v: &str) -> anyhow::Result<()> {
-    let int_in = |lo: i64, hi: i64, what: &str| {
-        v.trim()
-            .parse::<i64>()
-            .ok()
-            .filter(|n| (lo..=hi).contains(n))
-            .map(|_| ())
-            .ok_or_else(|| bad(format!("{what}要是 {lo}–{hi} 的整数")))
-    };
-    match k {
-        "auth.pin" => (v.is_empty()
-            || (v.len() <= 64 && v.chars().all(|c| c.is_ascii_alphanumeric())))
-        .then_some(())
-        .ok_or_else(|| bad("PIN 只收字母与数字（至多 64 位）；留空＝不设门")),
-        "notify.window_days" => int_in(1, 3650, "摘要窗口"),
-        "ui.upcoming_days" if v == "all" => Ok(()), // 到期栏下拉的「全部」档
-        "ui.upcoming_days" => int_in(1, 3650, "到期窗口"),
-        "notify.digest_time" => (v.is_ascii()
-            && v.len() == 5
-            && v.as_bytes()[2] == b':'
-            && v[..2].parse::<u8>().is_ok_and(|h| h < 24)
-            && v[3..].parse::<u8>().is_ok_and(|m| m < 60))
-        .then_some(())
-        .ok_or_else(|| bad("摘要时刻要是 HH:MM")),
-        "notify.thresholds" => {
-            let arr: Vec<i64> =
-                serde_json::from_str(v).map_err(|_| bad("提醒阈值要是整数数组（可以为空）"))?;
-            (arr.len() <= 32 && arr.iter().all(|n| (0..=3650).contains(n)))
-                .then_some(())
-                .ok_or_else(|| bad("提醒阈值每项要在 0–3650 天"))
-        }
-        "notify.telegram" | "notify.email" => {
-            let o: Value = serde_json::from_str(v).map_err(|_| bad("渠道配置要是 JSON 对象"))?;
-            let o = o.as_object().ok_or_else(|| bad("渠道配置要是 JSON 对象"))?;
-            for (fk, fv) in o {
-                let ok = match fk.as_str() {
-                    "enabled" | "starttls" => fv.is_boolean(),
-                    "port" => fv.is_u64(),
-                    _ => fv.is_string(),
-                };
-                if !ok {
-                    return Err(bad(format!("渠道配置 {fk} 的类型不对")));
-                }
-            }
-            // 端口在写入口就拦：环绕成没人配过的端口号之后，读侧只能悄悄回落默认
-            if let Some(p) = o.get("port") {
-                p.as_u64()
-                    .filter(|p| (1..=65535).contains(p))
-                    .ok_or_else(|| bad("SMTP 端口要在 1–65535"))?;
-            }
-            Ok(())
-        }
-        "fx.display" => {
-            let t = v.trim();
-            (t.is_empty() || (t.len() == 3 && t.chars().all(|c| c.is_ascii_alphabetic())))
-                .then_some(())
-                .ok_or_else(|| bad("显示币种要是三位字母代码，留空＝不折算"))
-        }
-        "ics.token" => (!v.is_empty()
-            && v.len() <= 128
-            && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-        .then_some(())
-        .ok_or_else(|| bad("ICS 令牌要是非空的 URL 安全字符串——空令牌等于把日历开给所有人")),
-        "meta.proxy" => (v.is_empty() || v.contains("://"))
-            .then_some(())
-            .ok_or_else(|| bad("代理要是带协议的地址（如 socks5://…），留空＝直连")),
-        _ => Ok(()),
-    }
+    settings::spec(k).map_or(Ok(()), |s| (s.check)(v))
 }
 
 // 渠道密钥不回读明文：GET 把它换成占位串，PUT 收到占位串＝保持库里那份。
@@ -346,11 +280,7 @@ fn check_setting(k: &str, v: &str) -> anyhow::Result<()> {
 const SECRET_MASK: &str = "••••••••";
 
 fn secret_field(k: &str) -> Option<&'static str> {
-    match k {
-        "notify.telegram" => Some("bot_token"),
-        "notify.email" => Some("password"),
-        _ => None,
-    }
+    settings::spec(k).and_then(|s| s.secret)
 }
 
 fn mask_secret(k: &str, stored: &str) -> String {
@@ -374,6 +304,11 @@ fn keep_masked_secret(conn: &rusqlite::Connection, k: &str, incoming: &str) -> a
         v[field] = Value::from(stored);
     }
     Ok(v.to_string())
+}
+
+/// 固定默认值下发给前端：表单的占位串与「清空＝回默认」都读它，JS 里不再抄一份。
+async fn settings_defaults() -> R {
+    Ok(Json(settings::defaults_json()))
 }
 
 async fn settings_get(State(app): State<App>) -> R {

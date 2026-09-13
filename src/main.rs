@@ -7,6 +7,7 @@ mod fields;
 mod fx;
 mod ics;
 mod notify;
+mod settings;
 
 use std::{
     net::SocketAddr,

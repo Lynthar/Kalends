@@ -6,9 +6,9 @@
 
 const $ = s => document.querySelector(s);
 const state = {
-  overview: null, subs: [], sims: [], vps: [], settings: {}, fields: [], fx: null,
+  overview: null, subs: [], sims: [], vps: [], settings: {}, defaults: {}, fields: [], fx: null,
   tab: 'subs',
-  upWindow: '30', upFolded: localStorage.getItem('kalends.upfold') === '1',
+  upWindow: '', upFolded: localStorage.getItem('kalends.upfold') === '1',
 };
 
 // 各表视图偏好（列排序 / 列筛选 / 表内搜索 / 列类型），存本浏览器
@@ -157,9 +157,10 @@ async function loadAll() {
   // 汇率拉不到不该拖垮首屏——折算是可选视图，没有汇率就按原币显示并如实说一声
   const noFx = { display: '', rates: {}, live: [], baseline_period: '', source: '' };
   // 先取概览（里面带库清单）与设置，之后才知道有哪些库要拉条目
-  [state.overview, state.settings, state.fx] = await Promise.all([
+  [state.overview, state.settings, state.defaults, state.fx] = await Promise.all([
     api('/api/overview'),
     api('/api/settings'),
+    api('/api/settings/defaults'),
     api('/api/fx').catch(e => {
       toast('汇率表没取到，费用按原币显示：' + e.message, true);
       return noFx;
@@ -167,7 +168,7 @@ async function loadAll() {
   ]);
   const wins = ['7', '14', '30', '60', '90', '180', 'all'];
   state.upWindow = wins.includes(state.settings['ui.upcoming_days'])
-    ? state.settings['ui.upcoming_days'] : '30';
+    ? state.settings['ui.upcoming_days'] : state.defaults['ui.upcoming_days'];
   // 表格的列由字段注册表决定，所以每次全量加载都要一并刷新，
   // 否则新建库/加列之后前端还按旧字段集渲染（会渲染出没有名称格的空行）
   try { await refreshFields(); } catch (e) { toast('字段注册加载失败：' + e.message, true); }
