@@ -9,6 +9,7 @@ use axum::{
 };
 use rusqlite::params;
 use serde_json::{json, Value};
+use subtle::ConstantTimeEq;
 
 use crate::{db, engine, ics, notify, settings, App};
 
@@ -387,7 +388,7 @@ async fn calendar(
 ) -> Result<Response, ApiError> {
     let conn = app.db.lock().unwrap();
     let expected = db::get_setting(&conn, "ics.token")?.unwrap_or_default();
-    if expected.is_empty() || q.get("token").map(String::as_str) != Some(expected.as_str()) {
+    if !token_ok(q.get("token").map(String::as_str), &expected) {
         return Ok((StatusCode::UNAUTHORIZED, "unauthorized").into_response());
     }
     let body = ics::calendar(&engine::upcoming(&conn)?);
@@ -398,9 +399,27 @@ async fn calendar(
         .into_response())
 }
 
+/// 令牌比对走常数时间：`!=` 在第一个不同字节就返回，响应时间会泄露前缀对了几位。
+/// 没设令牌（空串）谁都不能过——空对空也不行。
+fn token_ok(given: Option<&str>, expected: &str) -> bool {
+    !expected.is_empty()
+        && given.is_some_and(|g| bool::from(g.as_bytes().ct_eq(expected.as_bytes())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_calendar_token_must_be_set_and_match_exactly() {
+        assert!(token_ok(Some("abc"), "abc"));
+        assert!(!token_ok(Some("abd"), "abc"));
+        assert!(!token_ok(Some("ab"), "abc"));
+        assert!(!token_ok(Some("abcd"), "abc"));
+        assert!(!token_ok(None, "abc"));
+        assert!(!token_ok(Some(""), ""), "没设令牌时空对空也不能过");
+        assert!(!token_ok(None, ""));
+    }
 
     /// 传错类型必须报错，不能落成 None 再被写成 NULL——「出现即写入」的协议下
     /// 那是一次静默清空，界面上还显示保存成功。
