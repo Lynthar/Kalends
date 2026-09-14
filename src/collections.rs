@@ -1458,9 +1458,42 @@ fn public_ip_ok(ip: &std::net::IpAddr) -> bool {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return public_ip_ok(&std::net::IpAddr::V4(v4));
             }
+            // NAT64 前缀里的地址同理：网关会把它翻成嵌着的 IPv4 去连
+            if let Some(v4s) = nat64_embedded(v6) {
+                return v4s.iter().all(|v4| public_ip_ok(&std::net::IpAddr::V4(*v4)));
+            }
             !(v6.is_loopback() || v6.is_unspecified() || unique_local || link_local)
         }
     }
+}
+
+/// NAT64 前缀里嵌着的 IPv4，一种布局一个候选。`64:ff9b::/96`（RFC 6052 熟知前缀）只有 /96
+/// 一种；`64:ff9b:1::/48`（RFC 8215 本地用）部署时前缀可长到 /96，只按 /96 读会把 /64
+/// 布局里的 10.0.0.5 读成 5.0.0.0 而放行，所以成形的布局都要给出来、全部过 v4 规则。
+fn nat64_embedded(v6: &std::net::Ipv6Addr) -> Option<Vec<std::net::Ipv4Addr>> {
+    let seg = v6.segments();
+    let layouts: &[usize] = if seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        &[96]
+    } else if seg[..3] == [0x64, 0xff9b, 1] {
+        &[48, 56, 64, 96]
+    } else {
+        return None;
+    };
+    let b = v6.octets();
+    Some(layouts.iter().filter_map(|&l| rfc6052_v4(&b, l)).collect())
+}
+
+/// RFC 6052 §2.2 的布局：前缀之后嵌 IPv4，第 8 字节 `u` 必须为零、嵌完之后的后缀必须为零，
+/// 不成形的布局给 None（/96 布局把 16 字节用满，没有 u 与后缀）。
+fn rfc6052_v4(b: &[u8; 16], prefix_len: usize) -> Option<std::net::Ipv4Addr> {
+    let (v4, suffix): ([u8; 4], &[u8]) = match prefix_len {
+        48 => ([b[6], b[7], b[9], b[10]], &b[11..]),
+        56 => ([b[7], b[9], b[10], b[11]], &b[12..]),
+        64 => ([b[9], b[10], b[11], b[12]], &b[13..]),
+        96 => return Some(std::net::Ipv4Addr::from([b[12], b[13], b[14], b[15]])),
+        _ => return None,
+    };
+    (b[8] == 0 && suffix.iter().all(|&x| x == 0)).then(|| std::net::Ipv4Addr::from(v4))
 }
 
 /// 解析出来的地址全都得是公网。空解析结果按拒绝算。
@@ -2245,6 +2278,26 @@ mod tests {
         assert!(!public_ip_ok(&ip("100.127.255.255")));
         assert!(public_ip_ok(&ip("100.63.255.255")));
         assert!(public_ip_ok(&ip("100.128.0.1")));
+    }
+
+    /// NAT64 网关会把 `64:ff9b::a9fe:a9fe` 翻成 169.254.169.254（云 metadata），
+    /// 而它既非回环、ULA 也非链路本地——不抽出嵌着的 IPv4 再判，v6 分支直接放行。
+    #[test]
+    fn nat64_addresses_are_judged_by_the_embedded_ipv4() {
+        use std::net::IpAddr;
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        // RFC 6052 熟知前缀 64:ff9b::/96：只有 /96 一种布局
+        assert!(!public_ip_ok(&ip("64:ff9b::a9fe:a9fe")));
+        assert!(!public_ip_ok(&ip("64:ff9b::7f00:1")));
+        assert!(public_ip_ok(&ip("64:ff9b::1.1.1.1")));
+        // RFC 8215 本地用前缀 64:ff9b:1::/48：部署时前缀可长到 /96，中间 48 位随意
+        assert!(!public_ip_ok(&ip("64:ff9b:1::10.0.0.5")));
+        assert!(!public_ip_ok(&ip("64:ff9b:1:abcd::10.0.0.5")));
+        assert!(public_ip_ok(&ip("64:ff9b:1:abcd::1.1.1.1")));
+        // /64 布局嵌着 10.0.0.5：只按 /96 读会得到 5.0.0.0 而放行，每种成形布局都得过
+        assert!(!public_ip_ok(&ip("64:ff9b:1:0:a:0:500:0")));
+        // 前缀外的 v6 不受影响
+        assert!(public_ip_ok(&ip("64:ff9c::1")));
     }
 
     #[test]
