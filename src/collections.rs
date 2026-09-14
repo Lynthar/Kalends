@@ -1512,12 +1512,9 @@ fn bare_host(host: &str) -> &str {
 /// 字面形状这一关：明显的本机名与字面内网地址直接拒。**这只是第一道**——光看字面
 /// 拦不住"公共域名解析到 127.0.0.1"（localtest.me），发请求前还要过 `resolve_public`。
 fn public_host_ok(host: &str) -> bool {
-    let bare = bare_host(host);
-    if bare.is_empty()
-        || bare.eq_ignore_ascii_case("localhost")
-        || bare.ends_with(".localhost")
-        || bare.ends_with(".local")
-    {
+    // 主机名不分大小写，先统一再比后缀——否则 FOO.LOCAL 字面关直接放过
+    let bare = bare_host(host).to_ascii_lowercase();
+    if bare.is_empty() || bare == "localhost" || bare.ends_with(".localhost") || bare.ends_with(".local") {
         return false;
     }
     if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
@@ -2305,6 +2302,8 @@ mod tests {
         for bad in [
             "127.0.0.1", "localhost", "10.0.0.5", "192.168.1.1", "172.16.0.5",
             "169.254.169.254", "0.0.0.0", "[::1]", "[fe80::1]", "[fd00::1]", "nas.local", "box.localhost",
+            // 主机名不分大小写，后缀比较也不能分——否则 FOO.LOCAL 字面关直接放过
+            "NAS.LOCAL", "Box.LocalHost", "LOCALHOST",
         ] {
             assert!(!public_host_ok(bad), "本该拦下 {bad}");
         }
