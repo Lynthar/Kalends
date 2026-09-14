@@ -277,13 +277,29 @@ struct Pending {
     text: String,
 }
 
-/// 已成功发出的通知（含折叠时记下的 `covered` 行，同样 `ok=1`）。**一次查询载入**，
-/// 不在决策循环里逐条 `EXISTS`——那是项数×阈值×渠道次查询，全发生在挡着所有 HTTP
-/// 请求的单连接锁里；载入也让决策成为纯函数。
+/// 同一条通知失败 n 次后，再试之前至少等 `RETRY_WAIT_MINS[n-1]` 分钟；表用完就放弃。
+/// 调度 15 分钟一轮，不退避的话配错的渠道会一直重试到那条的去重键变掉为止。
+const RETRY_WAIT_MINS: &[f64] = &[30.0, 60.0, 120.0, 240.0];
+
+/// 失败 `failures` 次、距上次失败 `mins_since` 分钟：这一轮该不该按住不发。
+fn holding(failures: usize, mins_since: f64) -> bool {
+    match failures.checked_sub(1) {
+        None => false,
+        Some(n) => RETRY_WAIT_MINS.get(n).is_none_or(|wait| mins_since < *wait),
+    }
+}
+
+/// 去重键原样：摘要那半 item_id 与 threshold 都是 None。
+type LogKey = (String, Option<i64>, String, Option<i64>, Channel);
+
+/// 已成功发出的通知（含折叠时记下的 `covered` 行，同样 `ok=1`）与正在退避的失败键。
+/// **一次查询载入**，不在决策循环里逐条 `EXISTS`——那是项数×阈值×渠道次查询，全发生在
+/// 挡着所有 HTTP 请求的单连接锁里；载入也让决策成为纯函数。
 #[derive(Default)]
 struct SentLog {
     items: HashSet<(String, i64, String, i64, Channel)>,
     digests: HashSet<(String, Channel)>,
+    holds: HashSet<LogKey>,
 }
 
 impl SentLog {
@@ -320,6 +336,33 @@ impl SentLog {
                 _ => {}
             }
         }
+        // 失败行按去重键计数，距上次失败的分钟数由写它的同一只 SQLite 时钟算
+        let mut st = conn.prepare(
+            "SELECT kind, item_id, due_date, threshold_days, channel, count(*),
+                    (julianday('now') - julianday(max(sent_at))) * 1440.0
+             FROM notification_log WHERE ok=0 AND due_date >= ?1
+             GROUP BY kind, item_id, due_date, threshold_days, channel",
+        )?;
+        let rows = st.query_map(params![since], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<i64>>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, usize>(5)?,
+                r.get::<_, f64>(6)?,
+            ))
+        })?;
+        for row in rows {
+            let (kind, item_id, due, threshold, channel, failures, mins_since) = row?;
+            let Some(ch) = Channel::from_str(&channel) else {
+                continue;
+            };
+            if holding(failures, mins_since) {
+                out.holds.insert((kind, item_id, due, threshold, ch));
+            }
+        }
         Ok(out)
     }
 
@@ -330,6 +373,11 @@ impl SentLog {
 
     fn has_digest(&self, day: &str, ch: Channel) -> bool {
         self.digests.contains(&(day.to_string(), ch))
+    }
+
+    fn on_hold(&self, kind: &str, id: Option<i64>, due: &str, threshold: Option<i64>, ch: Channel) -> bool {
+        self.holds
+            .contains(&(kind.to_string(), id, due.to_string(), threshold, ch))
     }
 }
 
@@ -399,6 +447,11 @@ fn plan(inp: &TickInput) -> Vec<Pending> {
                 continue;
             }
             qualifying.sort_unstable();
+            // 主档在退避就整条跳过，不拿更宽的档顶上：文案只看 days_left、两档一模一样，
+            // 顶上去等于主档解禁后同一条提醒再发一遍
+            if inp.sent.on_hold(&kind, Some(id), &due, Some(qualifying[0]), ch) {
+                continue;
+            }
             out.push(Pending {
                 kind,
                 item_id: Some(id),
@@ -410,7 +463,10 @@ fn plan(inp: &TickInput) -> Vec<Pending> {
                 text: format!("Kalends 提醒\n{}", line(it)),
             });
         }
-        if inp.now_hhmm >= inp.digest_time && !inp.sent.has_digest(inp.today, ch) {
+        if inp.now_hhmm >= inp.digest_time
+            && !inp.sent.has_digest(inp.today, ch)
+            && !inp.sent.on_hold("digest", None, inp.today, None, ch)
+        {
             let due_items: Vec<&Value> = inp
                 .ups
                 .iter()
@@ -440,7 +496,7 @@ fn plan(inp: &TickInput) -> Vec<Pending> {
 }
 
 /// 检查一轮：读数据 → `plan` 决策 → 发送 → 落库。
-/// 失败行只是排障线索，30 天后清掉——15 分钟一轮的重试会让它无界累积。
+/// 失败行是排障线索兼退避计数，30 天后清掉——清了等于把那条的重试预算归零。
 /// `ok=1` 行是去重记忆，**永不按日期清**：清了它，逾期项每轮重发一遍。
 pub fn prune_failed(conn: &Connection) -> Result<usize> {
     Ok(conn.execute(
@@ -748,6 +804,54 @@ mod tests {
         assert_eq!(p[0].channel, Channel::Email);
     }
 
+    // ── 失败重试：退避与上限 ────────────────────────────────────
+
+    #[test]
+    fn retries_wait_longer_each_time_and_give_up_after_the_table_runs_out() {
+        assert!(holding(1, 29.0) && !holding(1, 31.0));
+        assert!(holding(4, 239.0) && !holding(4, 241.0));
+        assert!(holding(5, 1e9), "表用完就放弃，等多久都不再试");
+        assert!(!holding(0, 0.0), "没失败过的键不该被按住");
+    }
+
+    #[test]
+    fn a_held_reminder_is_skipped_outright_not_downgraded_to_a_looser_threshold() {
+        // 3 天后到期够格 14/7/3 三档，主档 3 在退避：整条跳过。若拿 7 档顶上，
+        // 3 档解禁后同一条提醒会再发一遍（文案只看 days_left，两档一字不差）
+        let mut sent = SentLog::default();
+        sent.holds.insert(("subs".into(), Some(1), "2026-08-18".into(), Some(3), TG[0]));
+        let ups = [up(1, 3, "2026-08-18")];
+        assert!(plan_at("08:00", "2026-08-15", &ups, &sent, TG).is_empty());
+        // 摘要同理，键是 (digest, 今天)
+        sent.holds.insert(("digest".into(), None, "2026-08-15".into(), None, TG[0]));
+        assert!(plan_at("09:30", "2026-08-15", &ups, &sent, TG).is_empty());
+        // 别的渠道不受牵连
+        let p = plan_at("09:30", "2026-08-15", &ups, &sent, &[Channel::Email]);
+        assert_eq!(p.len(), 2);
+    }
+
+    #[test]
+    fn holds_are_computed_from_the_failure_rows_by_dedup_key() {
+        let conn = crate::db::fresh_in_memory().unwrap();
+        let fail = |item: i64, age: &str| {
+            conn.execute(
+                "INSERT INTO notification_log(kind,item_id,channel,threshold_days,due_date,sent_at,ok,error)
+                 VALUES('subs',?1,'telegram',3,'2026-08-18',datetime('now',?2),0,'x')",
+                params![item, age],
+            )
+            .unwrap();
+        };
+        fail(1, "-5 minutes"); // 刚失败一次：按住
+        fail(2, "-45 minutes"); // 失败一次、已过 30 分钟：放行
+        for _ in 0..5 {
+            fail(3, "-10 days"); // 五次失败：放弃，多久都不再试
+        }
+        let sent = SentLog::load(&conn, "2026-08-01").unwrap();
+        let held = |id: i64| sent.on_hold("subs", Some(id), "2026-08-18", Some(3), Channel::Telegram);
+        assert!(held(1) && !held(2) && held(3));
+        assert!(!sent.on_hold("subs", Some(1), "2026-08-18", Some(7), Channel::Telegram), "键含阈值档");
+    }
+
     // 到点判定是字符串比较，所以「9:00」这种没零填充的值会让摘要永不触发
     //（"09:00" >= "9:00" 与 "23:59" >= "9:00" 都是假），且界面上看不出异常。
     #[test]
@@ -844,5 +948,38 @@ mod tests {
         assert_eq!(count("SELECT count(*) FROM notification_log"), 2);
         assert_eq!(count("SELECT count(*) FROM notification_log WHERE ok=0"), 1);
         assert_eq!(count("SELECT count(*) FROM notification_log WHERE ok=1"), 1);
+    }
+
+    /// 渠道坏着时连跑三轮只能落一条失败行：第一次失败后进入退避，后两轮不再试。
+    /// 没有退避的话每 15 分钟一轮都会重试，配错的渠道会一直试到天荒地老。
+    #[tokio::test]
+    async fn a_failing_delivery_backs_off_instead_of_retrying_every_tick() {
+        let conn = crate::db::fresh_in_memory().unwrap();
+        // 代理指向一个刚释放的回环端口：连接当场被拒，发送必败且不出网
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES('notify.telegram',?1)",
+            [format!(r#"{{"enabled":true,"bot_token":"t","chat_id":"1","proxy":"http://127.0.0.1:{port}"}}"#)],
+        )
+        .unwrap();
+        let coll: i64 = conn
+            .query_row("SELECT id FROM collections WHERE key='subs'", [], |r| r.get(0))
+            .unwrap();
+        let due = (engine::today() + chrono::Days::new(3)).to_string();
+        crate::collections::insert_item(
+            &conn,
+            coll,
+            &json!({ "name": "x", "status": "Active", "cycle": "monthly", "next_renewal": due }),
+        )
+        .unwrap();
+        let db: crate::Db = std::sync::Arc::new(std::sync::Mutex::new(conn));
+        for _ in 0..3 {
+            tick(&db).await.unwrap();
+        }
+        let conn = db.lock().unwrap();
+        let failures: i64 = conn
+            .query_row("SELECT count(*) FROM notification_log WHERE kind='subs' AND ok=0", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(failures, 1, "三轮里只有第一轮该真的去发");
     }
 }
