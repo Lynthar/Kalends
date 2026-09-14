@@ -14,7 +14,7 @@ pub fn today() -> NaiveDate {
 /// 锚点即丢（1/31 迭代六次得 7/28，正解 7/31）。
 pub fn advance_n(date: NaiveDate, cycle: &str, cycle_days: Option<i64>, n: u32) -> Option<NaiveDate> {
     let months = |m: u32| date.checked_add_months(Months::new(m * n));
-    let days = |d: u64| date.checked_add_days(Days::new(d * n as u64));
+    let days = |d: u64| date.checked_add_days(Days::new(d * u64::from(n)));
     match cycle {
         "weekly" => days(7),
         "monthly" => months(1),
@@ -23,7 +23,7 @@ pub fn advance_n(date: NaiveDate, cycle: &str, cycle_days: Option<i64>, n: u32) 
         "annual" => months(12),
         "biennial" => months(24),
         "triennial" => months(36),
-        "days" => cycle_days.filter(|d| *d > 0).and_then(|d| days(d as u64)),
+        "days" => cycle_days.and_then(|d| u64::try_from(d).ok()).filter(|d| *d > 0).and_then(days),
         _ => None,
     }
 }
@@ -174,7 +174,7 @@ fn truthy(v: Option<&Value>) -> bool {
 }
 
 fn sem_map(conn: &Connection) -> Result<SemMap> {
-    let mut out: SemMap = Default::default();
+    let mut out = SemMap::default();
     let mut stmt = conn.prepare("SELECT tbl,options FROM fields WHERE key='status'")?;
     let rows = stmt.query_map([], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -485,7 +485,7 @@ mod tests {
         // 日期填着、周期空着：缺的是周期
         r.last_renewed = Some("2026-05-01".into());
         assert_eq!(r.missing_for_due(), "周期");
-        r.cycle = Some("".into());
+        r.cycle = Some(String::new());
         assert_eq!(r.missing_for_due(), "周期");
 
         // 自定义天数却没填天数（或填了 0）：缺的是天数，不是周期本身

@@ -61,7 +61,7 @@ fn opts_array(b: &Value) -> Vec<Value> {
             Value::String(s) => (s.trim().to_string(), None, None),
             Value::Object(o) => (
                 o.get("v").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).unwrap_or_default(),
-                o.get("c").and_then(|c| c.as_i64()).filter(|c| (0..10).contains(c)),
+                o.get("c").and_then(Value::as_i64).filter(|c| (0..10).contains(c)),
                 Some(o),
             ),
             _ => (String::new(), None, None),
@@ -215,7 +215,7 @@ async fn set_semantics(State(app): State<App>, Json(b): Json<Value>) -> R {
         .map_err(|_| bad("该列没有状态词表"))?;
     let mut opts: Vec<Value> = serde_json::from_str(&stored).unwrap_or_default();
     let want = opts_array(&b);
-    for o in opts.iter_mut() {
+    for o in &mut opts {
         let Some(w) = want.iter().find(|w| w["v"] == o["v"]) else { continue };
         // opts_array 只保留调用方真传了的标记，没传的保持原样
         for flag in SEM_FLAGS {
@@ -247,7 +247,7 @@ async fn add_status(State(app): State<App>, Json(b): Json<Value>) -> R {
         )
         .map_err(|_| bad("该列没有状态词表"))?;
     let mut opts: Vec<Value> = serde_json::from_str(&stored).unwrap_or_default();
-    for o in opts.iter_mut() {
+    for o in &mut opts {
         if let Value::String(s) = o {
             *o = json!({ "v": s.clone() }); // 老形态常规化
         }
@@ -305,7 +305,7 @@ fn resolve(conn: &Connection, tbl: &str, key: &str) -> anyhow::Result<Target> {
         )
         .ok();
     match ftype.as_deref() {
-        Some("sel") | Some("multi") => Ok(Target { table, cond, key: key.to_string() }),
+        Some("sel" | "multi") => Ok(Target { table, cond, key: key.to_string() }),
         Some(_) => Err(bad("该列类型没有选项")),
         None => Err(bad("该列不支持编辑选项")),
     }
@@ -373,7 +373,7 @@ fn swap_option_in_list(conn: &Connection, tbl: &str, key: &str, from: &str, to: 
         .ok();
     let Some(stored) = stored else { return Ok(()) };
     let mut opts: Vec<Value> = serde_json::from_str(&stored).unwrap_or_default();
-    for o in opts.iter_mut() {
+    for o in &mut opts {
         if let Value::String(s) = o {
             *o = json!({ "v": s.clone() }); // 老形态常规化
         }

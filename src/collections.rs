@@ -821,7 +821,7 @@ pub fn items_of(conn: &Connection, key: &str) -> anyhow::Result<Vec<Value>> {
         .query_map([id], item_row)?
         .collect::<rusqlite::Result<_>>()?;
     let today = engine::today();
-    for r in rows.iter_mut() {
+    for r in &mut rows {
         let due = due_of(r, &anchor);
         r["due"] = json!(due.map(|d| d.to_string()));
         r["days_left"] = json!(due.map(|d| (d - today).num_days()));
@@ -1015,7 +1015,7 @@ fn check_item_shape(b: &Value, cur: Option<&Value>) -> anyhow::Result<()> {
     if b.get("cycle").is_some() || b.get("cycle_days").is_some() {
         let pick = |k: &str| b.get(k).or_else(|| cur.and_then(|c| c.get(k)));
         if pick("cycle").and_then(Value::as_str) == Some("days")
-            && !pick("cycle_days").and_then(Value::as_i64).is_some_and(|d| d >= 1)
+            && pick("cycle_days").and_then(Value::as_i64).is_none_or(|d| d < 1)
         {
             return Err(bad("自定义周期要填天数"));
         }
@@ -1505,7 +1505,7 @@ async fn resolve_public(host: &str, port: u16) -> Option<std::net::SocketAddr> {
         return Some(std::net::SocketAddr::new(ip, port)); // 字面 IP 上面已验过
     }
     let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((bare, port)).await.ok()?.collect();
-    let ips: Vec<std::net::IpAddr> = addrs.iter().map(|a| a.ip()).collect();
+    let ips: Vec<std::net::IpAddr> = addrs.iter().map(std::net::SocketAddr::ip).collect();
     // 有一条落内网就整体拒；否则钉住第一条——钉的必须是刚校验过的那一批里的
     resolved_ips_ok(&ips).then(|| addrs[0])
 }
@@ -1655,6 +1655,11 @@ fn attr_value<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
 
 /// 从条目的网址取 favicon 存成它的图标。
 async fn logo_fetch(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value>) -> R {
+    // 不带 UA 会被一部分站点当爬虫直接 403（update-fx-baseline.py 同一个坑）
+    const UA: &str = "kalends-icon-fetch";
+    // 整轮总截止：候选最多 8 条、每条各 30s 上限，对着黑洞式丢包的目标能停四分钟；
+    // 常见失败都在秒级，这道闸只砍最坏的尾巴
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
     let (raw, proxy) = {
         let conn = app.db.lock().unwrap();
         let stored: Option<Option<String>> = conn
@@ -1678,11 +1683,6 @@ async fn logo_fetch(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<V
     // 协议沿用条目自己那个网址：恒拼 https 的话，http-only 站点每条路径都在做
     // TLS 握手、全数"连不上"，报出来的方向还全错
     let scheme = full.split_once("://").map(|x| x.0).unwrap_or("https").to_string();
-    // 不带 UA 会被一部分站点当爬虫直接 403（update-fx-baseline.py 同一个坑）
-    const UA: &str = "kalends-icon-fetch";
-    // 整轮总截止：候选最多 8 条、每条各 30s 上限，对着黑洞式丢包的目标能停四分钟；
-    // 常见失败都在秒级，这道闸只砍最坏的尾巴
-    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
     let started = std::time::Instant::now();
     let mut last = String::from("没找到图标");
     // 先问网页自己：多数站点的图标不在 /favicon.ico，而是 <link rel="icon"> 指到别处。
@@ -2291,7 +2291,7 @@ mod tests {
     fn icon_discovery_picks_only_real_icon_links() {
         let h = |s: &str| icon_links_in(s, "https", "x.com");
         assert_eq!(h(r#"<link rel="shortcut icon" href="/f.ico">"#), vec!["/f.ico"]);
-        assert_eq!(h(r#"<link rel='apple-touch-icon' href='/t.png'>"#), vec!["/t.png"]);
+        assert_eq!(h(r"<link rel='apple-touch-icon' href='/t.png'>"), vec!["/t.png"]);
         assert_eq!(h(r#"<link rel="icon" href="//x.com/cdn.png">"#), vec!["https://x.com/cdn.png"]);
         // 协议相对地址跟条目自己那个网址的协议走，不一律拼 https
         assert_eq!(

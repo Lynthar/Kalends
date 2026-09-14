@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection};
 use serde_json::Value;
+use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use crate::{db, engine, settings, Db};
@@ -177,7 +178,7 @@ pub async fn send_telegram(cfg: &TelegramCfg, text: &str) -> Result<()> {
             .map_err(|e| anyhow::Error::new(e.without_url()).context("telegram 请求失败"))?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = body_capped(resp, 64 << 10).await.unwrap_or_else(|e| e.into_bytes());
+            let body = body_capped(resp, 64 << 10).await.unwrap_or_else(String::into_bytes);
             return Err(anyhow!("telegram {status}: {}", String::from_utf8_lossy(&body)));
         }
     }
@@ -217,12 +218,10 @@ pub async fn send_email(cfg: &EmailCfg, subject: &str, body: &str) -> Result<()>
 /// 单条到期项的通知文案。
 pub fn line(it: &Value) -> String {
     let days = it["days_left"].as_i64().unwrap_or(0);
-    let when = if days > 0 {
-        format!("{days} 天后到期")
-    } else if days == 0 {
-        "今天到期".to_string()
-    } else {
-        format!("已过期 {} 天", -days)
+    let when = match days.cmp(&0) {
+        Ordering::Greater => format!("{days} 天后到期"),
+        Ordering::Equal => "今天到期".to_string(),
+        Ordering::Less => format!("已过期 {} 天", -days),
     };
     let name = it["name"].as_str().unwrap_or("");
     let due = it["due"].as_str().unwrap_or("");
@@ -399,7 +398,7 @@ fn plan(inp: &TickInput) -> Vec<Pending> {
             if qualifying.is_empty() {
                 continue;
             }
-            qualifying.sort();
+            qualifying.sort_unstable();
             out.push(Pending {
                 kind,
                 item_id: Some(id),
@@ -545,7 +544,7 @@ pub async fn scheduler(db: Db) {
         if let Err(e) = tick(&db).await {
             tracing::warn!("notify tick failed: {e:#}");
         }
-        tokio::time::sleep(std::time::Duration::from_secs(900)).await;
+        tokio::time::sleep(std::time::Duration::from_mins(15)).await;
     }
 }
 

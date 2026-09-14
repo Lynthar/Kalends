@@ -50,7 +50,7 @@ pub fn run(conn: &Connection, data_dir: &Path) -> Result<Report> {
     fs::create_dir_all(&export_dir)?;
     for table in TABLES {
         let mut stmt = conn.prepare(&format!("SELECT * FROM {table}"))?;
-        let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+        let cols: Vec<String> = stmt.column_names().iter().map(ToString::to_string).collect();
         let mut lines = String::new();
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
@@ -240,7 +240,7 @@ pub async fn scheduler(db: crate::Db, data_dir: PathBuf) {
                 Err(e) => tracing::warn!("backup failed: {e:#}"),
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(1800)).await;
+        tokio::time::sleep(std::time::Duration::from_mins(30)).await;
     }
 }
 

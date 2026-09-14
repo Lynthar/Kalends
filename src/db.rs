@@ -122,7 +122,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("BEGIN")?;
         let done = conn
             .execute_batch(sql)
-            .and_then(|_| conn.pragma_update(None, "user_version", target));
+            .and_then(|()| conn.pragma_update(None, "user_version", target));
         match done {
             Ok(()) => conn.execute_batch("COMMIT")?,
             Err(e) => {

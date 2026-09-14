@@ -90,11 +90,11 @@ pub fn s(v: &Value, k: &str) -> Option<String> {
 }
 
 pub fn f(v: &Value, k: &str) -> Option<f64> {
-    v.get(k).and_then(|x| x.as_f64())
+    v.get(k).and_then(Value::as_f64)
 }
 
 pub fn i(v: &Value, k: &str) -> Option<i64> {
-    v.get(k).and_then(|x| x.as_i64())
+    v.get(k).and_then(Value::as_i64)
 }
 
 /// 数据目录里可直接读写的文件名：只放行字母数字与 . _ -，因此拼不出路径分隔符或 `..` 之外的花样。
@@ -105,13 +105,13 @@ pub fn safe_name(n: &str) -> bool {
 
 // 自定义列挂载点：body.extra 仅接受对象，存 JSON 文本
 pub fn extra_str(v: &Value) -> Option<String> {
-    v.get("extra").filter(|x| x.is_object()).map(|x| x.to_string())
+    v.get("extra").filter(|x| x.is_object()).map(ToString::to_string)
 }
 
 // 读侧：extra 文本解析为对象，空/坏值给 {}
 pub fn extra_json(text: Option<String>) -> Value {
     text.and_then(|x| serde_json::from_str::<Value>(&x).ok())
-        .filter(|x| x.is_object())
+        .filter(Value::is_object)
         .unwrap_or_else(|| json!({}))
 }
 
