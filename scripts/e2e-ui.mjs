@@ -19,7 +19,6 @@ mkdirSync(OUT, { recursive: true });
 rmSync(OUT + '/profile', { recursive: true, force: true });
 
 /* ── 播种（仅当订阅表为空） ── */
-const day = n => new Date(Date.now() + n * 864e5).toISOString().slice(0, 10);
 const post = (path, body) => fetch(APP.replace(/\/$/, '') + path, {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
 }).then(r => r.json());
@@ -37,6 +36,10 @@ const raw = (path, method, body) => fetch(APP.replace(/\/$/, '') + path, {
 
 const subs0 = await fetch(APP + 'api/collections/subs/items').then(r => r.json()).catch(() => null);
 if (!subs0) { console.error('服务未启动？先起 Kalends 实例再跑本脚本'); process.exit(2); }
+// 日期基准取服务端的「今天」，不拿本脚本的 UTC 日期：服务端按本地时区算 days_left，
+// 非 UTC 机器上跨日的那几个小时里两者差一天，天数类断言会因一个与被测无关的理由翻
+const today = (await (await fetch(APP + 'api/overview')).json()).today;
+const day = n => new Date(Date.parse(today + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10);
 const mk = (key, body) => post(`/api/collections/${key}/items`, body);
 if (subs0.length === 0) {
   console.log('空库，播种假数据…');
@@ -2280,28 +2283,23 @@ const rfMap = Object.fromEntries(rfColls.map(c => [c.key, c.renew_from]));
 check('预置库的续费起算：订阅/VPS 按日程、SIM 从当天',
   rfMap.subs === 'schedule' && rfMap.vps === 'schedule' && rfMap.sims === 'today', JSON.stringify(rfMap));
 
-// 日期基准取服务端的「今天」，不用本脚本的 day()：那个按 UTC 算，而服务端看 Local::now()，
-// 半夜跑的时候两者会差一天，断言就会在一个与本段无关的理由上翻
-const rfToday = (await (await fetch(APP + 'api/overview')).json()).today;
-const rfDay = n => new Date(new Date(rfToday + 'T00:00:00Z').getTime() + n * 864e5).toISOString().slice(0, 10);
-
 // 同一份数据喂给两个库：30 天一期、欠了三期多。差别只在库的续费起算方式上。
 // 用天数周期是为了不在断言里再复刻一遍日历加法——月末钳位那类边界由 cargo test 守着
-const rfSeed = { status: 'Active', cycle: 'days', cycle_days: 30, last_renewed: rfDay(-100) };
+const rfSeed = { status: 'Active', cycle: 'days', cycle_days: 30, last_renewed: day(-100) };
 const rfVps = await mk('vps', { name: '账单日机器', price: 9, currency: 'USD', ...rfSeed, extra: { purpose: '任务' } });
 const rfSim = await mk('sims', { name: '保号测试卡', ...rfSeed, extra: { keepalive_action: '充值' } });
 
 const rfResp = await post(`/api/items/${rfVps.id}/renew`, {});
 const rfVpsAfter = (await (await fetch(APP + 'api/collections/vps/items')).json()).find(r => r.id === rfVps.id);
 check('按日程续费：锚点落在刚付的那一期，不是今天',
-  rfVpsAfter.last_renewed === rfDay(-10), `落在 ${rfVpsAfter.last_renewed}，今天是 ${rfToday}`);
+  rfVpsAfter.last_renewed === day(-10), `落在 ${rfVpsAfter.last_renewed}，今天是 ${today}`);
 check('按日程续费：到期日回到原本的账单日',
-  rfResp.due === rfDay(20), JSON.stringify(rfResp));
+  rfResp.due === day(20), JSON.stringify(rfResp));
 
 await post(`/api/items/${rfSim.id}/renew`, {});
 const rfSimAfter = (await (await fetch(APP + 'api/collections/sims/items')).json()).find(r => r.id === rfSim.id);
 check('保号仍从操作当天重新计时（同样的数据，另一种语义）',
-  rfSimAfter.last_renewed === rfToday, `落在 ${rfSimAfter.last_renewed}，今天是 ${rfToday}`);
+  rfSimAfter.last_renewed === today, `落在 ${rfSimAfter.last_renewed}，今天是 ${today}`);
 
 await evl(`loadAll()`);
 await sleep(700);
@@ -2380,7 +2378,7 @@ await sleep(700);
    界面上根本造不出来的字段（字段面板只能建 extra 自定义列），整库到期日静默消失——
    表格里旧的那列还显示着值，看着一切正常，时间线却空了。 */
 const acColl = await post('/api/collections', { name: '锚点切换', due_anchor: 'last' });
-const acItem = await mk(acColl.key, { name: '按上次续费算', status: 'Active', cycle: 'monthly', last_renewed: rfDay(-5) });
+const acItem = await mk(acColl.key, { name: '按上次续费算', status: 'Active', cycle: 'monthly', last_renewed: day(-5) });
 const acKeys = async () => (await (await fetch(`${APP}api/fields`)).json())
   .filter(f => f.tbl === acColl.key).map(f => f.key);
 const k0 = await acKeys();
@@ -2406,23 +2404,23 @@ check('新字段在详情表单里真的有一格可填', await evl(`(() => {
   return has;
 })()`) === true);
 const acRow = (await (await fetch(`${APP}api/collections/${acColl.key}/items`)).json()).find(r => r.id === acItem.id);
-await patch(`/api/items/${acItem.id}`, { ...acRow, next_renewal: rfDay(9) });
+await patch(`/api/items/${acItem.id}`, { ...acRow, next_renewal: day(9) });
 check('填上之后到期日就回来了',
   (await (await fetch(APP + 'api/overview')).json()).upcoming
-    .some(u => u.kind === acColl.key && u.id === acItem.id && u.due === rfDay(9)));
+    .some(u => u.kind === acColl.key && u.id === acItem.id && u.due === day(9)));
 
 // 算不出到期日时点名的必须是真正缺的那一项：last 锚点有两半成因（缺日期 / 缺周期），
 // 一律报「缺上次续费日」的话，用户打开条目看见日期填着，按提示无从下手
 await put(`/api/collections/${acColl.id}`, { due_anchor: 'last' });
 const acRow2 = (await (await fetch(`${APP}api/collections/${acColl.key}/items`)).json()).find(r => r.id === acItem.id);
-await patch(`/api/items/${acItem.id}`, { ...acRow2, cycle: '', last_renewed: rfDay(-5) });
+await patch(`/api/items/${acItem.id}`, { ...acRow2, cycle: '', last_renewed: day(-5) });
 check('日期填着、周期空着时点名的是「周期」',
   (await (await fetch(APP + 'api/overview')).json()).undated
     .find(x => x.kind === acColl.key && x.id === acItem.id)?.missing === '周期');
 
 // 提前续费（按日程续费会产生「未来的 last_renewed」，0017 之前不可能出现的合法状态）：
 // 本期还没开始，照旧画进度条就是「剩 35 天 / 30」配一根空槽，看着像算错了
-await patch(`/api/items/${acItem.id}`, { ...acRow2, cycle: 'days', cycle_days: 30, last_renewed: rfDay(5) });
+await patch(`/api/items/${acItem.id}`, { ...acRow2, cycle: 'days', cycle_days: 30, last_renewed: day(5) });
 await evl(`loadAll()`);
 await sleep(800);
 await evl(`switchTab('${acColl.key}')`);
@@ -2431,7 +2429,7 @@ const acLeft = (await evl(
   `document.querySelector('#${acColl.key}-body tr[data-id="${acItem.id}"] td[data-k="left"]')?.textContent || ''`))
   .replace(/\s+/g, ' ');
 check('本期还没开始时不画进度条，改说清本期哪天起算',
-  acLeft.includes('剩 35 天') && acLeft.includes(rfDay(5)) && !acLeft.includes('/ 30'), acLeft);
+  acLeft.includes('剩 35 天') && acLeft.includes(day(5)) && !acLeft.includes('/ 30'), acLeft);
 // 拍在该看的状态下：表格在页面下半，不滚过去截出来的是首页那一屏
 await evl(`document.querySelector('#${acColl.key}-body tr[data-id="${acItem.id}"]')?.scrollIntoView({ block: 'center' })`);
 await sleep(400);
