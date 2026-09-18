@@ -149,6 +149,10 @@ async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
 
 // 改列的显示名与是否默认上表；显示名纯属呈现，引擎字段也可以改
 async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value>) -> R {
+    // 列类型建后不可改。此前带 ftype 的请求被静默忽略——既不改也不说，调用方以为改成了
+    if b.get("ftype").is_some() {
+        return Err(bad("列类型建后不可改").into());
+    }
     let name = s(&b, "name").ok_or_else(|| bad("列名不能为空"))?;
     let conn = app.db.lock().unwrap();
     let n = match b.get("shown") {
@@ -449,4 +453,47 @@ fn rewrite_extra(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use std::sync::{Arc, Mutex};
+    use tower::util::ServiceExt;
+
+    /// 列类型建后不可改是既定行为；带 `ftype` 的更新此前被静默忽略——既不改也不说，
+    /// 调用方以为改成了。要 400 说明白，不能 200。
+    #[tokio::test]
+    async fn an_update_carrying_ftype_is_rejected_not_ignored() {
+        let db = Arc::new(Mutex::new(crate::db::fresh_in_memory().unwrap()));
+        let (id, ftype): (i64, String) = db
+            .lock()
+            .unwrap()
+            .query_row("SELECT id, ftype FROM fields WHERE tbl='subs' AND key='price'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        let put = |body: Value| {
+            let db = db.clone();
+            async move {
+                let app = router().with_state(App { db, data_dir: std::path::PathBuf::from(".") });
+                let req = Request::put(format!("/api/fields/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap();
+                app.oneshot(req).await.unwrap().status()
+            }
+        };
+        // 负向对照：只改显示名照常
+        assert_eq!(put(json!({ "name": "费用" })).await, StatusCode::OK);
+        assert_eq!(put(json!({ "name": "价格", "ftype": "text" })).await, StatusCode::BAD_REQUEST);
+        let now: (String, String) = db
+            .lock()
+            .unwrap()
+            .query_row("SELECT name, ftype FROM fields WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!(now, ("费用".into(), ftype), "被拒的请求一个字段也不该写");
+    }
 }
