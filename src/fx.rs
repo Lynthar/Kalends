@@ -109,7 +109,7 @@ pub const SOURCE_LABEL: &str = "欧洲央行参考汇率（Frankfurter）";
 const SOURCE_URL: &str = "https://api.frankfurter.dev/v1/latest?base=USD";
 
 /// 手动拉一次实时汇率：默认关着的出网，用户在设置页点一下才发生、不后台轮询。
-/// 走 notify::http_client 带上超时与 meta.proxy。
+/// 走 `notify::http_client` 带上超时与 `meta.proxy`。
 pub async fn refresh(conn: &crate::Db) -> Result<Value> {
     // 代理设置读不出来就整个不出网：折成空串等于绕过用户配的代理直连，而直连成功时无人知晓
     let proxy = {

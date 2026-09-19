@@ -289,7 +289,7 @@ fn holding(failures: usize, mins_since: f64) -> bool {
     }
 }
 
-/// 去重键原样：摘要那半 item_id 与 threshold 都是 None。
+/// 去重键原样：摘要那半 `item_id` 与 threshold 都是 None。
 type LogKey = (String, Option<i64>, String, Option<i64>, Channel);
 
 /// 已成功发出的通知（含折叠时记下的 `covered` 行，同样 `ok=1`）与正在退避的失败键。
@@ -425,7 +425,7 @@ struct TickInput<'a> {
 /// 决定这一轮要发什么。三条反直觉语义都在这里、各有单测钉着：① muted 不发逐项提醒
 /// 但**仍进摘要**（定案：摘要＝时间线全景，别"顺手补齐"）；② 补发折叠成一条（只发
 /// 最紧迫档，其余记 covered）；③ 逾期项只提醒一次（due 不变去重键就不变，此后靠摘要）。
-fn plan(inp: &TickInput) -> Vec<Pending> {
+fn plan(inp: &TickInput<'_>) -> Vec<Pending> {
     let mut out: Vec<Pending> = Vec::new();
     for &ch in inp.channels {
         for it in inp.ups {

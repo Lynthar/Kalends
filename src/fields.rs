@@ -16,7 +16,7 @@ use crate::App;
 pub(crate) const FTYPES: &[&str] =
     &["text", "num", "sel", "multi", "date", "tel", "url", "email"];
 
-/// tbl 是库键（字段值在 items.extra，按 collection_id 圈定）；库表已泛化，不再有按表名写死的映射。
+/// tbl 是库键（字段值在 `items.extra`，按 `collection_id` 圈定）；库表已泛化，不再有按表名写死的映射。
 fn owner(conn: &Connection, tbl: &str) -> anyhow::Result<i64> {
     conn.query_row("SELECT id FROM collections WHERE key=?1", [tbl], |r| r.get(0))
         .map_err(|_| bad(format!("未知表：{tbl}")))
@@ -34,7 +34,7 @@ pub fn router() -> Router<App> {
         .route("/api/fields/{id}", put(update).delete(delete_field))
 }
 
-/// 逐行改写时的定位条件：按 collection_id 圈定该库的行。
+/// 逐行改写时的定位条件：按 `collection_id` 圈定该库的行。
 fn scope(conn: &Connection, tbl: &str) -> anyhow::Result<(&'static str, String)> {
     let id = owner(conn, tbl)?;
     Ok(("items", format!("collection_id={id}")))
@@ -86,7 +86,7 @@ fn opts_array(b: &Value) -> Vec<Value> {
     out
 }
 
-fn field_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+fn field_json(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     let options: String = r.get(5)?;
     Ok(json!({
         "id": r.get::<_, i64>(0)?,

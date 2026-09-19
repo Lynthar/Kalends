@@ -45,7 +45,7 @@ pub fn router() -> Router<App> {
 const COLL_COLS: &str =
     "id,key,name,icon,due_anchor,subtitle,subline,verb,note_field,pos,builtin,renew_from";
 
-fn coll_row(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+fn coll_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(json!({
         "id": r.get::<_, i64>(0)?,
         "key": r.get::<_, String>(1)?,
@@ -574,7 +574,7 @@ async fn templates() -> R {
 
 /// 新建的库要能直接用：播一套默认字段集，锚点决定给哪一侧的日期字段，模板再加域字段。
 /// 词表常量要按 SQLite `json()` 的形态写成紧凑一行、与迁移 0008 逐字节一致，
-/// 模板对拍单测才对得上（serde_json 会按字母重排键，不能拿来压缩）。
+/// 模板对拍单测才对得上（`serde_json` 会按字母重排键，不能拿来压缩）。
 const STATUS_VOCAB: &str = r#"[{"v":"Active","spend":1,"alert":1,"timeline":1},{"v":"Planned","spend":0,"alert":0,"timeline":0},{"v":"Ending","spend":0,"alert":0,"timeline":1},{"v":"Ended","spend":0,"alert":0,"timeline":0}]"#;
 
 /// 三个续费库共用的六值词表：比通用词表多 Deferred（比价目录，记各档位供比较）
@@ -786,7 +786,7 @@ async fn remove(State(app): State<App>, Path(id): Path<i64>) -> R {
 const ITEM_COLS: &str = "id,collection_id,name,parent_id,status,price,currency,cycle,cycle_days,\
                          next_renewal,last_renewed,url,notes,logo,extra,created_at,updated_at,pos";
 
-pub fn item_row(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+pub fn item_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(json!({
         "id": r.get::<_, i64>(0)?,
         "collection_id": r.get::<_, i64>(1)?,
@@ -829,7 +829,7 @@ pub fn items_of(conn: &Connection, key: &str) -> anyhow::Result<Vec<Value>> {
     Ok(rows)
 }
 
-/// 到期日：due_anchor='next' 直接读下次续费日，否则从上次续费按周期推一步。
+/// 到期日：`due_anchor='next'` 直接读下次续费日，否则从上次续费按周期推一步。
 pub fn due_of(r: &Value, anchor: &str) -> Option<NaiveDate> {
     engine::due_from(
         anchor,
@@ -932,7 +932,7 @@ pub fn normalize_currency(raw: &str) -> anyhow::Result<String> {
 
 /// 域名部分：url 值渲染与取图标都用它（`https://a.com/x?y` → `a.com`）。
 pub fn url_host(raw: &str) -> Option<String> {
-    let rest = raw.split_once("://").map(|x| x.1).unwrap_or(raw);
+    let rest = raw.split_once("://").map_or(raw, |x| x.1);
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
     let host = host.split('@').next_back().unwrap_or(host); // 去掉 user:pass@
     (!host.is_empty() && host.contains('.')).then(|| host.to_lowercase())
@@ -978,17 +978,17 @@ fn item_values(b: &Value) -> anyhow::Result<Vec<rusqlite::types::Value>> {
     let name = s(b, "name").unwrap_or_default();
     Ok(vec![
         V::from(name),
-        i(b, "parent_id").map(V::from).unwrap_or(V::Null),
+        i(b, "parent_id").map_or(V::Null, V::from),
         V::from(s(b, "status").unwrap_or_else(|| "Planned".into())),
-        f(b, "price").map(V::from).unwrap_or(V::Null),
-        s(b, "currency").map(V::from).unwrap_or(V::Null),
-        s(b, "cycle").map(V::from).unwrap_or(V::Null),
-        i(b, "cycle_days").map(V::from).unwrap_or(V::Null),
-        s(b, "next_renewal").map(V::from).unwrap_or(V::Null),
-        s(b, "last_renewed").map(V::from).unwrap_or(V::Null),
-        s(b, "url").map(V::from).unwrap_or(V::Null),
-        s(b, "notes").map(V::from).unwrap_or(V::Null),
-        extra_str(b).map(V::from).unwrap_or(V::Null),
+        f(b, "price").map_or(V::Null, V::from),
+        s(b, "currency").map_or(V::Null, V::from),
+        s(b, "cycle").map_or(V::Null, V::from),
+        i(b, "cycle_days").map_or(V::Null, V::from),
+        s(b, "next_renewal").map_or(V::Null, V::from),
+        s(b, "last_renewed").map_or(V::Null, V::from),
+        s(b, "url").map_or(V::Null, V::from),
+        s(b, "notes").map_or(V::Null, V::from),
+        extra_str(b).map_or(V::Null, V::from),
     ])
 }
 
@@ -1220,7 +1220,7 @@ async fn items_bulk_delete(State(app): State<App>, Json(b): Json<Value>) -> R {
 }
 
 /// 记一笔续费：写台账并按库的到期模型推进日期。
-/// anchor='next' 推进 next_renewal（逾期则连推到今天之后），anchor='last' 把上次续费记为今天。
+/// `anchor='next'` 推进 `next_renewal`（逾期则连推到今天之后），`anchor='last'` 把上次续费记为今天。
 type RenewRow = (
     String,
     String,
@@ -1712,7 +1712,7 @@ async fn logo_fetch(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<V
     }
     // 协议沿用条目自己那个网址：恒拼 https 的话，http-only 站点每条路径都在做
     // TLS 握手、全数"连不上"，报出来的方向还全错
-    let scheme = full.split_once("://").map(|x| x.0).unwrap_or("https").to_string();
+    let scheme = full.split_once("://").map_or("https", |x| x.0).to_string();
     let started = std::time::Instant::now();
     let mut last = String::from("没找到图标");
     // 先问网页自己：多数站点的图标不在 /favicon.ico，而是 <link rel="icon"> 指到别处。

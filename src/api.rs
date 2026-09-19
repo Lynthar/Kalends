@@ -236,7 +236,7 @@ async fn ledger_list(State(app): State<App>) -> R {
     Ok(Json(json!(rows)))
 }
 
-/// 通知投递记录（最新 200 条），notification_log 唯一的读路径。covered 记账行原样吐出——
+/// 通知投递记录（最新 200 条），`notification_log` 唯一的读路径。covered 记账行原样吐出——
 /// 去重语义的核对要靠这里看到全部行，过滤是呈现层的事；条目名回查当前条目，删了就取不到。
 pub(crate) fn notify_log_rows(conn: &rusqlite::Connection) -> anyhow::Result<Vec<Value>> {
     let mut stmt = conn.prepare(
@@ -506,7 +506,7 @@ mod tests {
         assert_eq!(mask_secret("fx.display", "CNY"), "CNY");
     }
 
-    /// 通知记录是 notification_log 唯一的读路径：最新在前、covered 行不缺席、
+    /// 通知记录是 `notification_log` 唯一的读路径：最新在前、covered 行不缺席、
     /// 条目名回查得到就带上；条目删了名字取不到，回落为 null 而不是错行。
     #[test]
     fn the_notify_log_reads_back_everything_including_covered_rows() {

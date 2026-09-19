@@ -101,7 +101,7 @@ pub fn seed_defaults(conn: &Connection) -> Result<()> {
 }
 
 /// 每个迁移单独一个事务：搬数据的迁移半途失败时要么整个生效、要么原样退回，
-/// user_version 也跟着一起提交，不会出现"表建了但版本没推进"的中间态。
+/// `user_version` 也跟着一起提交，不会出现"表建了但版本没推进"的中间态。
 fn migrate(conn: &Connection) -> Result<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     // 版本比这个二进制认识的还高＝这份数据是更新的 Kalends 写的（多半是回滚了部署）。

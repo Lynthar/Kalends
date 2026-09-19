@@ -151,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 设置 auth.pin 后，/api/* 与 /logos/* 需要 X-Kalends-Pin 头或 kalends_pin cookie；
+/// 设置 auth.pin 后，/api/* 与 /logos/* 需要 X-Kalends-Pin 头或 `kalends_pin` cookie；
 /// 静态页与 /calendar.ics（自带令牌）不拦。
 async fn pin_gate(State(app): State<App>, req: Request, next: Next) -> Response {
     let path = req.uri().path();

@@ -33,8 +33,8 @@ pub fn advance(date: NaiveDate, cycle: &str, cycle_days: Option<i64>) -> Option<
     advance_n(date, cycle, cycle_days, 1)
 }
 
-/// 到期日的唯一实现：库按 due_anchor 决定是直接读下次续费日，还是从上次续费推一期。
-/// 到期时间线（engine）与库列表（collections::due_of）都走这里，不许再长出第二份。
+/// 到期日的唯一实现：库按 `due_anchor` 决定是直接读下次续费日，还是从上次续费推一期。
+/// 到期时间线（engine）与库列表（`collections::due_of`）都走这里，不许再长出第二份。
 pub fn due_from(
     anchor: &str,
     cycle: &str,
@@ -232,7 +232,7 @@ struct Row {
 }
 
 impl Row {
-    /// 到期日：库按 due_anchor 决定是直接读下次续费日，还是从上次续费按周期推。
+    /// 到期日：库按 `due_anchor` 决定是直接读下次续费日，还是从上次续费按周期推。
     fn due(&self) -> Option<NaiveDate> {
         due_from(
             &self.due_anchor,

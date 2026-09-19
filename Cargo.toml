@@ -31,6 +31,7 @@ tempfile = "3"
 [lints.rust]
 unsafe_code = "forbid"
 unused = { level = "deny", priority = -1 }
+rust_2018_idioms = { level = "deny", priority = -1 }
 
 # 从 clippy::pedantic 里挑的：留下的都能在本 crate 打到，且每条现在都是绿的
 [lints.clippy]
@@ -47,6 +48,7 @@ default_trait_access = "deny"
 doc_broken_link = "deny"
 doc_comment_double_space_linebreaks = "deny"
 doc_link_with_quotes = "deny"
+doc_markdown = "deny"
 duration_suboptimal_units = "deny"
 elidable_lifetime_names = "deny"
 enum_glob_use = "deny"
@@ -89,6 +91,7 @@ manual_is_variant_and = "deny"
 manual_let_else = "deny"
 manual_midpoint = "deny"
 manual_string_new = "deny"
+map_unwrap_or = "deny"
 match_bool = "deny"
 match_same_arms = "deny"
 match_wild_err_arm = "deny"
