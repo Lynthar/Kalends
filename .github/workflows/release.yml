@@ -27,6 +27,10 @@ jobs:
           test "$crate" = "$tag" || { echo "Cargo.toml $crate != tag $tag"; exit 1; }
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --locked
+      # 接口契约那 49 格：只要二进制和 runner 自带的 node（脚本零依赖、不开浏览器）。
+      # 浏览器套件不进来——它们要 chromium，而这一档只拦二进制的接口行为变没变。
+      - run: cargo build --locked
+      - run: node scripts/e2e/run.mjs api
 
   build:
     needs: gates
