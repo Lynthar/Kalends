@@ -2360,4 +2360,511 @@ mod tests {
         assert!(h("<p>没有 link 标签</p>").is_empty());
     }
 
+    fn fresh() -> Connection {
+        crate::db::fresh_in_memory().unwrap()
+    }
+
+    fn coll(conn: &Connection, key: &str) -> i64 {
+        coll_id(conn, key).unwrap()
+    }
+
+    fn one<T: rusqlite::types::FromSql>(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> T {
+        conn.query_row(sql, p, |r| r.get(0)).unwrap()
+    }
+
+    /// 新库键越过一切"曾经用过"的编号：现存的库、台账与通知日志里的 kind 都算。
+    /// 拿 rowid 派生的话，删掉的库会把 kind 连同旧账一起留给下一个新库。
+    #[test]
+    fn next_collection_key_skips_every_number_ever_used() {
+        let conn = fresh();
+        assert_eq!(next_coll_key(&conn).unwrap(), "k1");
+        conn.execute("INSERT INTO collections(key,name,pos) VALUES('k5','x',9)", []).unwrap();
+        assert_eq!(next_coll_key(&conn).unwrap(), "k6");
+        conn.execute("INSERT INTO renewal_ledger(kind,item_id,renewed_at) VALUES('k9',1,'2026-01-01')", []).unwrap();
+        assert_eq!(next_coll_key(&conn).unwrap(), "k10");
+        conn.execute(
+            "INSERT INTO notification_log(kind,item_id,channel,threshold_days,due_date,ok)
+             VALUES('k12',1,'telegram',7,'2026-01-01',1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(next_coll_key(&conn).unwrap(), "k13");
+    }
+
+    /// 首页与到期时间线靠这份清单显示库名与动作说法：预置三库按 pos 序、每行带齐属性。
+    #[test]
+    fn collections_lists_the_builtin_three_in_position_order() {
+        let rows = collections(&fresh()).unwrap();
+        let keys: Vec<&str> = rows.iter().map(|r| r["key"].as_str().unwrap()).collect();
+        assert_eq!(keys, ["subs", "sims", "vps"]);
+        for r in &rows {
+            assert!(r["builtin"] == json!(true) && r["id"].is_i64() && r["pos"].is_i64(), "{r}");
+            assert!(ANCHORS.contains(&r["due_anchor"].as_str().unwrap()), "{r}");
+            assert!(RENEW_FROMS.contains(&r["renew_from"].as_str().unwrap()), "{r}");
+        }
+    }
+
+    /// 模板表的规矩：id 唯一非空、选择器要显示的 label 与 desc 非空；域字段键唯一、键与名非空、
+    /// 不撞通用字段；带预置选项的必须是词表列（只给封闭词表预置选项）；subline / subtitle /
+    /// `note_field` 指向的字段要真在模板里。声明的调整（改名、上不上表）落表后要一字不差。
+    #[test]
+    fn template_declarations_are_coherent_and_land_as_declared() {
+        let conn = fresh();
+        let mut ids = std::collections::HashSet::new();
+        for t in TEMPLATES {
+            assert!(!t.id.is_empty() && ids.insert(t.id), "模板 id 重复或为空：{}", t.id);
+            assert!(!t.label.is_empty() && !t.desc.is_empty(), "{}：选择器要显示 label 与 desc", t.id);
+            assert!(ANCHORS.contains(&t.anchor) && RENEW_FROMS.contains(&t.renew_from), "{}", t.id);
+            let tbl = format!("chk_{}", t.id);
+            seed_fields(&conn, &tbl, t.anchor, Some(t)).unwrap();
+            let generic: Vec<String> = {
+                let mut st = conn
+                    .prepare("SELECT key FROM fields WHERE tbl=?1 AND builtin=1")
+                    .unwrap();
+                st.query_map([&tbl], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+            };
+            for (k, name, shown) in t.base {
+                assert!(generic.iter().any(|g| g == k), "{}：base 调整了这个到期模型不会播下的字段 {k}", t.id);
+                let (got_name, got_shown): (String, i64) = conn
+                    .query_row("SELECT name, shown FROM fields WHERE tbl=?1 AND key=?2", params![tbl, k], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })
+                    .unwrap();
+                if !name.is_empty() {
+                    assert_eq!(got_name, *name, "{}：{k} 的显示名没落表", t.id);
+                }
+                assert_eq!(got_shown, *shown, "{}：{k} 的上表设置没落表", t.id);
+            }
+            let mut keys = std::collections::HashSet::new();
+            for f in t.extra {
+                assert!(!f.key.is_empty() && !f.name.is_empty(), "{}：域字段键与名不能为空", t.id);
+                assert!(keys.insert(f.key) && !generic.iter().any(|g| g == f.key), "{}：域字段键 {} 重复或撞上通用字段", t.id, f.key);
+                assert!(f.options.is_empty() || matches!(f.ftype, "sel" | "multi"), "{}：{} 不是词表列却带预置选项", t.id, f.key);
+                let (name, ftype, shown, builtin): (String, String, i64, i64) = conn
+                    .query_row(
+                        "SELECT name, ftype, shown, builtin FROM fields WHERE tbl=?1 AND key=?2",
+                        params![tbl, f.key],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )
+                    .unwrap();
+                assert_eq!((name.as_str(), ftype.as_str(), shown, builtin), (f.name, f.ftype, f.shown, 0), "{}：{}", t.id, f.key);
+            }
+            for (what, k) in [("subline", t.subline), ("subtitle", t.subtitle), ("note_field", t.note_field)] {
+                assert!(k.is_empty() || t.extra.iter().any(|f| f.key == k), "{}：{what} 指向不存在的字段 {k}", t.id);
+            }
+        }
+    }
+
+    /// 空白模板播通用四值状态词表，续费三库多出 Deferred（比价目录）与 Unused（未启用）；
+    /// 语义标记随词表一起落：Active 三项全开、Ending 只上时间线、其余全关。
+    #[test]
+    fn seeded_status_vocabularies_carry_their_semantics() {
+        let conn = fresh();
+        let vocab = |tpl: &str, anchor: &str| -> Vec<Value> {
+            let tbl = format!("v_{tpl}");
+            seed_fields(&conn, &tbl, anchor, template(tpl)).unwrap();
+            let options: String = one(&conn, "SELECT options FROM fields WHERE tbl=?1 AND key='status'", [&tbl]);
+            serde_json::from_str(&options).unwrap()
+        };
+        let vals = |opts: &[Value]| opts.iter().map(|o| o["v"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let blank = vocab("blank", "last");
+        assert_eq!(vals(&blank), ["Active", "Planned", "Ending", "Ended"]);
+        let subs = vocab("subs", "next");
+        assert_eq!(vals(&subs), ["Active", "Planned", "Deferred", "Unused", "Ending", "Ended"]);
+        let sem = |opts: &[Value], v: &str| {
+            let o = opts.iter().find(|o| o["v"] == v).unwrap();
+            (o["spend"] == 1, o["alert"] == 1, o["timeline"] == 1)
+        };
+        for opts in [&blank, &subs] {
+            assert_eq!(sem(opts, "Active"), (true, true, true));
+            assert_eq!(sem(opts, "Ending"), (false, false, true));
+            assert_eq!(sem(opts, "Planned"), (false, false, false));
+        }
+        assert_eq!(sem(&subs, "Deferred"), (false, false, false));
+        assert_eq!(sem(&subs, "Unused"), (false, false, false));
+    }
+
+    /// 子行只有两层且不跨库：自己当自己的父行、跨库、挂到已是子行的行下（三层）、
+    /// 已有子行的条目再挂到别人下——四条各拦一次；父行不存在按 404 级错误。
+    #[test]
+    fn parent_links_are_limited_to_two_levels_within_one_collection() {
+        let conn = fresh();
+        let (subs, sims) = (coll(&conn, "subs"), coll(&conn, "sims"));
+        let svc = insert_item(&conn, subs, &json!({ "name": "服务" })).unwrap();
+        let tier = insert_item(&conn, subs, &json!({ "name": "档位", "parent_id": svc })).unwrap();
+        assert!(insert_item(&conn, subs, &json!({ "name": "孙", "parent_id": tier })).is_err(), "三层");
+        assert!(insert_item(&conn, sims, &json!({ "name": "跨库", "parent_id": svc })).is_err(), "跨库");
+        assert!(insert_item(&conn, subs, &json!({ "name": "野父", "parent_id": 9999 })).is_err(), "父行不存在");
+        assert!(update_item(&conn, svc, &json!({ "parent_id": svc })).is_err(), "自引用");
+        let other = insert_item(&conn, subs, &json!({ "name": "别人" })).unwrap();
+        assert!(update_item(&conn, svc, &json!({ "parent_id": other })).is_err(), "已有子行的不能再当子行");
+        // 换到另一个顶层父行、或回到顶层，都是合法的两层
+        update_item(&conn, tier, &json!({ "parent_id": other })).unwrap();
+        update_item(&conn, tier, &json!({ "parent_id": null })).unwrap();
+        assert_eq!(one::<Option<i64>>(&conn, "SELECT parent_id FROM items WHERE id=?1", [tier]), None);
+    }
+
+    /// 批量端点的 ids：整数数组照收，掺了非整数、空数组、没这个键都整体拒——
+    /// 静默滤掉等于「说删 5 个、实际删 3 个」还不吭声。
+    #[test]
+    fn id_lists_are_all_or_nothing() {
+        assert_eq!(id_list(&json!({ "ids": [3, 1, 2] })).unwrap(), vec![3, 1, 2]);
+        for bad_body in [json!({ "ids": [1, "2"] }), json!({ "ids": [] }), json!({}), json!({ "ids": "1,2" }), json!({ "ids": [1.5] })] {
+            assert!(id_list(&bad_body).is_err(), "{bad_body}");
+        }
+    }
+
+    /// 一个库的条目带上按它的到期模型算出的 `due` 与 `days_left`：`next` 直接读下次续费日，
+    /// `last` 从上次续费按周期推；算不出的给 null 而不是丢行；库不存在是错误。
+    #[test]
+    fn items_carry_due_and_days_left_by_the_collection_anchor() {
+        let conn = fresh();
+        let today = engine::today();
+        let (subs, sims) = (coll(&conn, "subs"), coll(&conn, "sims"));
+        let in3 = (today + chrono::Days::new(3)).to_string();
+        insert_item(&conn, subs, &json!({ "name": "A", "next_renewal": in3 })).unwrap();
+        let ago10 = (today - chrono::Days::new(10)).to_string();
+        insert_item(&conn, sims, &json!({ "name": "S", "cycle": "days", "cycle_days": 30, "last_renewed": ago10 })).unwrap();
+        insert_item(&conn, sims, &json!({ "name": "无日期" })).unwrap();
+        let find = |rows: &[Value], name: &str| rows.iter().find(|r| r["name"] == name).cloned().unwrap();
+        let a = find(&items_of(&conn, "subs").unwrap(), "A");
+        assert_eq!((a["due"].clone(), a["days_left"].clone()), (json!(in3), json!(3)));
+        let sims_rows = items_of(&conn, "sims").unwrap();
+        let s = find(&sims_rows, "S");
+        assert_eq!((s["due"].clone(), s["days_left"].clone()), (json!((today + chrono::Days::new(20)).to_string()), json!(20)));
+        let none = find(&sims_rows, "无日期");
+        assert!(none["due"].is_null() && none["days_left"].is_null(), "{none}");
+        assert!(items_of(&conn, "nope").is_err());
+    }
+
+    /// 删条目连它的图标文件一起清；行不存在是幂等成功。
+    #[test]
+    fn deleting_an_item_removes_its_row_and_its_logo_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = fresh();
+        let app = App {
+            db: std::sync::Arc::new(std::sync::Mutex::new(Connection::open_in_memory().unwrap())),
+            data_dir: dir.path().to_path_buf(),
+        };
+        let id = insert_item(&conn, coll(&conn, "subs"), &json!({ "name": "有图" })).unwrap();
+        let name = set_logo(&app, &conn, id, "png", b"\x89PNG\r\n\x1a\n....").unwrap();
+        let file = dir.path().join("logos").join(&name);
+        assert!(file.is_file());
+        assert_eq!(one::<Option<String>>(&conn, "SELECT logo FROM items WHERE id=?1", [id]), Some(name.clone()));
+        delete_item(&app, &conn, id).unwrap();
+        assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM items WHERE id=?1", [id]), 0);
+        assert!(!file.exists(), "图标文件成了孤儿");
+        delete_item(&app, &conn, id).unwrap();
+    }
+
+    /// 续费＝写一笔台账 + 按库的到期模型推日期，响应回 due 让界面如实报"下次到期"。
+    /// 台账默认取条目的金额与币种、当场钉进条目名与库名；`last` 锚点 + `today` 起算把上次续费记成今天。
+    #[test]
+    fn renewing_writes_the_ledger_and_moves_the_anchor_date() {
+        let conn = fresh();
+        let today = engine::today();
+        let subs = coll(&conn, "subs");
+        let due = today + chrono::Days::new(10);
+        let id = insert_item(
+            &conn,
+            subs,
+            &json!({ "name": "Netflix", "price": 15.5, "currency": "USD", "cycle": "monthly", "next_renewal": due.to_string() }),
+        )
+        .unwrap();
+        let out = renew_item(&conn, id, &json!({ "note": "刷卡" })).unwrap();
+        let next = engine::advance(due, "monthly", None).unwrap().to_string();
+        assert_eq!(out, json!({ "next_renewal": next, "due": next }));
+        assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE id=?1", [id]), next);
+        let ledger: (String, Option<f64>, String, String, String, String) = conn
+            .query_row(
+                "SELECT renewed_at, amount, currency, note, item_name, coll_name FROM renewal_ledger WHERE kind='subs' AND item_id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+            .unwrap();
+        let coll_name: String = one(&conn, "SELECT name FROM collections WHERE key='subs'", []);
+        assert_eq!(ledger, (today.to_string(), Some(15.5), "USD".into(), "刷卡".into(), "Netflix".into(), coll_name));
+        // 传了金额就记传的
+        renew_item(&conn, id, &json!({ "amount": 12 })).unwrap();
+        assert_eq!(one::<Option<f64>>(&conn, "SELECT amount FROM renewal_ledger WHERE item_id=?1 ORDER BY id DESC LIMIT 1", [id]), Some(12.0));
+
+        // SIM 保号：上次续费记成今天，窗口从今天重算
+        let sim = insert_item(
+            &conn,
+            coll(&conn, "sims"),
+            &json!({ "name": "SIM", "cycle": "days", "cycle_days": 30, "last_renewed": "2026-01-01" }),
+        )
+        .unwrap();
+        let out = renew_item(&conn, sim, &json!({})).unwrap();
+        assert_eq!(out["last_renewed"], json!(today.to_string()));
+        assert_eq!(out["due"], json!((today + chrono::Days::new(30)).to_string()));
+        assert!(renew_item(&conn, 9999, &json!({})).is_err());
+    }
+
+    async fn call(router: &Router, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+        use tower::util::ServiceExt;
+        let req = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.map_or_else(String::new, |b| b.to_string())))
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    /// 库路由 + 字段路由共用一个库，好在建库 / 改库之后回读字段注册表。
+    fn routed(conn: Connection, data_dir: &std::path::Path) -> Router {
+        router().merge(crate::fields::router()).with_state(App {
+            db: std::sync::Arc::new(std::sync::Mutex::new(conn)),
+            data_dir: data_dir.to_path_buf(),
+        })
+    }
+
+    /// 建库：到期模型与续费起算方式只认已知值；键由服务端编；模板值只在请求压根没提这个键时兜底，
+    /// 留空的属性落成 null 而不是 ""（空串 verb 会把「续费」回落顶掉）。
+    #[tokio::test]
+    async fn creating_a_collection_validates_the_model_and_fills_from_the_template() {
+        let r = routed(fresh(), std::path::Path::new("."));
+        for bad_body in [
+            json!({ "name": "x", "due_anchor": "weird" }),
+            json!({ "name": "x", "renew_from": "whenever" }),
+            json!({ "name": "x", "template": "nope" }),
+            json!({ "due_anchor": "next" }),
+        ] {
+            assert_eq!(call(&r, "POST", "/api/collections", Some(bad_body.clone())).await.0, StatusCode::BAD_REQUEST, "{bad_body}");
+        }
+        let (st, c) = call(&r, "POST", "/api/collections", Some(json!({ "name": "我的库" }))).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(c["key"], json!("k1"));
+        assert_eq!((c["due_anchor"].clone(), c["renew_from"].clone()), (json!("last"), json!("schedule")));
+        assert!(c["icon"].is_null() && c["verb"].is_null() && c["subtitle"].is_null(), "{c}");
+        let (st, d) = call(&r, "POST", "/api/collections", Some(json!({ "name": "证件", "template": "docs", "icon": "" }))).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!((d["key"].clone(), d["due_anchor"].clone(), d["verb"].clone()), (json!("k2"), json!("next"), json!("换证")));
+        assert!(d["icon"].is_null(), "界面清空图标传的 \"\" 不该被模板顶回来：{d}");
+    }
+
+    /// 改库：同一套取值校验；换到期模型时把新锚点那侧的日期字段补进注册表，重复切换幂等。
+    #[tokio::test]
+    async fn updating_a_collection_registers_the_other_anchors_date_field() {
+        let r = routed(fresh(), std::path::Path::new("."));
+        let (_, c) = call(&r, "POST", "/api/collections", Some(json!({ "name": "我的库" }))).await;
+        let (id, key) = (c["id"].as_i64().unwrap(), c["key"].as_str().unwrap().to_string());
+        let date_fields = |r: &Router| {
+            let (r, key) = (r.clone(), key.clone());
+            async move {
+                let (_, fields) = call(&r, "GET", "/api/fields", None).await;
+                let mut keys: Vec<String> = fields
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|f| f["tbl"] == key && f["ftype"] == "date")
+                    .map(|f| f["key"].as_str().unwrap().to_string())
+                    .collect();
+                keys.sort();
+                keys
+            }
+        };
+        assert_eq!(date_fields(&r).await, ["last_renewed"]);
+        let path = format!("/api/collections/{id}");
+        for bad_body in [json!({ "due_anchor": "weird" }), json!({ "renew_from": "x" })] {
+            assert_eq!(call(&r, "PUT", &path, Some(bad_body.clone())).await.0, StatusCode::BAD_REQUEST, "{bad_body}");
+        }
+        assert_eq!(call(&r, "PUT", &path, Some(json!({ "due_anchor": "next" }))).await.0, StatusCode::OK);
+        assert_eq!(date_fields(&r).await, ["last_renewed", "next_renewal"]);
+        assert_eq!(call(&r, "PUT", &path, Some(json!({ "due_anchor": "next" }))).await.0, StatusCode::OK);
+        assert_eq!(date_fields(&r).await, ["last_renewed", "next_renewal"]);
+        assert_eq!(call(&r, "PUT", "/api/collections/9999", Some(json!({ "name": "x" }))).await.0, StatusCode::NOT_FOUND);
+    }
+
+    /// 上传图标：格式白名单、非空且 ≤1 MB、魔数与声明格式一致；换图时删旧文件；
+    /// 条目不存在按 404 级错误。清除图标连文件一起清。
+    #[test]
+    fn logo_uploads_are_checked_and_replace_the_old_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = fresh();
+        let app = App {
+            db: std::sync::Arc::new(std::sync::Mutex::new(Connection::open_in_memory().unwrap())),
+            data_dir: dir.path().to_path_buf(),
+        };
+        let id = insert_item(&conn, coll(&conn, "subs"), &json!({ "name": "图" })).unwrap();
+        let png = b"\x89PNG\r\n\x1a\n....".to_vec();
+        assert!(set_logo(&app, &conn, id, "bmp", &png).is_err(), "不支持的格式");
+        assert!(set_logo(&app, &conn, id, "png", b"").is_err(), "空文件");
+        assert!(set_logo(&app, &conn, id, "png", b"GIF89a..").is_err(), "内容与声明格式不符");
+        let mut big = png.clone();
+        big.resize(1_000_001, 0);
+        assert!(set_logo(&app, &conn, id, "png", &big).is_err(), "超过 1 MB");
+        big.truncate(1_000_000);
+        assert!(set_logo(&app, &conn, id, "png", &big).is_ok(), "恰好 1 MB 放行");
+        assert!(set_logo(&app, &conn, 9999, "png", &png).is_err(), "条目不存在");
+
+        let first = set_logo(&app, &conn, id, "png", &png).unwrap();
+        let logos = dir.path().join("logos");
+        assert!(logos.join(&first).is_file());
+        // 换一张不同名的（格式不同就不会同名）：旧文件删掉、列指向新文件
+        let second = set_logo(&app, &conn, id, "gif", b"GIF89a....").unwrap();
+        assert_ne!(first, second);
+        assert!(!logos.join(&first).exists(), "旧图标成了孤儿");
+        assert!(logos.join(&second).is_file());
+        assert_eq!(one::<Option<String>>(&conn, "SELECT logo FROM items WHERE id=?1", [id]), Some(second.clone()));
+        clear_logo(&app, &conn, id).unwrap();
+        assert_eq!(one::<Option<String>>(&conn, "SELECT logo FROM items WHERE id=?1", [id]), None);
+        assert!(!logos.join(&second).exists());
+        assert!(clear_logo(&app, &conn, 9999).is_err());
+    }
+
+    /// `/logos/{name}`：文件名先过白名单再拼路径，认不得的名字与不存在的文件都是 404；
+    /// 类型按扩展名给、带一周缓存与 nosniff；SVG 另加 CSP sandbox（它能带脚本）。
+    #[tokio::test]
+    async fn logo_files_are_served_by_safe_name_with_the_right_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let logos = dir.path().join("logos");
+        std::fs::create_dir_all(&logos).unwrap();
+        for (name, bytes) in [
+            ("a.png", &b"\x89PNG"[..]),
+            ("b.webp", b"RIFF"),
+            ("c.svg", b"<svg/>"),
+            ("d.gif", b"GIF8"),
+            ("e.ico", b"\0\0\x01\0"),
+            ("f.jpg", b"\xFF\xD8\xFF"),
+        ] {
+            std::fs::write(logos.join(name), bytes).unwrap();
+        }
+        let r = routed(fresh(), dir.path());
+        let get = |p: String| {
+            let r = r.clone();
+            async move {
+                use tower::util::ServiceExt;
+                r.oneshot(axum::http::Request::get(p).body(axum::body::Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+            }
+        };
+        let hdr = |resp: &Response, h: header::HeaderName| resp.headers().get(h).and_then(|v| v.to_str().ok()).map(str::to_string);
+        for (name, mime) in [
+            ("a.png", "image/png"),
+            ("b.webp", "image/webp"),
+            ("c.svg", "image/svg+xml"),
+            ("d.gif", "image/gif"),
+            ("e.ico", "image/x-icon"),
+            ("f.jpg", "image/jpeg"),
+        ] {
+            let resp = get(format!("/logos/{name}")).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{name}");
+            assert_eq!(hdr(&resp, header::CONTENT_TYPE).as_deref(), Some(mime), "{name}");
+            assert_eq!(hdr(&resp, header::CACHE_CONTROL).as_deref(), Some("public, max-age=604800"), "{name}");
+            assert_eq!(hdr(&resp, header::X_CONTENT_TYPE_OPTIONS).as_deref(), Some("nosniff"), "{name}");
+            let csp = hdr(&resp, header::CONTENT_SECURITY_POLICY);
+            if name == "c.svg" {
+                assert!(csp.as_deref().is_some_and(|c| c.contains("sandbox")), "{name}: {csp:?}");
+            } else {
+                assert_eq!(csp, None, "{name}");
+            }
+        }
+        for miss in ["/logos/nope.png", "/logos/..%2Fkalends.db", "/logos/%E5%9B%BE.png"] {
+            assert_eq!(get(miss.to_string()).await.status(), StatusCode::NOT_FOUND, "{miss}");
+        }
+    }
+
+    /// 取图标的入口先看条目有没有网址、再过字面关——内网地址在发任何请求之前就被拒。
+    #[tokio::test]
+    async fn icon_fetch_refuses_local_targets_before_touching_the_network() {
+        let conn = fresh();
+        let subs = coll(&conn, "subs");
+        let bare = insert_item(&conn, subs, &json!({ "name": "没网址" })).unwrap();
+        let local = insert_item(&conn, subs, &json!({ "name": "内网", "url": "http://nas.local/" })).unwrap();
+        let r = routed(conn, std::path::Path::new("."));
+        let (st, out) = call(&r, "POST", &format!("/api/items/{bare}/logo/fetch"), Some(json!({}))).await;
+        assert_eq!((st, out["error"].as_str()), (StatusCode::BAD_REQUEST, Some("这个条目还没有网址")));
+        for (id, body) in [(local, json!({})), (bare, json!({ "url": "http://127.0.0.1:8080/x" })), (bare, json!({ "url": "10.0.0.5/favicon.ico" }))] {
+            let (st, out) = call(&r, "POST", &format!("/api/items/{id}/logo/fetch"), Some(body.clone())).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(out["error"], json!("只能从公网站点取图标"), "{body}");
+        }
+        assert_eq!(call(&r, "POST", "/api/items/9999/logo/fetch", Some(json!({}))).await.0, StatusCode::NOT_FOUND);
+    }
+
+    /// 字面关的其余出口：空主机、只有端口、广播地址、RFC 5737 文档段都不是可连的公网目标；
+    /// 字面 IP 直接钉住不查 DNS，内网字面量在 `resolve_public` 这一层同样过不去。
+    #[tokio::test]
+    async fn literal_hosts_are_pinned_without_dns_and_unroutable_ranges_are_refused() {
+        use std::net::{IpAddr, SocketAddr};
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        for no in ["", ":8080", "[]", "[::]"] {
+            assert!(!public_host_ok(no), "本该拦下 {no:?}");
+        }
+        for no in ["255.255.255.255", "192.0.2.1", "198.51.100.7", "203.0.113.9"] {
+            assert!(!public_ip_ok(&ip(no)), "本该拦下 {no}");
+        }
+        assert_eq!(resolve_public("1.1.1.1", 443).await, Some(SocketAddr::new(ip("1.1.1.1"), 443)));
+        assert_eq!(resolve_public("[2606:4700:4700::1111]", 80).await, Some(SocketAddr::new(ip("2606:4700:4700::1111"), 80)));
+        assert_eq!(resolve_public("10.0.0.5", 443).await, None);
+        assert_eq!(resolve_public("[::1]", 443).await, None);
+        assert_eq!(resolve_public("nas.local", 443).await, None);
+    }
+
+    /// RFC 6052 §2.2 的四种布局各抽一次：/48 与 /56 也要读得出嵌着的 10.0.0.5；
+    /// u 字节或后缀不为零的布局不成形，不能拿它的候选去否决一个成形布局里的公网地址。
+    #[test]
+    fn every_nat64_layout_is_read_and_malformed_layouts_do_not_count() {
+        use std::net::IpAddr;
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        // /48：v4 在字节 6,7,9,10（字节 8 是 u）；/56：v4 在字节 7,9,10,11
+        assert!(!public_ip_ok(&ip("64:ff9b:1:a00:0:500::")), "/48 布局里嵌着 10.0.0.5");
+        assert!(!public_ip_ok(&ip("64:ff9b:1:a:0:5::")), "/56 布局里嵌着 10.0.0.5");
+        // /96 布局里是 1.1.1.1；/48 布局读出来会是 10.0.0.0，但它的后缀不为零、不成形，不作数
+        assert!(public_ip_ok(&ip("64:ff9b:1:a00::1.1.1.1")));
+    }
+
+    /// 属性扫描按文档的规矩：属性名前要有分界（`hreflang` / `data-rel` 里的 rel 不算）、
+    /// `=` 两侧可有空白、值必须带引号；残缺的标签不 panic。
+    #[test]
+    fn attribute_scanning_respects_boundaries_and_quotes() {
+        let h = |s: &str| icon_links_in(s, "https", "x.com");
+        assert_eq!(h(r#"<link rel = "icon" href = "/sp.png">"#), vec!["/sp.png"]);
+        assert!(h(r#"<link hreflang="icon" href="/h.png">"#).is_empty(), "hreflang 里的 rel 不是属性");
+        assert!(h(r#"<link data-rel="icon" href="/d.png">"#).is_empty(), "data-rel 里的 rel 不是属性");
+        assert!(h(r#"<link rel=icon href="/u.png">"#).is_empty(), "不带引号的值不认");
+        assert!(h(r#"<link rel="icon" href="/x.png>"#).is_empty(), "引号没闭合");
+        for broken in ["<link rel", "<link rel=", "<link rel  ", "<link", "<"] {
+            assert!(h(broken).is_empty(), "{broken:?}");
+        }
+        assert_eq!(attr_value("link REL='icon' Href=\"/m.png\"", "href"), Some("/m.png"));
+        assert_eq!(attr_value("link rel='icon'", "href"), None);
+        // 最多取四条，多的丢掉
+        let many = r#"<link rel="icon" href="/n.png">"#.repeat(6);
+        assert_eq!(h(&many).len(), 4);
+    }
+
+    /// 只读前 `limit` 字节就收手：发现页只看 `<head>`，超出的部分不进内存。
+    #[tokio::test]
+    async fn body_head_stops_at_the_limit() {
+        let resp = |s: &'static str| reqwest::Response::from(axum::http::Response::new(s));
+        assert_eq!(body_head(resp("0123456789"), 4).await, b"0123");
+        assert_eq!(body_head(resp("0123456789"), 100).await, b"0123456789");
+        assert_eq!(body_head(resp(""), 4).await, b"");
+        assert_eq!(ICON_MAX, 2 * 1024 * 1024);
+        assert_eq!(PAGE_MAX, 512 * 1024);
+    }
+
+    /// 批量删除报真正删掉的条数，不是请求里的 id 个数；整批一个事务。
+    #[tokio::test]
+    async fn bulk_delete_reports_the_rows_actually_removed() {
+        let conn = fresh();
+        let subs = coll(&conn, "subs");
+        let a = insert_item(&conn, subs, &json!({ "name": "甲" })).unwrap();
+        let b = insert_item(&conn, subs, &json!({ "name": "乙" })).unwrap();
+        let r = routed(conn, std::path::Path::new("."));
+        let (st, out) = call(&r, "POST", "/api/items/bulk_delete", Some(json!({ "ids": [a, b, 9999] }))).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(out["deleted"], json!(2));
+        let (_, rows) = call(&r, "GET", "/api/collections/subs/items", None).await;
+        assert!(rows.as_array().unwrap().iter().all(|x| x["id"] != a && x["id"] != b));
+        assert_eq!(call(&r, "POST", "/api/items/bulk_delete", Some(json!({ "ids": [] }))).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(call(&r, "POST", "/api/items/bulk_delete", Some(json!({ "ids": [1, "2"] }))).await.0, StatusCode::BAD_REQUEST);
+    }
 }

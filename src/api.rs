@@ -546,4 +546,100 @@ mod tests {
         assert_eq!(payload["ok"], json!(false));
         assert_eq!(payload["counts"]["items"], json!(-1));
     }
+
+    /// 数据目录里的文件名只放行字母数字与 `. _ -`：`/logos/{name}` 与删文件都拼路径，
+    /// 放行分隔符或 `..` 就是一次任意文件读 / 删。
+    #[test]
+    fn safe_name_admits_plain_file_names_only() {
+        for ok in ["item-12-1700000000.png", "a.b_c-d", "X"] {
+            assert!(safe_name(ok), "{ok}");
+        }
+        for no in ["", "../x.png", "a/b.png", "a\\b.png", "a b.png", "图.png", "a:b", "a\0"] {
+            assert!(!safe_name(no), "{no:?} 不该放行");
+        }
+    }
+
+    /// 读侧的 extra 文本：解析得出对象才用，空、坏 JSON、非对象一律给 `{}`，
+    /// 别让一行坏数据把整张表的读取带崩。
+    #[test]
+    fn extra_json_reads_anything_but_an_object_as_empty() {
+        assert_eq!(extra_json(Some(r#"{"a":"甲"}"#.into())), json!({ "a": "甲" }));
+        assert_eq!(extra_json(None), json!({}));
+        assert_eq!(extra_json(Some(String::new())), json!({}));
+        assert_eq!(extra_json(Some("不是 JSON".into())), json!({}));
+        assert_eq!(extra_json(Some("[1,2]".into())), json!({}));
+        assert_eq!(extra_json(Some("\"串\"".into())), json!({}));
+    }
+
+    fn app_with(conn: rusqlite::Connection) -> App {
+        App {
+            db: std::sync::Arc::new(std::sync::Mutex::new(conn)),
+            data_dir: std::path::PathBuf::from("."),
+        }
+    }
+
+    async fn body_of(resp: axum::response::Response) -> Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    }
+
+    /// 容器探针与监控只看状态码：表读不出来必须 503，不能 200 + ok:false。
+    #[tokio::test]
+    async fn the_health_endpoint_turns_503_when_a_table_is_gone() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::util::ServiceExt;
+        let app = app_with(crate::db::fresh_in_memory().unwrap());
+        let router = core_router().with_state(app.clone());
+        let get = || Request::get("/api/health").body(Body::empty()).unwrap();
+        let resp = router.clone().oneshot(get()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_of(resp).await["ok"], json!(true));
+        app.db.lock().unwrap().execute_batch("DROP TABLE items").unwrap();
+        let resp = router.oneshot(get()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body_of(resp).await["ok"], json!(false));
+    }
+
+    /// `/calendar.ics` 自带令牌：没带、带错都是 401；带对了给 `text/calendar` 的日历。
+    /// 门在这一层而不在 PIN 网关（日历客户端不会带 PIN）。
+    #[tokio::test]
+    async fn the_calendar_feed_opens_only_to_the_right_token() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::util::ServiceExt;
+        let conn = crate::db::fresh_in_memory().unwrap();
+        conn.execute("INSERT INTO settings(key,value) VALUES('ics.token','abc123')", []).unwrap();
+        let router = renewals_router().with_state(app_with(conn));
+        let get = |p: &str| Request::get(p).body(Body::empty()).unwrap();
+        for denied in ["/calendar.ics", "/calendar.ics?token=", "/calendar.ics?token=abc124"] {
+            let resp = router.clone().oneshot(get(denied)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{denied}");
+        }
+        let resp = router.oneshot(get("/calendar.ics?token=abc123")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+            Some("text/calendar; charset=utf-8")
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert!(body.starts_with(b"BEGIN:VCALENDAR\r\n"), "{}", String::from_utf8_lossy(&body));
+    }
+
+    /// 请求本身的问题是 400 且带可读的 `error`：调用方要能看懂被拒的理由，
+    /// 而不是一个空串或一个 500。
+    #[tokio::test]
+    async fn a_client_error_is_a_400_carrying_its_reason() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::util::ServiceExt;
+        let router = core_router().with_state(app_with(crate::db::fresh_in_memory().unwrap()));
+        let req = Request::put("/api/settings")
+            .header("content-type", "application/json")
+            .body(Body::from("[1,2]"))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_of(resp).await["error"], json!("需要对象"));
+    }
 }

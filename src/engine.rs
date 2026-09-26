@@ -682,6 +682,153 @@ mod tests {
         assert_eq!(advance_n(d("2026-01-01"), "lifetime", None, 2), None);
     }
 
+    /// 月系数就是「一个月里有几个周期」：一月按 30.44 天（365.25 / 12）折，
+    /// 季 / 半年 / 两年是 1/3、1/6、1/24。
+    #[test]
+    fn monthly_factor_follows_the_period_length() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        assert!(close(monthly_factor("weekly", None).unwrap(), 30.44 / 7.0));
+        assert!(close(monthly_factor("quarterly", None).unwrap(), 1.0 / 3.0));
+        assert!(close(monthly_factor("semiannual", None).unwrap(), 1.0 / 6.0));
+        assert!(close(monthly_factor("biennial", None).unwrap(), 1.0 / 24.0));
+        // 半年付 60 ⇒ 每月 10；两年付 240 ⇒ 每月 10
+        assert!(close(60.0 * monthly_factor("semiannual", None).unwrap(), 10.0));
+        assert!(close(240.0 * monthly_factor("biennial", None).unwrap(), 10.0));
+    }
+
+    /// 语义标记在选项 JSON 里可能是 0/1、true/false 或字符串（接口收什么存什么）：
+    /// 非零数、true、非空且不是 "0"/"false" 的串算开，其余算关。
+    #[test]
+    fn semantic_flags_read_as_json_truthiness() {
+        for on in [json!(1), json!(2.5), json!(true), json!("1"), json!("yes")] {
+            assert!(truthy(Some(&on)), "{on}");
+        }
+        for off in [json!(0), json!(0.0), json!(false), json!(""), json!("0"), json!("false"), json!(null), json!([1])] {
+            assert!(!truthy(Some(&off)), "{off}");
+        }
+        assert!(!truthy(None));
+    }
+
+    fn seeded() -> Connection {
+        crate::db::fresh_in_memory().unwrap()
+    }
+
+    fn add(conn: &Connection, coll: &str, body: &Value) -> i64 {
+        let id: i64 = conn
+            .query_row("SELECT id FROM collections WHERE key=?1", [coll], |r| r.get(0))
+            .unwrap();
+        crate::collections::insert_item(conn, id, body).unwrap()
+    }
+
+    fn names(v: &[Value]) -> Vec<String> {
+        v.iter().map(|x| x["name"].as_str().unwrap().to_string()).collect()
+    }
+
+    /// 语义以词表选项上的标记为准：改了 Active 的 timeline 标记，它就从时间线上下来；
+    /// 没带标记的选项（用户手加的状态）按内置默认理解——未知值三项全关，`Ending` 只上时间线。
+    #[test]
+    fn status_semantics_come_from_the_vocabulary_flags_and_fall_back_to_builtin() {
+        let conn = seeded();
+        let due = (today() + Days::new(5)).to_string();
+        let mk = |name: &str, status: &str| {
+            add(&conn, "subs", &json!({ "name": name, "status": status, "price": 10, "currency": "USD", "cycle": "monthly", "next_renewal": due }));
+        };
+        mk("活", "Active");
+        mk("停", "Ending");
+        mk("寄", "待寄回");
+        let ups = upcoming(&conn).unwrap();
+        assert_eq!(names(&ups), ["活", "停"]);
+        assert_eq!(ups[0]["muted"], json!(false));
+        assert_eq!(ups[1]["muted"], json!(true), "Ending 在时间线上但不提醒");
+        assert_eq!(totals(&conn).unwrap(), [json!({ "currency": "USD", "monthly": 10.0, "annual": 120.0 })]);
+
+        // 词表里给「待寄回」加上标记：只上时间线、不计支出、不提醒；
+        // 把 Active 的时间线标记关掉：它应当从时间线上下来（语义是数据，不是字面量）
+        let opts: String = conn
+            .query_row("SELECT options FROM fields WHERE tbl='subs' AND key='status'", [], |r| r.get(0))
+            .unwrap();
+        let mut opts: Vec<Value> = serde_json::from_str(&opts).unwrap();
+        opts.push(json!({ "v": "待寄回", "spend": 0, "alert": "0", "timeline": true }));
+        for o in &mut opts {
+            if o["v"] == "Active" {
+                o["timeline"] = json!(0);
+            }
+        }
+        conn.execute(
+            "UPDATE fields SET options=?1 WHERE tbl='subs' AND key='status'",
+            [serde_json::to_string(&opts).unwrap()],
+        )
+        .unwrap();
+        let ups = upcoming(&conn).unwrap();
+        assert_eq!(names(&ups), ["停", "寄"]);
+        assert!(ups.iter().all(|u| u["muted"] == json!(true)));
+        assert_eq!(totals(&conn).unwrap().len(), 1, "Active 仍计支出");
+        // 词表存坏了（不是 JSON 数组）：整库回落内置默认
+        conn.execute("UPDATE fields SET options='坏掉' WHERE tbl='subs' AND key='status'", []).unwrap();
+        assert_eq!(names(&upcoming(&conn).unwrap()), ["活", "停"]);
+    }
+
+    /// 时间线按到期日升序、带剩余天数与库给的动作说法；`note_field` 有值才带 `action`，空串不带。
+    #[test]
+    fn upcoming_is_sorted_by_due_and_carries_verb_and_action() {
+        let conn = seeded();
+        let t = today();
+        let d = |n: u64| (t + Days::new(n)).to_string();
+        add(&conn, "subs", &json!({ "name": "远", "status": "Active", "next_renewal": d(30) }));
+        add(&conn, "subs", &json!({ "name": "近", "status": "Active", "next_renewal": d(2) }));
+        // SIM：verb 是「保号」，note_field 是 keepalive_action
+        add(&conn, "sims", &json!({ "name": "卡A", "status": "Active", "cycle": "days", "cycle_days": 10, "last_renewed": d(0), "extra": { "keepalive_action": "发条短信" } }));
+        add(&conn, "sims", &json!({ "name": "卡B", "status": "Active", "cycle": "days", "cycle_days": 11, "last_renewed": d(0), "extra": { "keepalive_action": "" } }));
+        let ups = upcoming(&conn).unwrap();
+        assert_eq!(names(&ups), ["近", "卡A", "卡B", "远"]);
+        assert_eq!(ups[0]["days_left"], json!(2));
+        assert_eq!(ups[0]["verb"], json!("续费"));
+        assert_eq!(ups[0]["due"], json!(d(2)));
+        assert_eq!(ups[0]["kind"], json!("subs"));
+        assert_eq!(ups[1]["verb"], json!("保号"));
+        assert_eq!(ups[1]["action"], json!("发条短信"));
+        assert_eq!(ups[2]["action"], Value::Null, "空串不算动作说明");
+        assert_eq!(ups[3]["cycle"], json!(""));
+    }
+
+    /// 该上时间线却算不出到期日的条目要被点名，并说清缺哪一项；买断与不上时间线的状态不算。
+    #[test]
+    fn undated_names_the_timeline_items_that_have_no_due_date() {
+        let conn = seeded();
+        add(&conn, "subs", &json!({ "name": "缺日期", "status": "Active", "cycle": "monthly" }));
+        add(&conn, "subs", &json!({ "name": "买断", "status": "Active", "cycle": "lifetime" }));
+        add(&conn, "subs", &json!({ "name": "未启用", "status": "Unused" }));
+        add(&conn, "subs", &json!({ "name": "有日期", "status": "Active", "next_renewal": "2030-01-01" }));
+        add(&conn, "sims", &json!({ "name": "缺周期", "status": "Ending", "last_renewed": "2026-01-01" }));
+        let list = undated(&conn).unwrap();
+        assert_eq!(names(&list), ["缺日期", "缺周期"]);
+        assert_eq!(list[0]["missing"], json!("下次续费日"));
+        assert_eq!(list[1]["missing"], json!("周期"));
+        assert_eq!(list[1]["kind"], json!("sims"));
+    }
+
+    /// 支出：只累加金额与币种同时在场、周期可折算的计支出条目，分币种给月 / 年两个数
+    /// （年 = 月 × 12，保留两位）；缺一半的单独点名，不计支出的状态不点名。
+    #[test]
+    fn totals_add_up_per_currency_and_uncounted_names_the_half_filled_ones() {
+        let conn = seeded();
+        add(&conn, "subs", &json!({ "name": "月", "status": "Active", "price": 10, "currency": "USD", "cycle": "monthly" }));
+        add(&conn, "subs", &json!({ "name": "年", "status": "Active", "price": 120, "currency": "usd", "cycle": "annual" }));
+        add(&conn, "subs", &json!({ "name": "季", "status": "Active", "price": 30, "currency": "CNY", "cycle": "quarterly" }));
+        add(&conn, "subs", &json!({ "name": "无币", "status": "Active", "price": 5, "cycle": "monthly" }));
+        add(&conn, "subs", &json!({ "name": "无周期", "status": "Active", "price": 5, "currency": "EUR" }));
+        add(&conn, "subs", &json!({ "name": "比价", "status": "Deferred", "price": 999, "currency": "USD", "cycle": "monthly" }));
+        add(&conn, "subs", &json!({ "name": "比价缺币", "status": "Deferred", "price": 999, "cycle": "monthly" }));
+        assert_eq!(
+            totals(&conn).unwrap(),
+            [json!({ "currency": "CNY", "monthly": 10.0, "annual": 120.0 }), json!({ "currency": "USD", "monthly": 20.0, "annual": 240.0 })]
+        );
+        let un = uncounted(&conn).unwrap();
+        assert_eq!(names(&un), ["无币", "无周期"]);
+        assert_eq!(un[0]["missing"], json!("币种"));
+        assert_eq!(un[1]["missing"], json!("周期"));
+    }
+
     /// 到期日只有一份实现，到期时间线与库列表都走它。
     #[test]
     fn due_is_computed_one_way_for_both_anchors() {

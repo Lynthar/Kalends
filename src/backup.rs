@@ -267,14 +267,16 @@ mod tests {
         .unwrap();
         fs::create_dir_all(src.join("logos")).unwrap();
         fs::write(src.join("logos").join("a.png"), b"x").unwrap();
+        // 孤儿两个、被引用的一个：两桶计数不同，数错桶才看得出来
         fs::write(src.join("logos").join("orphan.png"), b"x").unwrap();
+        fs::write(src.join("logos").join("orphan2.png"), b"x").unwrap();
         let snapshot = run(&conn, &src).unwrap().snapshot;
         drop(conn);
 
         let to = root.path().join("restored");
         let r = restore(&snapshot, &to).unwrap();
         assert!(r.missing.is_empty(), "{:?}", r.missing);
-        assert_eq!((r.pending, r.assets_copied, r.orphans), (0, 2, 1));
+        assert_eq!((r.pending, r.assets_copied, r.orphans), (0, 3, 2));
         assert_eq!(r.assets_from.as_deref(), Some(src.as_path()));
         let restored = Connection::open(to.join("kalends.db")).unwrap();
         assert_eq!(one::<i64>(&restored, "SELECT count(*) FROM items"), 1);
@@ -311,5 +313,72 @@ mod tests {
             .unwrap();
         let err = restore(&newer, &root.path().join("n")).unwrap_err().to_string();
         assert!(err.contains("高于本二进制"), "{err}");
+    }
+
+    /// 老快照可能还没有 `items` 表：缺表不等于缺文件，引用核对跳过而不是把恢复整个报错。
+    #[test]
+    fn a_snapshot_without_an_items_table_still_restores() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("ancient.db");
+        Connection::open(&old).unwrap().execute_batch("CREATE TABLE t(x)").unwrap();
+        let r = restore(&old, &root.path().join("to")).unwrap();
+        assert!(r.missing.is_empty(), "{:?}", r.missing);
+        assert_eq!(r.user_version, 0);
+        assert_eq!(r.pending, crate::db::known_version());
+    }
+
+    /// 快照轮转只认 `snapshot-*.db`、保留 14 份；开头扫掉上次硬杀留下的 `snapshot-*.tmp`。
+    /// 迁移前快照与别人的文件既不进轮转也不被当垃圾清掉。
+    #[test]
+    fn run_sweeps_half_written_snapshots_and_keeps_fourteen() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let conn = crate::db::open(&data).unwrap();
+        let backups = data.join("backups");
+        fs::create_dir_all(&backups).unwrap();
+        for day in 1..=15 {
+            fs::write(backups.join(format!("snapshot-2020-01-{day:02}.db")), b"old").unwrap();
+        }
+        fs::write(backups.join("snapshot-2020-01-01.db.tmp"), b"half").unwrap();
+        fs::write(backups.join("pre-migration-v4.db"), b"keep").unwrap();
+        fs::write(backups.join("other.tmp"), b"keep").unwrap();
+
+        let report = run(&conn, &data).unwrap();
+        assert!(report.snapshot.is_file());
+        assert!(report.snapshot.file_name().unwrap().to_string_lossy().starts_with("snapshot-"));
+        // 15 份旧 + 今天 1 份 = 16，超出 14 的两份最老的出局
+        assert_eq!(report.removed, 2);
+        assert!(!backups.join("snapshot-2020-01-01.db").exists());
+        assert!(!backups.join("snapshot-2020-01-02.db").exists());
+        assert!(backups.join("snapshot-2020-01-03.db").exists());
+        let snaps = fs::read_dir(&backups)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .filter(|n| n.starts_with("snapshot-") && n.ends_with(".db"))
+            .count();
+        assert_eq!(snaps, 14);
+        assert!(!backups.join("snapshot-2020-01-01.db.tmp").exists(), "半截快照没扫掉");
+        assert!(backups.join("pre-migration-v4.db").exists(), "迁移前快照不进轮转");
+        assert!(backups.join("other.tmp").exists(), "不是自己的 .tmp 别动");
+    }
+
+    /// 补跑判据要看今天的导出是否写好：判的是最后一张表（`settings.jsonl`）新不新鲜——
+    /// 缺了、或停在昨天，都算没导出。
+    #[test]
+    fn exported_today_looks_at_the_freshness_of_the_last_table() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let conn = crate::db::open(&data).unwrap();
+        assert!(!exported_today(&data), "还没导出过");
+        run(&conn, &data).unwrap();
+        assert!(exported_today(&data));
+        let last = data.join("export").join("settings.jsonl");
+        let yesterday = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_hours(48))
+            .unwrap();
+        fs::File::options().write(true).open(&last).unwrap().set_modified(yesterday).unwrap();
+        assert!(!exported_today(&data), "停在前天的导出不算今天的");
+        fs::remove_file(&last).unwrap();
+        assert!(!exported_today(&data));
     }
 }

@@ -281,8 +281,75 @@ mod tests {
         };
         Router::new()
             .route("/api/ping", get(|| async { "pong" }))
+            .route("/logos/{name}", get(|| async { "png" }))
+            .route("/calendar.ics", get(|| async { "ics" }))
+            .route("/", get(|| async { "html" }))
             .with_state(app.clone())
             .layer(middleware::from_fn_with_state(app, pin_gate))
+    }
+
+    fn with_pin(pin: &str) -> rusqlite::Connection {
+        let conn = db::fresh_in_memory().unwrap();
+        conn.execute("INSERT INTO settings(key,value) VALUES('auth.pin',?1)", [pin])
+            .unwrap();
+        conn
+    }
+
+    /// 门只覆盖 `/api` 与 `/logos`：静态页与自带令牌的 `/calendar.ics` 不拦。
+    /// 拦错方向的话，要么首页要 PIN 才打得开，要么图标文件裸露。
+    #[tokio::test]
+    async fn the_pin_gate_covers_api_and_logos_and_nothing_else() {
+        let app = gated_app(with_pin("1234"));
+        let get = |p: &str| Request::get(p).body(Body::empty()).unwrap();
+        assert_eq!(status_of(app.clone(), get("/")).await, StatusCode::OK);
+        assert_eq!(status_of(app.clone(), get("/calendar.ics")).await, StatusCode::OK);
+        assert_eq!(status_of(app.clone(), get("/logos/a.png")).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(status_of(app, get("/api/ping")).await, StatusCode::UNAUTHORIZED);
+    }
+
+    /// 凭据的另一条路是 `kalends_pin` cookie（设置页保存 PIN 时给本浏览器发的），
+    /// 别的 cookie 混在一起也要认得出，值不对照样 401。
+    #[tokio::test]
+    async fn the_pin_cookie_is_accepted_only_when_it_matches() {
+        let app = gated_app(with_pin("1234"));
+        let with_cookie = |c: &str| {
+            Request::get("/api/ping")
+                .header(header::COOKIE, c)
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(status_of(app.clone(), with_cookie("kalends_pin=1234")).await, StatusCode::OK);
+        assert_eq!(
+            status_of(app.clone(), with_cookie("theme=dark; kalends_pin=1234")).await,
+            StatusCode::OK
+        );
+        assert_eq!(status_of(app.clone(), with_cookie("kalends_pin=4321")).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(status_of(app, with_cookie("theme=dark")).await, StatusCode::UNAUTHORIZED);
+    }
+
+    /// 首页按依赖顺序加载八份脚本，`/js/{name}` 的 match 表必须一份不少地服务它们；
+    /// 漏一份就是 404 白屏，认不得的名字要 404 而不是空 200。
+    #[tokio::test]
+    async fn the_page_loads_eight_scripts_in_order_and_each_one_is_served() {
+        let html = index().await.0;
+        let srcs: Vec<&str> = html
+            .match_indices("src=\"/js/")
+            .map(|(i, m)| {
+                let rest = &html[i + m.len()..];
+                &rest[..rest.find('"').unwrap()]
+            })
+            .collect();
+        assert_eq!(
+            srcs,
+            ["core.js", "types.js", "table.js", "fields.js", "editors.js", "settings.js", "pages.js", "collections.js"]
+        );
+        for name in srcs {
+            let resp = js_file(Path(name.to_string())).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{name}");
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            assert!(!body.is_empty(), "{name} 服务出来是空的");
+        }
+        assert_eq!(js_file(Path("nope.js".into())).await.status(), StatusCode::NOT_FOUND);
     }
 
     async fn status_of(app: Router, req: Request<Body>) -> StatusCode {
