@@ -511,9 +511,7 @@ mod tests {
     #[test]
     fn the_notify_log_reads_back_everything_including_covered_rows() {
         let conn = crate::db::fresh_in_memory().unwrap();
-        let coll: i64 = conn
-            .query_row("SELECT id FROM collections WHERE key='subs'", [], |r| r.get(0))
-            .unwrap();
+        let coll = crate::db::collection_id(&conn, "subs");
         let id = crate::collections::insert_item(&conn, coll, &json!({ "name": "Example" })).unwrap();
         conn.execute_batch(&format!(
             "INSERT INTO notification_log(kind,item_id,channel,threshold_days,due_date,sent_at,ok,error) VALUES
@@ -571,13 +569,6 @@ mod tests {
         assert_eq!(extra_json(Some("\"串\"".into())), json!({}));
     }
 
-    fn app_with(conn: rusqlite::Connection) -> App {
-        App {
-            db: std::sync::Arc::new(std::sync::Mutex::new(conn)),
-            data_dir: std::path::PathBuf::from("."),
-        }
-    }
-
     async fn body_of(resp: axum::response::Response) -> Value {
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap_or(Value::Null)
@@ -589,7 +580,7 @@ mod tests {
         use axum::body::Body;
         use axum::http::Request;
         use tower::util::ServiceExt;
-        let app = app_with(crate::db::fresh_in_memory().unwrap());
+        let app = App::for_tests(crate::db::fresh_in_memory().unwrap(), std::path::Path::new("."));
         let router = core_router().with_state(app.clone());
         let get = || Request::get("/api/health").body(Body::empty()).unwrap();
         let resp = router.clone().oneshot(get()).await.unwrap();
@@ -610,7 +601,7 @@ mod tests {
         use tower::util::ServiceExt;
         let conn = crate::db::fresh_in_memory().unwrap();
         conn.execute("INSERT INTO settings(key,value) VALUES('ics.token','abc123')", []).unwrap();
-        let router = renewals_router().with_state(app_with(conn));
+        let router = renewals_router().with_state(App::for_tests(conn, std::path::Path::new(".")));
         let get = |p: &str| Request::get(p).body(Body::empty()).unwrap();
         for denied in ["/calendar.ics", "/calendar.ics?token=", "/calendar.ics?token=abc124"] {
             let resp = router.clone().oneshot(get(denied)).await.unwrap();
@@ -633,7 +624,7 @@ mod tests {
         use axum::body::Body;
         use axum::http::Request;
         use tower::util::ServiceExt;
-        let router = core_router().with_state(app_with(crate::db::fresh_in_memory().unwrap()));
+        let router = core_router().with_state(App::for_tests(crate::db::fresh_in_memory().unwrap(), std::path::Path::new(".")));
         let req = Request::put("/api/settings")
             .header("content-type", "application/json")
             .body(Body::from("[1,2]"))

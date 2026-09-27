@@ -247,10 +247,7 @@ pub async fn scheduler(db: crate::Db, data_dir: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn one<T: rusqlite::types::FromSql>(conn: &Connection, sql: &str) -> T {
-        conn.query_row(sql, [], |r| r.get(0)).unwrap()
-    }
+    use crate::db::one;
 
     /// 恢复演练全流程：备份产出的快照装配成新目录，logos/ 整份带上、引用核对通过；
     /// 负向对照：源目录里被引用的文件消失后，恢复必须点名它。
@@ -279,7 +276,7 @@ mod tests {
         assert_eq!((r.pending, r.assets_copied, r.orphans), (0, 3, 2));
         assert_eq!(r.assets_from.as_deref(), Some(src.as_path()));
         let restored = Connection::open(to.join("kalends.db")).unwrap();
-        assert_eq!(one::<i64>(&restored, "SELECT count(*) FROM items"), 1);
+        assert_eq!(one::<i64>(&restored, "SELECT count(*) FROM items", []), 1);
 
         fs::remove_file(src.join("logos").join("a.png")).unwrap();
         let r = restore(&snapshot, &root.path().join("restored2")).unwrap();

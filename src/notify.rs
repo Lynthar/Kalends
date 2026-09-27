@@ -962,9 +962,7 @@ mod tests {
             [format!(r#"{{"enabled":true,"bot_token":"t","chat_id":"1","proxy":"http://127.0.0.1:{port}"}}"#)],
         )
         .unwrap();
-        let coll: i64 = conn
-            .query_row("SELECT id FROM collections WHERE key='subs'", [], |r| r.get(0))
-            .unwrap();
+        let coll = crate::db::collection_id(&conn, "subs");
         let due = (engine::today() + chrono::Days::new(3)).to_string();
         crate::collections::insert_item(
             &conn,

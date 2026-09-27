@@ -34,6 +34,14 @@ pub struct App {
     pub data_dir: PathBuf,
 }
 
+#[cfg(test)]
+impl App {
+    /// 把一个库连接包成路由状态。只给测试用。
+    pub fn for_tests(conn: rusqlite::Connection, data_dir: &std::path::Path) -> Self {
+        App { db: Arc::new(Mutex::new(conn)), data_dir: data_dir.to_path_buf() }
+    }
+}
+
 /// `kalends --health`：容器 HEALTHCHECK 自检（镜像里没有 curl / wget，为一件事装包
 /// 不值当）。判据是"答得上话"（5xx 以下）而不是 200——设了 PIN 会被挡成 401，
 /// 那恰恰说明服务活着。
@@ -275,10 +283,7 @@ mod tests {
     use tower::util::ServiceExt;
 
     fn gated_app(conn: rusqlite::Connection) -> Router {
-        let app = App {
-            db: Arc::new(Mutex::new(conn)),
-            data_dir: PathBuf::from("."),
-        };
+        let app = App::for_tests(conn, std::path::Path::new("."));
         Router::new()
             .route("/api/ping", get(|| async { "pong" }))
             .route("/logos/{name}", get(|| async { "png" }))

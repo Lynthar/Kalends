@@ -231,12 +231,13 @@ mod tests {
         }
     }
 
-    /// 读侧回落值从声明解析得出；声明写坏时在这里红，不在运行时悄悄回落。
+    /// 读侧回落值恒等声明里的播种值：设置页「清空＝回默认」显示的就是它们，两边不等就是
+    /// 界面说一个数、调度器用另一个数。465 是 RFC 8314 的隐式 TLS 投递端口（声明里 starttls 关）。
     #[test]
     fn read_side_defaults_parse_out_of_the_declaration() {
-        assert!(window_days_default() >= 1);
-        assert!(!thresholds_default().is_empty());
-        assert!(hhmm(digest_time_default()).is_ok());
-        assert!(smtp_port_default() >= 1);
+        assert_eq!(window_days_default(), 14);
+        assert_eq!(thresholds_default(), [14, 7, 3, 1, 0]);
+        assert_eq!(digest_time_default(), "09:00");
+        assert_eq!(smtp_port_default(), 465);
     }
 }

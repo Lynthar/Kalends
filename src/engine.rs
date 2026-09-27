@@ -714,10 +714,7 @@ mod tests {
     }
 
     fn add(conn: &Connection, coll: &str, body: &Value) -> i64 {
-        let id: i64 = conn
-            .query_row("SELECT id FROM collections WHERE key=?1", [coll], |r| r.get(0))
-            .unwrap();
-        crate::collections::insert_item(conn, id, body).unwrap()
+        crate::collections::insert_item(conn, crate::db::collection_id(conn, coll), body).unwrap()
     }
 
     fn names(v: &[Value]) -> Vec<String> {

@@ -1829,15 +1829,14 @@ async fn logo_file(State(app): State<App>, Path(name): Path<String>) -> Result<R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::one;
 
     /// 新条目可能捡到复用的 id（items.id 不带 AUTOINCREMENT）：旧号的通知日志会让新条目
     /// 被判成「已发过」而静默漏提醒。落地即清掉该 (kind,id) 的日志，别的条目的不许波及。
     #[test]
     fn a_new_item_wipes_notification_history_left_by_its_recycled_id() {
         let conn = crate::db::fresh_in_memory().unwrap();
-        let coll: i64 = conn
-            .query_row("SELECT id FROM collections WHERE key='subs'", [], |r| r.get(0))
-            .unwrap();
+        let coll = coll(&conn, "subs");
         let old = insert_item(&conn, coll, &serde_json::json!({ "name": "Old" })).unwrap();
         conn.execute("DELETE FROM items WHERE id=?1", [old]).unwrap();
         let seed = |item: i64| {
@@ -1887,9 +1886,7 @@ mod tests {
     #[test]
     fn a_bad_stored_value_does_not_lock_the_row() {
         let conn = crate::db::fresh_in_memory().unwrap();
-        let coll: i64 = conn
-            .query_row("SELECT id FROM collections WHERE key='subs'", [], |r| r.get(0))
-            .unwrap();
+        let coll = coll(&conn, "subs");
         // 绕开写入口塞一个坏币种与坏日期（接口与导入脚本历史上都造得出来）
         conn.execute(
             "INSERT INTO items(collection_id,name,status,currency,next_renewal)
@@ -1929,9 +1926,7 @@ mod tests {
     #[test]
     fn a_wrongly_typed_value_is_refused_and_the_row_is_untouched() {
         let conn = crate::db::fresh_in_memory().unwrap();
-        let coll: i64 = conn
-            .query_row("SELECT id FROM collections WHERE key='subs'", [], |r| r.get(0))
-            .unwrap();
+        let coll = coll(&conn, "subs");
         let id = insert_item(
             &conn,
             coll,
@@ -1970,9 +1965,7 @@ mod tests {
     #[test]
     fn the_logo_column_cannot_be_written_through_the_generic_patch() {
         let conn = crate::db::fresh_in_memory().unwrap();
-        let coll: i64 = conn
-            .query_row("SELECT id FROM collections WHERE key='subs'", [], |r| r.get(0))
-            .unwrap();
+        let coll = coll(&conn, "subs");
         let id = insert_item(&conn, coll, &json!({ "name": "甲" })).unwrap();
         assert!(update_item(&conn, id, &json!({ "logo": "item-9-9.png" })).is_err());
         assert!(insert_item(&conn, coll, &json!({ "name": "乙", "logo": "item-9-9.png" })).is_err());
@@ -2160,9 +2153,7 @@ mod tests {
     #[test]
     fn a_custom_cycle_without_a_day_count_is_refused_at_the_write_entry() {
         let conn = crate::db::fresh_in_memory().unwrap();
-        let coll: i64 = conn
-            .query_row("SELECT id FROM collections WHERE key='subs'", [], |r| r.get(0))
-            .unwrap();
+        let coll = coll(&conn, "subs");
         assert!(insert_item(&conn, coll, &json!({ "name": "A", "cycle": "days" })).is_err());
         assert!(
             insert_item(&conn, coll, &json!({ "name": "A", "cycle": "days", "cycle_days": 0 }))
@@ -2257,8 +2248,6 @@ mod tests {
     /// 就是现成例子，不需要 DNS 重绑定），发请求前要把解析出来的地址也验一遍。
     #[test]
     fn resolved_addresses_are_checked_too() {
-        use std::net::IpAddr;
-        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
         // 一个公共域名解析到回环 —— 字面那关它是过的，这关必须拦下
         assert!(!resolved_ips_ok(&[ip("127.0.0.1")]));
         // 多条 A 记录里只要有一条指向内网就整体拒（DNS 轮询可以让你只中一次）
@@ -2281,8 +2270,6 @@ mod tests {
     /// 而它既非回环、ULA 也非链路本地——不抽出嵌着的 IPv4 再判，v6 分支直接放行。
     #[test]
     fn nat64_addresses_are_judged_by_the_embedded_ipv4() {
-        use std::net::IpAddr;
-        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
         // RFC 6052 熟知前缀 64:ff9b::/96：只有 /96 一种布局
         assert!(!public_ip_ok(&ip("64:ff9b::a9fe:a9fe")));
         assert!(!public_ip_ok(&ip("64:ff9b::7f00:1")));
@@ -2360,16 +2347,16 @@ mod tests {
         assert!(h("<p>没有 link 标签</p>").is_empty());
     }
 
+    fn ip(s: &str) -> std::net::IpAddr {
+        s.parse().unwrap()
+    }
+
     fn fresh() -> Connection {
         crate::db::fresh_in_memory().unwrap()
     }
 
     fn coll(conn: &Connection, key: &str) -> i64 {
         coll_id(conn, key).unwrap()
-    }
-
-    fn one<T: rusqlite::types::FromSql>(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> T {
-        conn.query_row(sql, p, |r| r.get(0)).unwrap()
     }
 
     /// 新库键越过一切"曾经用过"的编号：现存的库、台账与通知日志里的 kind 都算。
@@ -2542,10 +2529,7 @@ mod tests {
     fn deleting_an_item_removes_its_row_and_its_logo_file() {
         let dir = tempfile::tempdir().unwrap();
         let conn = fresh();
-        let app = App {
-            db: std::sync::Arc::new(std::sync::Mutex::new(Connection::open_in_memory().unwrap())),
-            data_dir: dir.path().to_path_buf(),
-        };
+        let app = App::for_tests(Connection::open_in_memory().unwrap(), dir.path());
         let id = insert_item(&conn, coll(&conn, "subs"), &json!({ "name": "有图" })).unwrap();
         let name = set_logo(&app, &conn, id, "png", b"\x89PNG\r\n\x1a\n....").unwrap();
         let file = dir.path().join("logos").join(&name);
@@ -2617,10 +2601,7 @@ mod tests {
 
     /// 库路由 + 字段路由共用一个库，好在建库 / 改库之后回读字段注册表。
     fn routed(conn: Connection, data_dir: &std::path::Path) -> Router {
-        router().merge(crate::fields::router()).with_state(App {
-            db: std::sync::Arc::new(std::sync::Mutex::new(conn)),
-            data_dir: data_dir.to_path_buf(),
-        })
+        router().merge(crate::fields::router()).with_state(App::for_tests(conn, data_dir))
     }
 
     /// 建库：到期模型与续费起算方式只认已知值；键由服务端编；模板值只在请求压根没提这个键时兜底，
@@ -2686,10 +2667,7 @@ mod tests {
     fn logo_uploads_are_checked_and_replace_the_old_file() {
         let dir = tempfile::tempdir().unwrap();
         let conn = fresh();
-        let app = App {
-            db: std::sync::Arc::new(std::sync::Mutex::new(Connection::open_in_memory().unwrap())),
-            data_dir: dir.path().to_path_buf(),
-        };
+        let app = App::for_tests(Connection::open_in_memory().unwrap(), dir.path());
         let id = insert_item(&conn, coll(&conn, "subs"), &json!({ "name": "图" })).unwrap();
         let png = b"\x89PNG\r\n\x1a\n....".to_vec();
         assert!(set_logo(&app, &conn, id, "bmp", &png).is_err(), "不支持的格式");
@@ -2792,8 +2770,7 @@ mod tests {
     /// 字面 IP 直接钉住不查 DNS，内网字面量在 `resolve_public` 这一层同样过不去。
     #[tokio::test]
     async fn literal_hosts_are_pinned_without_dns_and_unroutable_ranges_are_refused() {
-        use std::net::{IpAddr, SocketAddr};
-        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        use std::net::SocketAddr;
         for no in ["", ":8080", "[]", "[::]"] {
             assert!(!public_host_ok(no), "本该拦下 {no:?}");
         }
@@ -2811,8 +2788,6 @@ mod tests {
     /// u 字节或后缀不为零的布局不成形，不能拿它的候选去否决一个成形布局里的公网地址。
     #[test]
     fn every_nat64_layout_is_read_and_malformed_layouts_do_not_count() {
-        use std::net::IpAddr;
-        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
         // /48：v4 在字节 6,7,9,10（字节 8 是 u）；/56：v4 在字节 7,9,10,11
         assert!(!public_ip_ok(&ip("64:ff9b:1:a00:0:500::")), "/48 布局里嵌着 10.0.0.5");
         assert!(!public_ip_ok(&ip("64:ff9b:1:a:0:5::")), "/56 布局里嵌着 10.0.0.5");
@@ -2841,6 +2816,7 @@ mod tests {
     }
 
     /// 只读前 `limit` 字节就收手：发现页只看 `<head>`，超出的部分不进内存。
+    /// 末两行钉的是出网封顶的规格值：图标 ≤ 2 MB、发现页 ≤ 512 KB。
     #[tokio::test]
     async fn body_head_stops_at_the_limit() {
         let resp = |s: &'static str| reqwest::Response::from(axum::http::Response::new(s));
