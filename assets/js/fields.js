@@ -68,7 +68,7 @@ function openStatusSemPop(tab, k, anchor) {
   popEl = document.createElement('div');
   popEl.className = 'filterpop optpop sempop';
   popEl.innerHTML = `<div class="fp-head"><b>状态语义 · ${esc(colLabel(tab, k))}</b></div>
-    <div class="fp-note">勾了「计支出」才进支出统计，「提醒」才发通知，「时间线」才上到期栏与日历</div>`;
+    <div class="fp-note">勾了「计支出」才进支出统计，「提醒」才发通知，「时间线」才上到期栏与日历；提醒只发给时间线上的条目，两者连着勾</div>`;
   const stored = storedOpts(tab, k);
   for (const o of stored) {
     const sem = semOf(tab, o.v);
@@ -77,11 +77,17 @@ function openStatusSemPop(tab, k, anchor) {
     row.innerHTML = `<span class="fp-v">${stPill(o.v)}</span>` + SEM_FLAGS.map(([f, lab]) =>
       `<label class="check sem"><input type="checkbox" data-f="${f}"${sem[f] ? ' checked' : ''}><span>${lab}</span></label>`
     ).join('');
-    row.querySelectorAll('input').forEach(inp => inp.onchange = async () => {
-      const flags = Object.fromEntries(
-        [...row.querySelectorAll('input')].map(i => [i.dataset.f, i.checked ? 1 : 0]));
-      const next = stored.map(x => x.v === o.v ? { ...x, ...flags } : { ...x });
-      if (await fieldCall('/api/fields/semantics', 'PUT', { tbl: tab, key: k, options: next })) await loadAll();
+    // 只发这一项改到的位：后端按值逐项合并、没出现的不动。拿打开时的整份快照去发，
+    // 同一次打开里改第二项就会把第一项的改动写回原值
+    const box = f => row.querySelector(`input[data-f="${f}"]`);
+    row.querySelectorAll('input').forEach(inp => inp.onchange = () => {
+      const f = inp.dataset.f, flags = { [f]: inp.checked ? 1 : 0 };
+      // 提醒蕴含时间线：勾提醒连带勾时间线，取消时间线连带取消提醒
+      if (f === 'alert' && inp.checked) { flags.timeline = 1; box('timeline').checked = true; }
+      if (f === 'timeline' && !inp.checked) { flags.alert = 0; box('alert').checked = false; }
+      write(`sem:${tab}:${k}`, () => api('/api/fields/semantics', { method: 'PUT', body: JSON.stringify({
+        tbl: tab, key: k, options: [{ v: o.v, ...flags }],
+      }) }));
     });
     popEl.appendChild(row);
   }
@@ -165,13 +171,16 @@ function openOptionsPop(tab, k, anchor) {
       row.appendChild(inp);
       inp.focus();
       inp.select();
+      const pop = popEl;
       let done = false; // Enter 提交后 blur 会再触发一次
       const commit = async () => {
-        if (done) return;
+        // Esc 取消：与已有选项同名就是合并，原选项连同颜色一起消失、撤不回来
+        if (done || pop.dataset.cancelled) return;
         done = true;
         const to = inp.value.trim();
         if (!to || to === x) { reopen(); return; }
-        if (await fieldCall('/api/fields/rename_option', 'POST', { tbl: tab, key: k, from: x, to })) await loadAll();
+        await write(`opts:${tab}:${k}`, () => api('/api/fields/rename_option',
+          { method: 'POST', body: JSON.stringify({ tbl: tab, key: k, from: x, to }) }));
         reopen();
       };
       inp.addEventListener('keydown', e => { if (e.key === 'Enter') commit(); });
@@ -179,7 +188,8 @@ function openOptionsPop(tab, k, anchor) {
     };
     row.querySelector('[data-del]').onclick = async () => {
       if (!confirm(`删除选项「${x}」？将从所有行中移除该值。`)) return;
-      if (await fieldCall('/api/fields/remove_option', 'POST', { tbl: tab, key: k, value: x })) await loadAll();
+      await write(`opts:${tab}:${k}`, () => api('/api/fields/remove_option',
+        { method: 'POST', body: JSON.stringify({ tbl: tab, key: k, value: x }) }));
       reopen();
     };
     popEl.appendChild(row);

@@ -41,8 +41,9 @@
 **预编译二进制只有 Linux。** 从 [Releases](https://github.com/Lynthar/Kalends/releases) 取：
 
 ```bash
-tar xzf kalends-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
-KALENDS_DATA=./data TZ=Asia/Shanghai ./kalends-v0.1.0-x86_64-unknown-linux-gnu/kalends
+# <version> 是发布的标签，如 v0.2.0
+tar xzf kalends-<version>-x86_64-unknown-linux-gnu.tar.gz
+KALENDS_DATA=./data TZ=Asia/Shanghai ./kalends-<version>-x86_64-unknown-linux-gnu/kalends
 ```
 
 另有 `aarch64` 版给 ARM 机器和 NAS，`musl` 版给老 glibc 或 Alpine，同批带 `SHA256SUMS`。
@@ -51,6 +52,7 @@ KALENDS_DATA=./data TZ=Asia/Shanghai ./kalends-v0.1.0-x86_64-unknown-linux-gnu/k
 
 ```bash
 docker build -t kalends:local .
+sudo mkdir -p /path/to/appdata/kalends
 sudo chown -R 10001:10001 /path/to/appdata/kalends
 docker compose -f deploy/compose.yaml up -d
 ```

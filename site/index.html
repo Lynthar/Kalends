@@ -108,10 +108,12 @@
   </div>
 <pre><span class="c"># a release binary</span>
 tar xzf kalends-&lt;version&gt;-x86_64-unknown-linux-gnu.tar.gz
-KALENDS_DATA=./data TZ=Asia/Shanghai ./kalends
+KALENDS_DATA=./data TZ=Asia/Shanghai ./kalends-&lt;version&gt;-x86_64-unknown-linux-gnu/kalends
 
 <span class="c"># docker — the compose file builds locally, no image is published</span>
 docker build -t kalends:local .
+sudo mkdir -p /path/to/appdata/kalends
+sudo chown -R 10001:10001 /path/to/appdata/kalends   <span class="c"># the container runs as uid 10001</span>
 docker compose -f deploy/compose.yaml up -d
 
 <span class="c"># from source, serves 127.0.0.1:4180 with data in ./data/</span>

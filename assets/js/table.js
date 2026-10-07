@@ -82,12 +82,15 @@ const fieldOf = (tab, k) => state.fields.find(f => f.tbl === tab && f.key === k)
 // 改名/删除只对 extra 列开放，与后端一致。
 const inExtra = col => (col.src ? col.src === 'extra' : !!col.custom);
 
-async function refreshFields() {
-  state.fields = await api('/api/fields');
-  for (const f of state.fields) {
+async function fetchFields() {
+  const fs = await api('/api/fields');
+  for (const f of fs) {
     f.options = (f.options || []).map(o => typeof o === 'string' ? { v: o } : o); // 老形态常规化
   }
+  return fs;
 }
+
+async function refreshFields() { state.fields = await fetchFields(); }
 
 // 选项定色：字段词表里指定了调色板号就用它，否则按值哈希（同值全站同色的兜底）
 const storedOpts = (tab, k) => fieldOf(tab, k)?.options || [];
@@ -241,6 +244,9 @@ function settleView(tab, keys) {
       v.order = o;
     }
   }
+  // 列集之外的排序与类型覆写也清掉：指着已删列的排序会停用全部行拖手，胶囊还显示裸键
+  if (v.sort && !keys.includes(v.sort.key)) v.sort = null;
+  for (const k of Object.keys(v.types)) if (!keys.includes(k)) delete v.types[k];
   // 详情入口那一列无条件捞回：已把它存进 hiddenCols 的存量偏好光靠列集迁移救不回来（列集没变）
   const entry = entryKey(tab);
   if (v.hiddenCols?.includes(entry)) v.hiddenCols = v.hiddenCols.filter(k => k !== entry);
@@ -763,25 +769,26 @@ $('#bulk-del').onclick = async () => {
   const ids = [...selOf(tab)];
   if (!ids.length) return;
   if (!confirm(`删除选中的 ${ids.length} 项？此操作不可撤销。`)) return;
-  const path = '/api/items/bulk_delete';
-  try {
-    const r = await api(path, { method: 'POST', body: JSON.stringify({ ids }) });
+  await write(`bulk:${tab}`, async () => {
+    const r = await api('/api/items/bulk_delete', { method: 'POST', body: JSON.stringify({ ids }) });
     selOf(tab).clear();
+    return r;
+  }, {
+    once: true,
     // 报后端真删掉的数，不是选区大小——另一个标签页可能已经删过其中几行
-    const gone = r.deleted ?? ids.length;
-    toast(gone === ids.length ? `已删除 ${gone} 项` : `已删除 ${gone} 项（${ids.length - gone} 项已不存在）`);
-    await loadAll();
-  } catch (e) { toast(e.message, true); }
+    done: r => {
+      const gone = r.deleted ?? ids.length;
+      return gone === ids.length ? `已删除 ${gone} 项` : `已删除 ${gone} 项（${ids.length - gone} 项已不存在）`;
+    },
+  });
 };
 
 /* 表尾「＋ 新建」：直接插一行空行、就地填（Notion 同款），不再弹表单。
    空名/空标题后端是放行的；新行落在手动序末尾，所以按列排序时它可能不在末尾。 */
 async function addRowInline(tab) {
-  try {
-    const { id } = await api(`/api/collections/${tab}/items`, { method: 'POST', body: JSON.stringify({}) });
-    await loadAll();
-    focusNewRow(tab, id);
-  } catch (e) { toast(e.message, true); }
+  // 新建不幂等：在途时再点一次就是多一行空行
+  const r = await write(`new:${tab}`, () => api(`/api/collections/${tab}/items`, { method: 'POST', body: '{}' }), { once: true });
+  if (r?.id) focusNewRow(tab, r.id);
 }
 
 function focusNewRow(tab, id) {
@@ -849,7 +856,12 @@ function closePop() {
 }
 
 function popOutside(e) { if (popEl && !popEl.contains(e.target)) closePop(); }
-function popEsc(e) { if (e.key === 'Escape') closePop(); }
+// Esc 是「取消」：靠失焦提交的输入（选项改名）认这个标记，关浮层带出的那次失焦不算提交
+function popEsc(e) {
+  if (e.key !== 'Escape' || !popEl) return;
+  popEl.dataset.cancelled = '1';
+  closePop();
+}
 
 function placePop(el, anchor) {
   document.body.appendChild(el);

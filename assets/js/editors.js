@@ -4,19 +4,43 @@
 /* 后端是局部更新语义：出现的键写入（"" 与 null 都是清空），缺席的键保持原值，extra
    整体替换——所以只发改动的键。**但清空必须显式写 null**：JSON.stringify 会把
    undefined 连键一起丢掉，键缺席在这套语义里是"别动它"。 */
-async function patchRow(tab, it, patch) {
-  try {
-    await api(`/api/items/${it.id}`, { method: 'PATCH', body: JSON.stringify(patch) });
-    await loadAll();
-  } catch (err) { toast(err.message, true); }
+/**
+ * @param {object|((row:object) => object)} patch 函数形态在轮到这次写入时才对着这一行的最新状态求值：
+ *   extra 是整份替换，拿编辑器打开那会儿的快照去拼，会把这期间别的保存冲回去
+ * @param {object} [o]
+ * @param {() => void} [o.written] 服务端收下之后、刷新之前调用（编辑器在这时才关，失败时输入还在）
+ * @param {() => string} [o.done] 成功提示（见 write）
+ */
+function patchRow(tab, it, patch, { written, done } = {}) {
+  return write(`item:${it.id}`, async () => {
+    const row = state[tab]?.find(r => r.id === it.id) || it;
+    const body = typeof patch === 'function' ? patch(row) : patch;
+    await api(`/api/items/${it.id}`, { method: 'PATCH', body: JSON.stringify(body) });
+    // 刷新失败时这一行也已是新的：下一次写入不会拿旧值去拼
+    Object.assign(row, body);
+    written?.();
+  }, { done });
 }
 
-// 自定义列的值写进 extra；空值直接摘掉键
-function extraPatch(it, k, v) {
-  const ex = { ...(it.extra || {}) };
+// 自定义列的值写进 extra；空值直接摘掉键。对着写入时的最新行拼（见 patchRow）
+const extraPatch = (k, v) => row => {
+  const ex = { ...(row.extra || {}) };
   if (v == null || v === '' || (Array.isArray(v) && !v.length)) delete ex[k];
   else ex[k] = v;
   return { extra: ex };
+};
+
+// 编辑器保存成功才关，失败时用户的输入还在；关之前确认浮层还是这一个，别关掉用户已经换开的那个
+function closerOf() {
+  const mine = popEl;
+  return () => { if (popEl === mine) closePop(); };
+}
+
+// 数字栏里打了不成数的东西（`1e`、`12-`）时 value 读出来是空串，照「清空」写出去就静默删了原值
+function badNumber(box) {
+  const bad = [...box.querySelectorAll('input[type=number]')].find(i => i.validity.badInput);
+  if (bad) { toast('有一栏不是有效的数字：改正或清空后再保存', true); bad.focus(); }
+  return !!bad;
 }
 
 function cellPopShell(td, title) {
@@ -44,6 +68,7 @@ function inputsEditor(tab, it, td, fieldsDef, save) {
   foot.innerHTML = '<button type="button" class="btn primary mini">保存</button>';
   box.appendChild(foot);
   const commit = () => {
+    if (badNumber(box)) return;
     const patch = {};
     for (const inp of box.querySelectorAll('input[data-f]')) {
       // 数字栏清空要显式写 null：undefined 会被 JSON.stringify 丢掉，
@@ -52,8 +77,7 @@ function inputsEditor(tab, it, td, fieldsDef, save) {
         ? (inp.value === '' ? null : +inp.value)
         : inp.value;
     }
-    closePop();
-    save(patch);
+    save(patch, closerOf());
   };
   foot.querySelector('button').onclick = commit;
   box.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') commit(); });
@@ -157,10 +181,10 @@ function cycleEditor(tab, it, td) {
   sel.addEventListener('change', syncDays);
   syncDays();
   box.querySelector('.cp-foot button').onclick = () => {
+    if (badNumber(box)) return;
     // 天数清空写 null（键缺席＝保持原值，见 patchRow）
     const patch = { cycle: sel.value, cycle_days: days.value === '' ? null : +days.value };
-    closePop();
-    patchRow(tab, it, patch);
+    patchRow(tab, it, patch, { written: closerOf() });
   };
   placePop(box, td);
 }
@@ -198,12 +222,12 @@ function priceEditor(tab, it, td) {
   const amt = box.querySelector('[data-price]');
   const sel = box.querySelector('[data-cur]');
   const commit = () => {
-    closePop();
+    if (badNumber(box)) return;
     // 清空一律显式 null：键缺席在 PATCH 语义里是"保持原值"（见 patchRow）
     patchRow(tab, it, {
       price: amt.value === '' ? null : +amt.value,
       currency: fxCode(sel.value) || null, // 手打的 usd 一律存成 USD
-    });
+    }, { written: closerOf() });
   };
   box.querySelector('.cp-foot button').onclick = commit;
   box.addEventListener('keydown', e => {
@@ -250,17 +274,24 @@ function tplEditor(tab, it, td, f) {
   foot.innerHTML = '<button type="button" class="btn primary mini">保存</button>';
   box.appendChild(foot);
   const commit = () => {
-    const ex = { ...(it.extra || {}) };
+    if (badNumber(box)) return;
     const cols = {};
+    const ext = {};
     for (const el of box.querySelectorAll('[data-f]')) {
       const v = el.type === 'number' ? (el.value === '' ? '' : +el.value) : el.value;
       const k = el.dataset.f;
-      if (el.dataset.src === 'col') { cols[k] = v === '' ? null : v; continue; }
-      if (v === '' || v == null) delete ex[k];
-      else ex[k] = v;
+      if (el.dataset.src === 'col') cols[k] = v === '' ? null : v;
+      else ext[k] = v;
     }
-    closePop();
-    patchRow(tab, it, { ...cols, extra: ex });
+    // extra 那几项对着写入时的最新行逐键覆盖（见 patchRow），空值摘键
+    patchRow(tab, it, row => {
+      const ex = { ...(row.extra || {}) };
+      for (const [k, v] of Object.entries(ext)) {
+        if (v === '' || v == null) delete ex[k];
+        else ex[k] = v;
+      }
+      return { ...cols, extra: ex };
+    }, { written: closerOf() });
   };
   foot.querySelector('button').onclick = commit;
   box.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') commit(); });
@@ -287,24 +318,34 @@ function openCellPop(tab, it, k, td) {
   if (k === 'cycle') return cycleEditor(tab, it, td);
   // 费用也是：金额 + 币种（币种并进了这一格，不再单独占一列）
   if (k === 'price' && col.src === 'col') return priceEditor(tab, it, td);
-  const save = v => patchRow(tab, it, toExtra ? extraPatch(it, k, v) : { [k]: v });
+  const save = v => patchRow(tab, it, toExtra ? extraPatch(k, v) : { [k]: v });
   // 这一类型专属的编辑器（单选/状态点值即存、多选勾选即存）由类型表给；没有就落到下面的通用框
   const own = TYPES[t]?.editor;
   if (own) return own({ tab, it, td, k, col, toExtra, save });
   const type = TYPES[t]?.input || 'text';
-  return inputsEditor(tab, it, td, [[k, colLabel(tab, k), type]], patch => {
-    if (toExtra) return patchRow(tab, it, extraPatch(it, k, patch[k] ?? ''));
-    return patchRow(tab, it, patch);
-  });
+  return inputsEditor(tab, it, td, [[k, colLabel(tab, k), type]], (patch, written) =>
+    patchRow(tab, it, toExtra ? extraPatch(k, patch[k] ?? '') : patch, { written }));
 }
 
 // 点击委托：按钮/链接照旧，其余格子进就地编辑。挂在 document 上、按 tbody 的 data-tab
 // 认表，后建的库自然生效——写死成 tbody 选择器列表的话，自建库的格子点了毫无反应
+let cellClicks = 0;
 document.addEventListener('click', e => {
   if (e.target.closest('button, a, input, select, textarea, label')) return;
   const td = e.target.closest('td');
   const tab = td?.closest('tbody[data-tab]')?.dataset.tab;
   if (!tab || !td.dataset.k || td.dataset.k === 'ops') return;
-  const it = state[tab]?.find(x => x.id === +td.closest('tr').dataset.id);
-  if (it) openCellPop(tab, it, td.dataset.k, td);
+  const id = +td.closest('tr').dataset.id;
+  const k = td.dataset.k;
+  const ticket = ++cellClicks;
+  const open = () => {
+    if (ticket !== cellClicks) return; // 等的时候用户已经点了别处
+    const it = state[tab]?.find(x => x.id === id);
+    // 等过一轮的话表格已重绘、原来那格不在文档里了，按坐标重新找
+    const cell = td.isConnected ? td : tbodyOf(tab)?.querySelector(`tr[data-id="${id}"] td[data-k="${k}"]`);
+    if (it && cell) openCellPop(tab, it, k, cell);
+  };
+  // 这一行还有保存在路上：等它落定再开，编辑器显示与拼 extra 才都基于最新的行
+  if (busyWrite(`item:${id}`)) settled(`item:${id}`).then(open);
+  else open();
 });

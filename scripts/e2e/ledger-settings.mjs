@@ -1,6 +1,6 @@
 // 台账与设置页：续费记账可见、通知记录空态、坏渠道配置停保存、阈值与默认值来自服务端声明。
 export default async function (t) {
-  const { APP, sleep, put, items, check, evl, shot } = t;
+  const { APP, sleep, put, items, check, evl, shot, settle } = t;
   /* 17.6. 「已续费」记的那笔账要能被看到：写台账这条路 e2e 从没走过，
      而台账在界面上一直没有入口——点完按钮，账进了库就再也见不到。 */
   const ledgerTarget = (await (await fetch(APP + 'api/collections/subs/items')).json())
@@ -91,6 +91,24 @@ export default async function (t) {
   await put('/api/settings', { 'notify.digest_time': dfBefore['notify.digest_time'], 'notify.window_days': dfBefore['notify.window_days'], 'notify.email': dfBefore['notify.email'] });
   await evl(`document.querySelector('#dlg-settings').close()`);
   await sleep(200);
+
+
+  // PIN 原样交给后端判：前端先剥符号的话，`12-34` 存成 `1234`（照原样输入反而进不去），
+  // 全是符号的存成空串＝关掉了门，而 toast 照样说「设置已保存」
+  await evl(`openSettings()`);
+  await sleep(500);
+  await evl(`(() => {
+    document.querySelector('#form-settings').elements.pin.value = '12-34';
+    document.querySelector('#form-settings button[type=submit]').click();
+  })()`);
+  await settle();
+  const pinAfter = (await (await fetch(APP + 'api/settings')).json())['auth.pin'];
+  check('带符号的 PIN 被拒收，库里不变', pinAfter === '', JSON.stringify(pinAfter));
+  check('拒收的原因照实说出来，设置框没关', await evl(`(() => {
+    const t = document.querySelector('#toast');
+    return t.classList.contains('err') && t.textContent.includes('PIN') && document.querySelector('#dlg-settings').open;
+  })()`) === true, await evl(`document.querySelector('#toast').textContent`));
+  await evl(`document.querySelector('#dlg-settings').close()`);
 
 
 }

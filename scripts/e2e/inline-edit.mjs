@@ -1,6 +1,6 @@
 // 点格即编：新建空行、内置字段与 SIM 的就地编辑、筛选中新建、费用格的币种、规格格、多选呈现与浮层快照。
 export default async function (t) {
-  const { APP, sleep, patch, raw, items, fields, check, day, evl, shot } = t;
+  const { APP, sleep, patch, raw, items, fields, check, day, send, evl, shot, settle } = t;
   /* 9. ＋新建行直接插一行空行（Notion 式，不再弹表单），右上角那颗绿按钮是建库 */
   const subsN0 = await evl(`document.querySelectorAll('#subs-body tr').length`);
   await evl(`document.querySelector('#view-subs .newrow').click()`);
@@ -129,7 +129,7 @@ export default async function (t) {
   await evl(`openItemDialog('subs', state.subs.find(x => x.id === ${fx_curRow.id}))`);
   await sleep(450);
   // 币种是「下拉 + 新选项」：EUR 在内置汇率表里，下拉本就有它，直接选中即可
-  await evl(`document.querySelector('#item-fields .pricebox select[data-f="currency"]').value = 'EUR'`);
+  await evl(`(() => { const s = document.querySelector('#item-fields .pricebox select[data-f="currency"]'); s.value = 'EUR'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
   await evl(`document.querySelector('#form-item').requestSubmit()`);
   await sleep(1200);
   const fx_changed = (await (await fetch(APP + 'api/collections/subs/items')).json()).find(r => r.id === fx_curRow.id);
@@ -177,6 +177,41 @@ export default async function (t) {
     (await (await fetch(`${APP}api/collections/vps/items`)).json()).find(r => r.id === vpsRow.id).extra.ram_gb === 8);
   check('规格格随之刷新',
     (await evl(`document.querySelector('#vps-body tr[data-id="${vpsRow.id}"] td[data-k="spec"]')?.textContent || ''`)).includes('8G'));
+
+  // 数字栏打了不成数的东西（1e、12-）：value 读出来是空串，照「清空」写出去就把原值删了。
+  // 要真打字——给 number 输入框赋 '1e' 会被净化成空串，badInput 也不会置位
+  const typeBad = async sel => {
+    await evl(`(() => { const i = document.querySelector('${sel}'); i.focus(); i.select(); })()`);
+    await send('Input.insertText', { text: '1e' });
+    return evl(`document.querySelector('${sel}').validity.badInput`);
+  };
+  const refused = () => evl(`!!document.querySelector('.cellpop') && document.querySelector('#toast').classList.contains('err')`);
+  const quietToast = () => evl(`(() => { const t = document.querySelector('#toast'); clearTimeout(t._h); t.hidden = true; t.classList.remove('err'); })()`);
+  await evl(`document.querySelector('#vps-body tr[data-id="${vpsRow.id}"] td[data-k="spec"]').click()`);
+  await sleep(400);
+  const badSpec = await typeBad('.cellpop [data-f="ram_gb"]');
+  await evl(`document.querySelector('.cellpop .cp-foot button').click()`);
+  await settle();
+  const ramNow = (await (await fetch(`${APP}api/collections/vps/items`)).json()).find(r => r.id === vpsRow.id).extra.ram_gb;
+  check('规格格：数字栏不成数时不保存、浮层不关、说出原因', badSpec && await refused() && ramNow === 8,
+    JSON.stringify([badSpec, ramNow]));
+  await evl(`closePop()`);
+  await quietToast();
+  await evl(`switchTab('subs')`);
+  await sleep(300);
+  const nf = (await items('subs')).find(r => r.name === 'Netflix');
+  await evl(`document.querySelector('#subs-body tr[data-id="${nf.id}"] td[data-k="price"]').click()`);
+  await sleep(400);
+  const badPrice = await typeBad('.cellpop [data-price]');
+  await evl(`document.querySelector('.cellpop .cp-foot button').click()`);
+  await settle();
+  const priceNow = (await items('subs')).find(r => r.id === nf.id).price;
+  check('费用格：金额不成数时同样不保存', badPrice && await refused() && priceNow === nf.price,
+    JSON.stringify([badPrice, priceNow, nf.price]));
+  await evl(`closePop()`);
+  await quietToast();
+  await evl(`switchTab('vps')`);
+  await sleep(300);
 
 
   /* 17.34 ② */

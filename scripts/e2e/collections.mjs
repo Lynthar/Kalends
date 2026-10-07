@@ -1,6 +1,6 @@
 // 库：自建库、建库模板、库设置（库序、字段序与上表、状态语义）、哪些列删得掉、移列与调宽、续费起算、换到期模型、删光也不崩（放最后）。
 export default async function (t) {
-  const { APP, sleep, post, put, patch, raw, mk, items, fields, check, today, day, send, evl, shot, consoleMsgs, menuClick, thWidthSum, tableW, evlSafe } = t;
+  const { APP, sleep, post, put, patch, raw, mk, items, fields, check, today, day, send, evl, shot, consoleMsgs, menuClick, thWidthSum, tableW, evlSafe, settle } = t;
   /* 12g. 自建库：新建 → 默认字段集 → 表头/行由字段生成 → 语义驱动的续费按钮 → 删库 */
   const nc = await post('/api/collections', { name: '域名', icon: '🌐', due_anchor: 'next' });
   check('新建库返回库键', /^k\d+$/.test(nc.key || ''), JSON.stringify(nc));
@@ -428,6 +428,18 @@ export default async function (t) {
     semF.options.find(o => o.v === 'Ending').timeline === 1 && semF.options.length === 4);
   check('续费按钮跟着语义消失',
     await evl(`!document.querySelector('#${BK}-body tr [data-renew]')`) === true);
+  // 提醒只发给时间线上的条目：两者连着勾。只勾提醒的状态从前既没逐项提醒也不进摘要
+  const semBox = f => `[...document.querySelectorAll('.optpop .opt-row')].find(r => r.textContent.includes('Active')).querySelector('input[data-f="${f}"]')`;
+  check('取消时间线连带取消提醒（界面与库里）',
+    semF.options.find(o => o.v === 'Active').alert === 0 && await evl(`${semBox('alert')}.checked`) === false,
+    JSON.stringify(semF.options.find(o => o.v === 'Active')));
+  await evl(`(() => { const b = ${semBox('alert')}; b.checked = true; b.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await settle();
+  const semA = (await (await fetch(`${APP}api/fields`)).json()).find(f => f.tbl === BK && f.key === 'status').options.find(o => o.v === 'Active');
+  check('勾提醒连带勾上时间线（界面与库里）',
+    semA.alert === 1 && semA.timeline === 1 && await evl(`${semBox('timeline')}.checked`) === true, JSON.stringify(semA));
+  check('条目跟着回到到期时间线',
+    (await (await fetch(APP + 'api/overview')).json()).upcoming.some(u => u.kind === BK && !u.muted));
 
   // 状态词表只增不改删：加得进去，且新值默认没有任何语义
   await evl(`closePop()`);

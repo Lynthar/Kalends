@@ -8,6 +8,7 @@ Kalends 是单个二进制 + 单个 SQLite 文件，怎么跑都行；推荐 Doc
 docker build -t kalends:local .
 mkdir -p /path/to/appdata/kalends
 chown -R 10001:10001 /path/to/appdata/kalends   # 容器内以非 root（uid 10001）运行，数据卷要先交给它
+mkdir -p /path/to/compose/kalends
 cp deploy/compose.yaml /path/to/compose/kalends/
 cd /path/to/compose/kalends && docker compose up -d
 curl -sf http://127.0.0.1:4180/api/health
@@ -37,7 +38,7 @@ sudo install -m755 kalends-*/kalends /usr/local/bin/kalends
 KALENDS_DATA=/path/to/data kalends
 ```
 
-发布页附 `SHA256SUMS`，`sha256sum -c SHA256SUMS` 可校验。或者自己编译：
+发布页附 `SHA256SUMS`，`sha256sum -c --ignore-missing SHA256SUMS` 可校验（只下了一个包时，不加 `--ignore-missing` 会因其余包缺席而退 1）。或者自己编译：
 
 ```bash
 cargo build --release
@@ -55,6 +56,19 @@ kalends restore --from /path/to/data/backups/snapshot-2026-01-01.db --to /path/t
 ```
 
 命令会复制快照、做 `integrity_check`、从原数据目录把 `logos/` 一并带上，并核对条目引用的图标是否在位；之后把 `KALENDS_DATA`（或 compose 的数据卷）指向新目录即可。`--from` 也可以直接指向整机备份里的 `kalends.db`：旁边的 `kalends.db-wal` 会一并并入，源文件不动。退出码 `0` 为完整恢复；`1` 为恢复失败（目标目录还原成原样），或数据库完好但有引用文件缺失（会逐个列出）；`2` 为用法错误。目标目录必须为空——恢复永不覆盖在用数据。
+
+**Docker 部署**用同一个镜像跑这条命令：新目录先建好并交给 uid 10001（容器里以它运行，写不进去会直接失败），原数据卷只读挂进去即可，`logos/` 照样从里面带出来：
+
+```bash
+mkdir -p /path/to/appdata/kalends-restored
+chown 10001:10001 /path/to/appdata/kalends-restored
+docker run --rm \
+  -v /path/to/appdata/kalends:/data:ro \
+  -v /path/to/appdata/kalends-restored:/restored \
+  kalends:local kalends restore --from /data/backups/snapshot-2026-01-01.db --to /restored
+```
+
+退出码为 `0` 之后，把 `compose.yaml` 的数据卷改指 `/path/to/appdata/kalends-restored`，再 `docker compose up -d`。
 
 升级版本时，应用会在跑数据库迁移之前自动往 `backups/` 落一份 `pre-migration-v<N>.db`；落不下去（如磁盘满）会拒绝启动。回滚部署或迁移出问题时，从这份快照恢复。
 

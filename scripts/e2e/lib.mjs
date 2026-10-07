@@ -206,6 +206,16 @@ export async function openPage() {
 
 // 表格与菜单的度量助手：多个套件共用，量的都是 #view-subs
 export const helpers = (evl, sleepFn = sleep) => ({
+  // 等页面里的条件成立（轮询）。等不到给 false 交给断言报 FAIL——固定 sleep 在慢机上不够，
+  // 下一步就会点在上一步还没落定的界面上
+  waitFor: async (expr, ms = 5000) => {
+    for (const end = Date.now() + ms; Date.now() < end; await sleepFn(40)) {
+      try { if (await evl(expr)) return true; } catch {}
+    }
+    return false;
+  },
+  // 页面里排着的写入连同它们的刷新都落定
+  settle: () => evl('writesSettled()'),
   // 点表头 → 菜单 → 点条目
   menuClick: async (thSel, itemText) => {
     await evl(`document.querySelector('${thSel}').click()`);

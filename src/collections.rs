@@ -32,7 +32,7 @@ pub fn router() -> Router<App> {
         .route("/api/collections/{key}/items", get(items_list).post(items_create))
         .route("/api/collections/{key}/items/order", put(items_order))
         .route("/api/items/bulk_delete", post(items_bulk_delete))
-        // 条目更新是 PATCH 不是 PUT：语义就是局部更新（缺席即保持），见 `merge_over`
+        // 条目更新是 PATCH 不是 PUT：语义就是局部更新（缺席即保持），见 `update_item`
         .route("/api/items/{id}", patch(items_update).delete(items_delete))
         .route("/api/items/{id}/renew", post(items_renew))
         .route("/api/items/{id}/logo", post(logo_set).delete(logo_clear))
@@ -794,10 +794,10 @@ pub fn item_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "name": r.get::<_, String>(2)?,
         "parent_id": r.get::<_, Option<i64>>(3)?,
         "status": r.get::<_, String>(4)?,
-        "price": r.get::<_, Option<f64>>(5)?,
+        "price": crate::db::as_real(r.get_ref(5)?),
         "currency": r.get::<_, Option<String>>(6)?,
         "cycle": r.get::<_, Option<String>>(7)?,
-        "cycle_days": r.get::<_, Option<i64>>(8)?,
+        "cycle_days": crate::db::as_int(r.get_ref(8)?),
         "next_renewal": r.get::<_, Option<String>>(9)?,
         "last_renewed": r.get::<_, Option<String>>(10)?,
         "url": r.get::<_, Option<String>>(11)?,
@@ -1105,18 +1105,9 @@ pub fn insert_item(conn: &Connection, coll: i64, b: &Value) -> anyhow::Result<i6
     Ok(id)
 }
 
-/// 局部更新的合并规则，**全项目只此一条**：请求里**出现**的键写入
-/// （`""` 与 `null` 都表示清空），**缺席**的键保持原值；`extra` 作为一个整体值走
-/// 同一条规则。全量替换那套「body 漏一列就清一列」正是这条协议要根除的。
-pub fn merge_over(cur: &Value, b: &Value, cols: impl Iterator<Item = &'static str>) -> Value {
-    let mut out = serde_json::Map::new();
-    for k in cols {
-        let v = b.get(k).or_else(|| cur.get(k)).cloned().unwrap_or(Value::Null);
-        out.insert(k.to_string(), v);
-    }
-    Value::Object(out)
-}
-
+/// 局部更新，**全项目只此一条**：请求里**出现**的列写入（`""` 与 `null` 都表示清空），**缺席**的列
+/// 一个字节都不碰；`extra` 作为一个整体值走同一条规则。全量替换那套「body 漏一列就清一列」正是这条
+/// 协议要根除的；只写出现的列，也让读不出的存量值（宽松读成了 null）不会被一次无关的保存清掉。
 pub fn update_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<()> {
     let cur = conn
         .query_row(&format!("SELECT {ITEM_COLS} FROM items WHERE id=?1"), [id], item_row)
@@ -1129,19 +1120,23 @@ pub fn update_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<()> 
     // 改任何别的字段都会被一个自己没碰过的字段 400 掉。
     let mut incoming = b.clone();
     normalize_shaped_fields(conn, coll, &mut incoming)?;
-    let b = merge_over(&cur, &incoming, WRITE_COLS.split(',').map(str::trim));
-    check_parent(conn, coll, Some(id), i(&b, "parent_id"))?;
-    let mut vals = item_values(&b)?;
-    let sets = WRITE_COLS
+    // 父行规则同理只判请求带来的 parent_id：一条存量坏链接不该让这行连备注都改不了
+    if incoming.get("parent_id").is_some() {
+        check_parent(conn, coll, Some(id), i(&incoming, "parent_id"))?;
+    }
+    let (sets, mut vals): (Vec<String>, Vec<rusqlite::types::Value>) = WRITE_COLS
         .split(',')
+        .map(str::trim)
+        .zip(item_values(&incoming)?)
+        .filter(|(c, _)| incoming.get(*c).is_some())
         .enumerate()
-        .map(|(n, c)| format!("{}=?{}", c.trim(), n + 1))
-        .collect::<Vec<_>>()
-        .join(",");
+        .map(|(n, (c, v))| (format!("{c}=?{},", n + 1), v))
+        .unzip();
     vals.push(rusqlite::types::Value::from(id));
     conn.execute(
         &format!(
-            "UPDATE items SET {sets},updated_at=datetime('now') WHERE id=?{}",
+            "UPDATE items SET {}updated_at=datetime('now') WHERE id=?{}",
+            sets.concat(),
             vals.len()
         ),
         rusqlite::params_from_iter(vals),
@@ -1266,10 +1261,10 @@ pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value
                     r.get(0)?,
                     r.get(1)?,
                     r.get(2)?,
-                    r.get(3)?,
+                    crate::db::as_real(r.get_ref(3)?),
                     r.get(4)?,
                     r.get(5)?,
-                    r.get(6)?,
+                    crate::db::as_int(r.get_ref(6)?),
                     r.get(7)?,
                     r.get(8)?,
                     r.get(9)?,
@@ -1998,39 +1993,37 @@ mod tests {
         assert_eq!(notes, "改备注");
     }
 
-    /// 局部更新的合并规则：缺席即保持、出现即写入、`""` 与 `null` 都是清空、
-    /// `extra` 作为一个整体值。这条是写入协议的地基，它一松，前端就得重新长出
-    /// "先铺整行再覆盖"的补偿代码。
+    /// 局部更新：缺席即保持、出现即写入、`""` 与 `null` 都是清空、`extra` 作为一个整体值。
+    /// 这条是写入协议的地基，它一松，前端就得重新长出"先铺整行再覆盖"的补偿代码。
     #[test]
     fn a_patch_only_touches_the_keys_it_carries() {
-        let cur = json!({
+        let conn = fresh();
+        let id = insert_item(&conn, coll(&conn, "subs"), &json!({
             "name": "Netflix", "price": 15.49, "currency": "USD", "cycle": "monthly",
-            "next_renewal": "2026-09-01", "logo": "item-1.png",
-            "extra": { "category": "Streaming", "payment_method": "Visa" },
-        });
-        let cols = || ["name", "price", "currency", "cycle", "next_renewal", "logo", "extra"].into_iter();
+            "next_renewal": "2026-09-01", "extra": { "category": "Streaming", "payment_method": "Visa" },
+        }))
+        .unwrap();
+        conn.execute("UPDATE items SET logo='item-1.png' WHERE id=?1", [id]).unwrap();
+        let row = || conn.query_row(&format!("SELECT {ITEM_COLS} FROM items WHERE id=?1"), [id], item_row).unwrap();
 
         // 只发一个键：其余原样，连表单里根本没有的 logo 也在
-        let got = merge_over(&cur, &json!({ "name": "改过名" }), cols());
+        update_item(&conn, id, &json!({ "name": "改过名" })).unwrap();
+        let got = row();
         assert_eq!(got["name"], json!("改过名"));
         assert_eq!(got["price"], json!(15.49));
         assert_eq!(got["logo"], json!("item-1.png"));
         assert_eq!(got["extra"]["payment_method"], json!("Visa"));
 
         // 清空要显式说出来：null 与空串都算，别的键不受连累
-        let got = merge_over(&cur, &json!({ "price": null, "next_renewal": "" }), cols());
+        update_item(&conn, id, &json!({ "price": null, "next_renewal": "" })).unwrap();
+        let got = row();
         assert_eq!(got["price"], Value::Null);
-        assert_eq!(got["next_renewal"], json!(""));
+        assert_eq!(got["next_renewal"], Value::Null);
         assert_eq!(got["currency"], json!("USD"));
 
         // extra 是一个整体值：出现即整份替换（少写的键就是要删的键）
-        let got = merge_over(&cur, &json!({ "extra": { "category": "AI" } }), cols());
-        assert_eq!(got["extra"], json!({ "category": "AI" }));
-
-        // 现值里没有、请求里也没有的键 → NULL（新列刚加出来时就是这个形状）
-        let got = merge_over(&json!({ "name": "x" }), &json!({}), cols());
-        assert_eq!(got["price"], Value::Null);
-        assert_eq!(got["name"], json!("x"));
+        update_item(&conn, id, &json!({ "extra": { "category": "AI" } })).unwrap();
+        assert_eq!(row()["extra"], json!({ "category": "AI" }));
     }
 
     /// 一行字段的可比形态。**故意不含 pos**：迁移 0008 自己编了一套序号，而字段顺序本就
@@ -2507,6 +2500,47 @@ mod tests {
         update_item(&conn, tier, &json!({ "parent_id": other })).unwrap();
         update_item(&conn, tier, &json!({ "parent_id": null })).unwrap();
         assert_eq!(one::<Option<i64>>(&conn, "SELECT parent_id FROM items WHERE id=?1", [tier]), None);
+    }
+
+    /// 一行数值列存成了别的类型（SQLite 工具里把价格填成 `12,50`、天数填成小数）：概览、
+    /// 条目列表、续费都照常，坏行进点名清单；只改备注的 PATCH 不碰那个读不出的原值
+    #[test]
+    fn a_row_with_a_mistyped_number_is_named_instead_of_failing_every_read() {
+        let conn = fresh();
+        let due = (engine::today() + chrono::Days::new(5)).to_string();
+        let ok = insert_item(&conn, coll(&conn, "subs"), &json!({ "name": "好", "status": "Active", "price": 5, "currency": "USD", "cycle": "monthly", "next_renewal": due })).unwrap();
+        let price = insert_item(&conn, coll(&conn, "subs"), &json!({ "name": "坏价", "status": "Active", "currency": "USD", "cycle": "monthly", "next_renewal": due })).unwrap();
+        let days = insert_item(&conn, coll(&conn, "sims"), &json!({ "name": "坏天数", "status": "Active", "cycle": "days", "cycle_days": 30, "last_renewed": due })).unwrap();
+        conn.execute("UPDATE items SET price='12,50' WHERE id=?1", [price]).unwrap();
+        conn.execute("UPDATE items SET cycle_days=1.5 WHERE id=?1", [days]).unwrap();
+
+        let ups = engine::upcoming(&conn).unwrap();
+        assert!(ups.iter().any(|u| u["id"] == ok) && ups.iter().any(|u| u["id"] == price));
+        let gaps = engine::uncounted(&conn).unwrap();
+        assert!(gaps.iter().any(|g| g["id"] == price && g["missing"] == "金额"), "{gaps:?}");
+        let und = engine::undated(&conn).unwrap();
+        assert!(und.iter().any(|u| u["id"] == days && u["missing"] == "周期天数"), "{und:?}");
+        assert!(items_of(&conn, "subs").unwrap().iter().any(|r| r["id"] == price && r["price"].is_null()));
+        renew_item(&conn, price, &json!({})).unwrap();
+
+        update_item(&conn, price, &json!({ "notes": "只改备注" })).unwrap();
+        assert_eq!(one::<String>(&conn, "SELECT typeof(price)||':'||price FROM items WHERE id=?1", [price]), "text:12,50");
+    }
+
+    /// 父行规则只判这次请求带来的 `parent_id`：库里一条存量三层链（旧界面造得出来）
+    /// 不能让链上的行连备注都改不了；请求真带了坏父行仍然拦
+    #[test]
+    fn a_stale_bad_parent_link_does_not_lock_the_row() {
+        let conn = fresh();
+        let subs = coll(&conn, "subs");
+        let svc = insert_item(&conn, subs, &json!({ "name": "服务" })).unwrap();
+        let tier = insert_item(&conn, subs, &json!({ "name": "档位", "parent_id": svc })).unwrap();
+        let kid = insert_item(&conn, subs, &json!({ "name": "孙" })).unwrap();
+        conn.execute("UPDATE items SET parent_id=?1 WHERE id=?2", [tier, kid]).unwrap();
+        update_item(&conn, kid, &json!({ "notes": "只改备注" })).unwrap();
+        update_item(&conn, tier, &json!({ "notes": "只改备注" })).unwrap();
+        assert_eq!(one::<Option<i64>>(&conn, "SELECT parent_id FROM items WHERE id=?1", [kid]), Some(tier), "存量链接原样保留");
+        assert!(update_item(&conn, kid, &json!({ "parent_id": tier })).is_err(), "请求带来的三层仍拦");
     }
 
     /// 批量端点的 ids：整数数组照收，掺了非整数、空数组、没这个键都整体拒——

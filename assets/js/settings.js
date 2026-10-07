@@ -153,7 +153,8 @@ function settingsBody() {
   const thresholds = [...new Set(f.thresholds.value.split(/[,，\s]+/).filter(Boolean).map(Number))]
     .filter(n => Number.isInteger(n) && n >= 0).sort((a, b) => b - a);
   return {
-    'auth.pin': f.pin.value.replace(/[^A-Za-z0-9]/g, ''),
+    // 原样交给后端判：前端先剥掉符号的话，`12-34` 存成 `1234`、全是符号的存成空串＝关掉了门
+    'auth.pin': f.pin.value.trim(),
     'meta.proxy': f.meta_proxy.value.trim(),
     'notify.thresholds': JSON.stringify(thresholds),
     'notify.digest_time': f.digest_time.value || D['notify.digest_time'],
@@ -173,17 +174,17 @@ function settingsBody() {
 
 $('#form-settings').addEventListener('submit', async e => {
   e.preventDefault();
-  try {
-    const body = settingsBody();
+  let body;
+  try { body = settingsBody(); } catch (err) { return void toast(err.message, true); }
+  // 存完整轮刷新：显示币种这类设置改的是整页的呈现，只重读设置的话要等下次刷新才折算
+  const ok = await write('settings', async () => {
     await api('/api/settings', { method: 'PUT', body: JSON.stringify(body) });
-    // 设了 PIN 就给当前浏览器立刻发一份，避免下一次请求被自己锁在门外
+    // 设了 PIN 就给当前浏览器立刻发一份，避免接下来的刷新被自己锁在门外
     if (body['auth.pin']) {
       document.cookie = `kalends_pin=${body['auth.pin']};path=/;max-age=31536000;SameSite=Lax`;
     }
-    $('#dlg-settings').close();
-    toast('设置已保存');
-    state.settings = await api('/api/settings');
-  } catch (err) { toast(err.message, true); }
+  }, { done: () => '设置已保存' });
+  if (ok) $('#dlg-settings').close();
 });
 
 $('#btn-backup').onclick = async () => {

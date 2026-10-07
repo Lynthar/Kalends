@@ -40,7 +40,7 @@ const TYPES = {
       // 存储形态跟着**声明的类型**走，不跟呈现走：真多选列存数组，文本列的多选呈现拼回
       // 字符串——真列没有数组值这回事，写进去后端读不出来就当成空，那一格原值静默没了
       const v = col.t === 'multi' ? sel : sel.join(', ');
-      return patchRow(tab, it, toExtra ? extraPatch(it, k, v) : { [k]: v });
+      return patchRow(tab, it, toExtra ? extraPatch(k, v) : { [k]: v });
     }),
     icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5.5 4h8M5.5 8h8M5.5 12h8"/><circle cx="2.4" cy="4" r=".95" fill="currentColor" stroke="none"/><circle cx="2.4" cy="8" r=".95" fill="currentColor" stroke="none"/><circle cx="2.4" cy="12" r=".95" fill="currentColor" stroke="none"/></svg>',
   },

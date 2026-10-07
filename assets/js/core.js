@@ -5,17 +5,41 @@
 'use strict';
 
 const $ = s => document.querySelector(s);
+// 浏览器禁了站点存储时，连读 localStorage 都抛 SecurityError；顶层抛出去整页就是空壳
+function stored(k) {
+  try { return localStorage.getItem(k); } catch { return null; }
+}
 const state = {
   overview: null, subs: [], sims: [], vps: [], settings: {}, defaults: {}, fields: [], fx: null,
   tab: 'subs',
-  upWindow: '', upFolded: localStorage.getItem('kalends.upfold') === '1',
+  upWindow: '', upFolded: stored('kalends.upfold') === '1',
 };
 
 // 各表视图偏好（列排序 / 列筛选 / 表内搜索 / 列类型），存本浏览器
 const VIEWS_KEY = 'kalends.views.v1';
 const views = { subs: {}, sims: {}, vps: {} };
-try { Object.assign(views, JSON.parse(localStorage.getItem(VIEWS_KEY) || '{}')); } catch {}
-for (const t of ['subs', 'sims', 'vps']) views[t] = { sort: null, filters: {}, q: '', widths: {}, order: null, hiddenCols: [], types: {}, keys: null, collapsed: [], ...views[t] };
+try { Object.assign(views, JSON.parse(stored(VIEWS_KEY) || '{}')); } catch {}
+for (const t of ['subs', 'sims', 'vps']) views[t] = viewShape(views[t]);
+
+/* 一个库的视图偏好，形状不对的项回默认：它来自 localStorage，可能是旧代码、别的设备或手改
+   写下的。一个 filters:null 或数字 q 就让所有库的表格白屏，而界面上没有重置入口 */
+function viewShape(v) {
+  const obj = x => (x && typeof x === 'object' && !Array.isArray(x) ? x : {});
+  const strs = x => (Array.isArray(x) ? x.filter(s => typeof s === 'string') : []);
+  const o = obj(v), s = obj(o.sort);
+  return {
+    ...o,
+    sort: typeof s.key === 'string' && (s.dir === 1 || s.dir === -1) ? { key: s.key, dir: s.dir } : null,
+    filters: obj(o.filters),
+    q: typeof o.q === 'string' ? o.q : '',
+    widths: Object.fromEntries(Object.entries(obj(o.widths)).filter(([, w]) => Number.isFinite(w) && w > 0)),
+    order: Array.isArray(o.order) ? strs(o.order) : null,
+    hiddenCols: strs(o.hiddenCols),
+    types: Object.fromEntries(Object.entries(obj(o.types)).filter(([, t]) => typeof t === 'string')),
+    keys: Array.isArray(o.keys) ? strs(o.keys) : null,
+    collapsed: Array.isArray(o.collapsed) ? o.collapsed.filter(Number.isInteger) : [],
+  };
+}
 // 存不进去（隐私模式 / 配额满）只丢本机偏好，不该打断操作；但要留一句，
 // 否则「列宽设了下次又没了」永远查不出所以然
 function saveViews() {
@@ -153,11 +177,11 @@ function reorderDnD(el, { group, axis, key, onDrop, onStart }) {
   el.addEventListener('dragend', () => { dndFrom = null; clearDndMarks(); });
 }
 
-async function loadAll() {
+async function fetchAll() {
   // 汇率拉不到不该拖垮首屏——折算是可选视图，没有汇率就按原币显示并如实说一声
   const noFx = { display: '', rates: {}, live: [], baseline_period: '', source: '' };
   // 先取概览（里面带库清单）与设置，之后才知道有哪些库要拉条目
-  [state.overview, state.settings, state.defaults, state.fx] = await Promise.all([
+  const [overview, settings, defaults, fx] = await Promise.all([
     api('/api/overview'),
     api('/api/settings'),
     api('/api/settings/defaults'),
@@ -166,17 +190,74 @@ async function loadAll() {
       return noFx;
     }),
   ]);
-  const wins = ['7', '14', '30', '60', '90', '180', 'all'];
-  state.upWindow = wins.includes(state.settings['ui.upcoming_days'])
-    ? state.settings['ui.upcoming_days'] : state.defaults['ui.upcoming_days'];
   // 表格的列由字段注册表决定，所以每次全量加载都要一并刷新，
   // 否则新建库/加列之后前端还按旧字段集渲染（会渲染出没有名称格的空行）
-  try { await refreshFields(); } catch (e) { toast('字段注册加载失败：' + e.message, true); }
+  let fields = null;
+  try { fields = await fetchFields(); } catch (e) { toast('字段注册加载失败：' + e.message, true); }
   // 所有库（含三个预置库）的条目都走同一条通用端点
-  await Promise.all(colls().map(async c => {
-    state[c.key] = await api(`/api/collections/${encodeURIComponent(c.key)}/items`);
+  const rows = {};
+  await Promise.all((overview.collections || []).map(async c => {
+    rows[c.key] = await api(`/api/collections/${encodeURIComponent(c.key)}/items`);
   }));
-  renderAll();
+  return { overview, settings, defaults, fx, fields, rows };
+}
+
+/* 整轮刷新的结果先落局部，确认仍是最后出发的那一轮才整份写进 state：早出发的一轮可能读在
+   某次写入之前，晚到了就把新值盖回旧值，下一次编辑再把旧值写回库。作废的一轮转去等最新那轮，
+   所以 await loadAll() 之后读到的总是最新的 state。 */
+let latestLoad = null;
+function loadAll() {
+  const run = fetchAll().then(d => {
+    if (run !== latestLoad) return latestLoad;
+    Object.assign(state, { overview: d.overview, settings: d.settings, defaults: d.defaults, fx: d.fx }, d.rows);
+    if (d.fields) state.fields = d.fields;
+    const wins = ['7', '14', '30', '60', '90', '180', 'all'];
+    state.upWindow = wins.includes(d.settings['ui.upcoming_days'])
+      ? d.settings['ui.upcoming_days'] : d.defaults['ui.upcoming_days'];
+    renderAll();
+  }, e => {
+    if (run !== latestLoad) return latestLoad;
+    throw e;
+  });
+  latestLoad = run;
+  return run;
+}
+
+/* ── 写入：改服务端数据的操作都走 write ── */
+const writeTails = new Map();
+const busyWrite = key => writeTails.has(key);
+// key 上排着的写入连同它们的刷新都落定。编辑器开之前等它，免得拿旧行去拼整份 extra
+const settled = key => writeTails.get(key) || Promise.resolve();
+// 所有写入都落定；e2e 拿它代替「点完 sleep 一下」
+const writesSettled = () => Promise.all([...writeTails.values()]).then(() => latestLoad?.catch(() => {}));
+
+/**
+ * 同一对象（key）的写入排队执行，写成后刷新。写失败与「写成了、刷新失败」分开报：
+ * 写成了却报失败，用户会重试，续费这类不幂等的写入就多记一笔。
+ * @param {string} key 被写的对象，如 `item:12`；同 key 串行，不同 key 互不等待
+ * @param {() => Promise<*>} run 真正的写请求，轮到它时才执行——所以能读到前一次写入之后的 state
+ * @param {object} [o]
+ * @param {(r:*) => string} [o.done] 成功提示
+ * @param {boolean} [o.once] 不幂等（续费、新建）：同 key 还在途时拒收，而不是排队再做一遍
+ * @returns {Promise<*>} run 的结果（没有结果给 true）；写失败给 undefined，提示已经报过
+ */
+function write(key, run, { done, once } = {}) {
+  if (once && busyWrite(key)) {
+    toast('上一次还在处理，稍等', true);
+    return Promise.resolve(undefined);
+  }
+  const job = settled(key).then(async () => {
+    let r;
+    try { r = await run(); } catch (e) { toast(e.message, true); return undefined; }
+    const said = done ? done(r) : '已保存';
+    if (done) toast(said);
+    try { await loadAll(); }
+    catch (e) { toast(`${said}，但列表没刷新（${e.message}）：别重复操作，稍后刷新页面再看`, true); }
+    return r ?? true;
+  });
+  writeTails.set(key, job);
+  job.finally(() => { if (writeTails.get(key) === job) writeTails.delete(key); });
+  return job;
 }
 
 function renderAll() {
@@ -222,7 +303,7 @@ function renderUpcoming() {
       <button class="btn mini ghost" data-renew="${it.kind}:${it.id}" type="button">已${esc(it.verb || '续费')}</button>`;
     ol.appendChild(li);
   });
-  ol.querySelectorAll('[data-renew]').forEach(b => b.onclick = () => doRenew(b.dataset.renew));
+  ol.querySelectorAll('[data-renew]').forEach(b => b.onclick = () => doRenew(b.dataset.renew, b));
 
   // 该上时间线却算不出到期日的条目。不点名的话它们既不在这张表上、也不进日历、
   // 更不会提醒——你以为在管，其实它从界面上消失了
@@ -280,24 +361,26 @@ $('#up-title').onclick = toggleUpFold;
 $('#up-window').onchange = e => setUpWindow(e.target.value);
 $('#up-more').onclick = () => setUpWindow('all');
 
-async function doRenew(key) {
+async function doRenew(key, btn) {
   const [kind, id] = key.split(':');
   // 表格里的行未必落在到期窗口内，所以先从本库找，找不到再回退到到期时间线
   const it = (state[kind] || []).find(x => x.id === +id)
     || (state.overview?.upcoming || []).find(u => u.kind === kind && u.id === +id);
   const verb = it?.verb || collOf(kind)?.verb || '续费';
+  if (busyWrite(`item:${id}`)) return void toast('上一次还在处理，稍等', true);
   if (!confirm(`记一笔「${it?.name || ''}」的${verb}？`)) return;
-  try {
-    const r = await api(`/api/items/${id}/renew`, { method: 'POST', body: '{}' });
+  // 慢链路上一个往返内毫无动静，用户就会再点一次、再确认一次——多记一笔、多推一期
+  const was = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = '记账中…'; }
+  await write(`item:${id}`, () => api(`/api/items/${id}/renew`, { method: 'POST', body: '{}' }), {
+    once: true,
     // 报出下次到期是哪天（renew_from='today' 会把账单日拽走，说出来才看得见）；日期由
-    // 后端算，前端不自己算。算不出到期日时后端仍把上次续费日记成今天（给缺日期的条目
-    // 补日期的既定路径）——旧日期被覆盖要说出来
-    const stamped = r?.last_renewed;
-    toast(r?.due ? `已记账，下次到期 ${r.due}`
-      : stamped ? `已记账，上次${verb}日记作 ${stamped}；这条算不出到期日（没有周期或买断），到期日请手动改`
-      : '已记一笔；这条算不出到期日（没有周期或买断），到期日请手动改');
-    await loadAll();
-  } catch (e) { toast(e.message, true); }
+    // 后端算，前端不自己算。算不出到期日时后端仍把上次续费日记成今天——旧日期被覆盖要说出来
+    done: r => r?.due ? `已记账，下次到期 ${r.due}`
+      : r?.last_renewed ? `已记账，上次${verb}日记作 ${r.last_renewed}；这条算不出到期日（没有周期或买断），到期日请手动改`
+      : '已记一笔；这条算不出到期日（没有周期或买断），到期日请手动改',
+  });
+  if (btn?.isConnected) { btn.disabled = false; btn.textContent = was; }
 }
 
 /* ── 支出 ── */

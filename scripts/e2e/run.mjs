@@ -13,7 +13,7 @@ import {
 // 顺序无关；api 排第一是因为它最快、不用浏览器
 const ALL = [
   'api', 'overview', 'table-view', 'persistence', 'inline-edit', 'item-form', 'fields',
-  'rows', 'ledger-settings', 'a11y-style', 'regressions', 'collections',
+  'rows', 'ledger-settings', 'a11y-style', 'regressions', 'collections', 'writes',
 ];
 const names = process.argv.slice(2);
 for (const n of names) if (!ALL.includes(n)) { console.error(`没有这个套件：${n}（可选：${ALL.join(' ')}）`); process.exit(2); }

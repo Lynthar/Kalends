@@ -22,8 +22,9 @@ const SEM_DEFAULT = {
 };
 function semOf(key, status) {
   const o = (fieldOf(key, 'status')?.options || []).find(x => x.v === status);
-  if (o && ['spend', 'alert', 'timeline'].some(f => f in o)) return o;
-  return SEM_DEFAULT[status] || { spend: 0, alert: 0, timeline: 0 };
+  const s = o && ['spend', 'alert', 'timeline'].some(f => f in o) ? o : SEM_DEFAULT[status] || { spend: 0, alert: 0, timeline: 0 };
+  // 提醒蕴含时间线（同后端 sem_map）：只勾提醒的存量，浮层上也得显示成在时间线上
+  return { ...s, timeline: s.timeline || s.alert };
 }
 const statusOrder = key => (fieldOf(key, 'status')?.options || []).map(o => o.v);
 
@@ -87,13 +88,10 @@ function colFromField(key, f) {
 
 /* ── 库顺序：拖标签换位，落到 collections.pos（跨设备），与本机列序不是一回事 ── */
 // 库序落库只此一条：拖标签与库设置里的「前移 / 后移」写同一个端点，别再各写一份
-async function putCollOrder(keys) {
-  try {
-    await api('/api/collections/order', {
-      method: 'PUT', body: JSON.stringify({ ids: keys.map(k => collOf(k).id) }),
-    });
-    await loadAll();
-  } catch (err) { toast(err.message, true); }
+function putCollOrder(keys) {
+  return write('coll:order', () => api('/api/collections/order', {
+    method: 'PUT', body: JSON.stringify({ ids: keys.map(k => collOf(k).id) }),
+  }));
 }
 
 function initTabDrag(btn, key) {
@@ -154,7 +152,7 @@ function ensureCollDom(c) {
   HEAD_SEL[key] = `.tablewrap[data-tab="${key}"] thead`;
   SEARCH_FIELDS[key] = r => [r.name, r.notes, ...Object.values(r.extra || {}).flatMap(v => Array.isArray(v) ? v : [v])];
   RENDER[key] = () => renderColl(key);
-  views[key] = { sort: null, filters: {}, q: '', widths: {}, order: null, hiddenCols: [], types: {}, keys: null, collapsed: [], ...views[key] };
+  views[key] = viewShape(views[key]);
   COLS[key] = Object.fromEntries(shownFields(key).map(f => [f.key, colFromField(key, f)]));
   const head = $(HEAD_SEL[key]);
   const want = collThead(key);
@@ -274,9 +272,13 @@ function renderColl(key) {
     tr.innerHTML = `${tds}<td class="ops">
         ${canRenew ? `<button class="btn link" data-renew type="button">已${esc(c.verb || '续费')}</button>` : ''}
       </td>`;
-    tr.querySelector('[data-open]').onclick = () => openItemDialog(key, it);
+    // 这一行还有保存在路上就等它落定：表单拿开表那一刻的行当底，旧行会把刚存的值改回去
+    tr.querySelector('[data-open]').onclick = () => settled(`item:${it.id}`).then(() => {
+      const fresh = state[key]?.find(r => r.id === it.id);
+      if (fresh) openItemDialog(key, fresh);
+    });
     const rb = tr.querySelector('[data-renew]');
-    if (rb) rb.onclick = () => doRenew(`${key}:${it.id}`);
+    if (rb) rb.onclick = () => doRenew(`${key}:${it.id}`, rb);
     const tg = tr.querySelector('[data-tgl]');
     if (tg) tg.onclick = () => {
       const s = new Set(views[key].collapsed || []);
@@ -316,6 +318,21 @@ function itemDialog() {
   d.querySelector('#item-fields').addEventListener('input', e => {
     if (e.target.matches('[data-f="url"], [data-urlfield]')) syncGrabBtn();
   });
+  // 记下用户动过哪些控件：保存只写这些。控件表达不了的存量值（词表外的状态、非数字的数值）
+  // 一打开就显示成了别的样子，照控件现值整张写回去就是一次静默改写
+  const touch = e => {
+    const el = e.target;
+    const k = el.dataset.f || el.closest('[data-mbox]')?.dataset.mbox || (el.matches('[data-parent]') ? 'parent_id' : '');
+    if (k) editingItem?.touched.add(k);
+  };
+  d.querySelector('#item-fields').addEventListener('input', touch);
+  d.querySelector('#item-fields').addEventListener('change', touch);
+  // 图标走自己的端点、当场生效；点「取消」也得让表格跟上，不然行里还是旧图标
+  d.addEventListener('close', () => {
+    if (!editingItem?.logoChanged) return;
+    editingItem.logoChanged = false;
+    loadAll().catch(err => toast(err.message, true));
+  });
   return d;
 }
 
@@ -339,7 +356,10 @@ const fixedVocab = f => f.src === 'col' && f.key === 'cycle';
 // 单选下拉的候选：一律 {v: 存回去的值, label: 给人看的文案}。
 function selOptions(key, f, cur) {
   if (fixedVocab(f)) {
-    return CYCLE_ORDER.filter(Boolean).map(v => ({ v, label: CYCLE_LABEL[v] }));
+    const out = CYCLE_ORDER.filter(Boolean).map(v => ({ v, label: CYCLE_LABEL[v] }));
+    // 档位外的存量值照原样列出，免得表单把它显示成空
+    if (cur && !CYCLE_ORDER.includes(cur)) out.push({ v: cur, label: `${cur}（不认识的周期）` });
+    return out;
   }
   const vs = fieldOptions(key, f);
   if (cur && !vs.includes(cur)) vs.push(cur);
@@ -356,13 +376,18 @@ function initMoptAdd(inp) {
     inp.value = '';
     if (!val) return;
     const checks = inp.parentElement.querySelector('[data-mbox]');
-    const same = [...checks.querySelectorAll('input[type=checkbox]')].find(i => i.value === val);
-    if (same) { same.checked = true; same.scrollIntoView({ block: 'nearest' }); return; }
-    const l = document.createElement('label');
-    l.className = 'check';
-    l.innerHTML = `<input type="checkbox" value="${esc(val)}" checked><span>${esc(val)}</span>`;
-    checks.appendChild(l);
-    l.scrollIntoView({ block: 'nearest' });
+    let box = [...checks.querySelectorAll('input[type=checkbox]')].find(i => i.value === val);
+    if (!box) {
+      const l = document.createElement('label');
+      l.className = 'check';
+      l.innerHTML = `<input type="checkbox" value="${esc(val)}"><span>${esc(val)}</span>`;
+      checks.appendChild(l);
+      box = l.querySelector('input');
+    }
+    box.checked = true;
+    box.scrollIntoView({ block: 'nearest' });
+    // 代码改的勾选不会自己发 change：表单靠它记「动过哪些控件」，不发就存不上
+    box.dispatchEvent(new Event('change', { bubbles: true }));
   });
 }
 
@@ -380,12 +405,13 @@ function initSoptAdd(inp, tr = v => v) {
       sel.appendChild(Object.assign(document.createElement('option'), { value: val, textContent: val }));
     }
     sel.value = val;
+    sel.dispatchEvent(new Event('change', { bubbles: true })); // 同上：代码改的值不会自己发 change
   });
 }
 
 function openItemDialog(key, it) {
   const c = collOf(key);
-  editingItem = { key, id: it?.id ?? null, row: it || {} };
+  editingItem = { key, id: it?.id ?? null, row: it || {}, touched: new Set() };
   const d = itemDialog();
   $('#dlg-item-title').textContent = `${it ? '编辑' : '新增'}${c?.name || ''}`;
   const box = $('#item-fields');
@@ -438,6 +464,8 @@ function fieldControl(key, f, it) {
     if (!fixedVocab(f)) initSoptAdd(lab.querySelector('.sopt-add'));
   } else if (f.ftype === 'status') {
     const opts = statusOrder(key);
+    // 词表外的存量值也列出来：不列的话浏览器选中首项，表单显示的就不是这一行真正的状态
+    if (val && !opts.includes(val)) opts.unshift(val);
     lab.innerHTML = `<span>${esc(f.name || f.key)}</span><select data-f="${esc(f.key)}">${opts.map(o => `<option${o === (val || 'Planned') ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
   } else if (f.key === 'price' && f.src === 'col') {
     // 币种并进费用栏：金额与币种一起填。currency 不是注册字段（迁移 0013 撤了它的列），
@@ -510,14 +538,15 @@ function logoRow(it) {
   const prev = lab.querySelector('.logo-prev');
   const clear = lab.querySelector('[data-logo-clear]');
   const grab = lab.querySelector('[data-logo-grab]');
-  const paint = name => {
+  const paint = (name, changed = true) => {
     editingItem.row = { ...editingItem.row, logo: name || null };
+    if (changed) editingItem.logoChanged = true;
     prev.innerHTML = name
       ? `<img class="slogo-view" src="/logos/${esc(name)}" alt="">`
       : '<span class="muted">未设置</span>';
     clear.hidden = !name;
   };
-  paint(it.logo);
+  paint(it.logo, false);
   // 这一颗还没挂进 DOM，先就地定它的显隐；之后跟着输入走的那次在 itemDialog 里（绑一次）
   grab.hidden = !formUrl();
   grab.onclick = async () => {
@@ -575,42 +604,55 @@ function readFieldControl(scope, f) {
   return TYPES[f.ftype]?.numeric ? (v === '' ? null : Number(v)) : v;
 }
 
-// 表单 → PATCH/POST 的体：只装这张表单读得到的字段，其余交给"缺席即保持"
-function itemBody(key, row) {
-  const patch = { extra: { ...(row.extra || {}) } };
+/**
+ * 表单 → PATCH/POST 的体：只装用户动过的控件（`touched` 为 null＝新建，全装），其余交给「缺席即保持」。
+ * @returns {(row:object) => object} 对着写入时的最新行求值：extra 是整份替换，以最新行为底、
+ *   只覆盖动过的键——没动的 extra 键照抄，不能省掉（省掉就是删掉）
+ */
+function itemBody(key, touched) {
+  const want = k => !touched || touched.has(k);
+  const cols = {};
+  const ext = {};
   for (const f of fieldsOf(key)) {
-    if (f.src === 'calc') continue;
+    if (f.src === 'calc' || !want(f.key)) continue;
     const val = readFieldControl('#item-fields', f);
     if (val === NO_CONTROL) continue;
-    if (f.src === 'col') patch[f.key] = val;
-    else if (val == null || val === '' || (Array.isArray(val) && !val.length)) delete patch.extra[f.key];
-    else patch.extra[f.key] = val;
+    if (f.src === 'col') cols[f.key] = val;
+    else ext[f.key] = val;
   }
   // 父条目有自己的下拉（不是注册字段）：选「（顶层）」＝ null ＝ 脱离父行
   const psel = document.querySelector('#item-fields [data-parent]');
-  if (psel) patch.parent_id = psel.value ? +psel.value : null;
+  if (psel && want('parent_id')) cols.parent_id = psel.value ? +psel.value : null;
   // 币种同理：它并进了费用栏，迁移 0013 起不再是注册字段，上面那圈循环读不到它
   const csel = document.querySelector('#item-fields [data-f="currency"]');
-  if (csel) patch.currency = fxCode(csel.value); // 手打的 usd 一律存成 USD；空串＝清空
-  // 就这些。表单没有的真列（SIM 没注册的周期、图标、手动序…）不出现在体里＝后端保持原值，
-  // 不必再按 items 的真列全集铺一遍底——那份铺底代码正是全量替换语义逼出来的
-  return patch;
+  if (csel && want('currency')) cols.currency = fxCode(csel.value); // 手打的 usd 一律存成 USD；空串＝清空
+  return row => {
+    if (!Object.keys(ext).length) return { ...cols };
+    const extra = { ...(row.extra || {}) };
+    for (const [k, v] of Object.entries(ext)) {
+      if (v == null || v === '' || (Array.isArray(v) && !v.length)) delete extra[k];
+      else extra[k] = v;
+    }
+    return { ...cols, extra };
+  };
 }
 
 document.addEventListener('submit', async e => {
   if (e.target.id !== 'form-item') return;
   e.preventDefault();
-  const { key, id, row } = editingItem || {};
+  const { key, id, touched } = editingItem || {};
   if (!key) return;
-  const body = itemBody(key, row || {});
-  if (!body.name) { toast('名称不能为空', true); return; }
-  try {
-    if (id) await api(`/api/items/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
-    else await api(`/api/collections/${encodeURIComponent(key)}/items`, { method: 'POST', body: JSON.stringify(body) });
-    $('#dlg-item').close();
-    toast('已保存');
-    await loadAll();
-  } catch (err) { toast(err.message, true); }
+  const nameEl = document.querySelector('#item-fields [data-f="name"]');
+  if (nameEl && !nameEl.value.trim()) { toast('名称不能为空', true); return; }
+  const dlg = $('#dlg-item');
+  if (id) {
+    // 表单在服务端收下之后才关：失败时用户填的东西还在
+    await patchRow(key, { id }, itemBody(key, touched), { written: () => dlg.close(), done: () => '已保存' });
+    return;
+  }
+  const body = itemBody(key, null)({});
+  if (await write(`new:${key}`, () => api(`/api/collections/${encodeURIComponent(key)}/items`,
+    { method: 'POST', body: JSON.stringify(body) }), { once: true, done: () => '已保存' })) dlg.close();
 });
 
 /* ── 库管理：新建 / 改名 / 图标 / 到期模型 / 删除 ── */
@@ -814,12 +856,9 @@ async function openCollDialog(c) {
   del.onclick = async () => {
     const n = (state[c.key] || []).length;
     if (!confirm(`删除库「${c.name}」${n ? `及其 ${n} 个条目` : ''}？此操作不可撤销。`)) return;
-    try {
-      await api(`/api/collections/${c.id}`, { method: 'DELETE' });
-      d.close();
-      toast('已删除');
-      await loadAll(); // 当前标签落到哪张表，由 syncColls 统一收拾
-    } catch (e) { toast(e.message, true); }
+    // 当前标签落到哪张表，由刷新里的 syncColls 统一收拾
+    if (await write(`coll:${c.id}`, () => api(`/api/collections/${c.id}`, { method: 'DELETE' }),
+      { once: true, done: () => '已删除' })) d.close();
   };
   d.showModal();
 }
@@ -840,21 +879,21 @@ document.addEventListener('submit', async e => {
     const to = body.due_anchor === 'next' ? '直接记下次到期日' : '上次续费 + 周期';
     if (!confirm(`把「${editingColl.name}」的到期模型改成「${to}」？\n\n新模型读的是另一个日期字段，已有条目在把它填上之前算不出到期日（会列在首页「算不出到期日」里）。改回来即可恢复。`)) return;
   }
-  try {
-    if (editingColl) await api(`/api/collections/${editingColl.id}`, { method: 'PUT', body: JSON.stringify(body) });
-    else {
-      const tpl = collTpl;
-      const c = await api('/api/collections', { method: 'POST', body: JSON.stringify({ ...body, template: tpl?.id }) });
-      await loadAll();
-      switchTab(c.key);
-      d.close();
-      toast(tpl?.fields.length ? `库已建好，${tpl.label}模板的字段已就位` : '库已建好，先在表头「＋」里加列');
-      return;
-    }
-    d.close();
-    toast('已保存');
-    await loadAll();
-  } catch (err) { toast(err.message, true); }
+  if (editingColl) {
+    const id = editingColl.id;
+    if (await write(`coll:${id}`, () => api(`/api/collections/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+      { done: () => '已保存' })) d.close();
+    return;
+  }
+  const tpl = collTpl;
+  // 新建不幂等：在途时再点一次就是多建一个同名库
+  const c = await write('coll:new', () => api('/api/collections', { method: 'POST', body: JSON.stringify({ ...body, template: tpl?.id }) }), {
+    once: true,
+    done: () => (tpl?.fields.length ? `库已建好，${tpl.label}模板的字段已就位` : '库已建好，先在表头「＋」里加列'),
+  });
+  if (!c?.key) return;
+  switchTab(c.key);
+  d.close();
 });
 
 $('#coll-add').onclick = () => openCollDialog(null);

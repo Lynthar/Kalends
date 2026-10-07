@@ -86,8 +86,10 @@ export default async function (t) {
   await evl(`openItemDialog('subs', state.subs.find(r => r.id === ${daysRow.id}))`);
   await sleep(400);
   await evl(`(() => {
-    document.querySelector('#item-fields [data-f="cycle"]').value = 'days';
-    document.querySelector('#item-fields [data-f="cycle_days"]').value = '';
+    // 表单只写用户动过的控件：程序赋值要像真人操作那样发 change，才算「动过」
+    const set = (sel, v) => { const el = document.querySelector(sel); el.value = v; el.dispatchEvent(new Event('change', { bubbles: true })); };
+    set('#item-fields [data-f="cycle"]', 'days');
+    set('#item-fields [data-f="cycle_days"]', '');
   })()`);
   await evl(`document.querySelector('#form-item').requestSubmit()`);
   await sleep(700);
@@ -175,7 +177,7 @@ export default async function (t) {
     const vs = [...sel.options].map(o => o.textContent.trim());
     return vs.includes('（顶层）') && vs.includes('Midjourney') && !vs.includes('旧订阅') && !vs.includes('Basic Plan');
   })()`) === true);
-  await evl(`(() => { const s = document.querySelector('#item-fields [data-parent]'); if (s) s.value = '${mjRow.id}'; })()`);
+  await evl(`(() => { const s = document.querySelector('#item-fields [data-parent]'); if (s) { s.value = '${mjRow.id}'; s.dispatchEvent(new Event('change', { bubbles: true })); } })()`);
   await sleep(200);
   await shot('13-parent-picker');
   await evl(`document.querySelector('#form-item').requestSubmit()`);
@@ -194,7 +196,7 @@ export default async function (t) {
   // 选回「（顶层）」＝脱离父行
   await evl(`openItemDialog('subs', state.subs.find(r => r.id === ${orphan.id}))`);
   await sleep(450);
-  await evl(`(() => { const s = document.querySelector('#item-fields [data-parent]'); if (s) s.value = ''; })()`);
+  await evl(`(() => { const s = document.querySelector('#item-fields [data-parent]'); if (s) { s.value = ''; s.dispatchEvent(new Event('change', { bubbles: true })); } })()`);
   await evl(`document.querySelector('#form-item').requestSubmit()`);
   await sleep(1200);
   check('选回顶层就脱离父行', (await (await fetch(APP + 'api/collections/subs/items')).json())

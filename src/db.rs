@@ -101,6 +101,24 @@ pub fn next_id(conn: &Connection, table: &str) -> rusqlite::Result<i64> {
     )
 }
 
+/// 宽松读条目的数值列：存储类型不对（SQLite 工具里把价格填成 `12,50`）给 None 而不是报错——
+/// 严格读的话一行坏值让概览、条目列表与 ICS 整体 500，提醒每轮停在同一处。
+pub fn as_real(v: rusqlite::types::ValueRef<'_>) -> Option<f64> {
+    match v {
+        rusqlite::types::ValueRef::Integer(n) => Some(n as f64),
+        rusqlite::types::ValueRef::Real(x) => Some(x),
+        _ => None,
+    }
+}
+
+/// 同 [`as_real`]，整数列；小数不截断，按读不出算。
+pub fn as_int(v: rusqlite::types::ValueRef<'_>) -> Option<i64> {
+    match v {
+        rusqlite::types::ValueRef::Integer(n) => Some(n),
+        _ => None,
+    }
+}
+
 /// 读一项设置。**`Err`（读不出来）与 `Ok(None)`（没这个键）不许折平**：把数据库故障
 /// 当成"没设"，PIN 门就在最不该开的时候敞开、提醒会静默停摆且日志零字。
 pub fn get_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {

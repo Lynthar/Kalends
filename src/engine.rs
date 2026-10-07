@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 use chrono::{Days, Local, Months, NaiveDate};
-use rusqlite::Connection;
+use rusqlite::{types::ValueRef, Connection};
 use serde_json::{json, Value};
 
 pub fn today() -> NaiveDate {
@@ -139,6 +139,7 @@ pub fn cycle_label(cycle: &str, cycle_days: Option<i64>) -> String {
 
 /// 状态的三层语义：计不计支出 / 发不发提醒 / 上不上到期时间线。
 /// 以各库状态词表选项上的标记为准（见 `sem_map`），读不到就回落到内置六值的既有含义。
+/// `alert` 为真则 `timeline` 必为真：提醒只发给时间线上的条目。
 #[derive(Clone, Copy)]
 pub struct StatusSem {
     pub spend: bool,
@@ -190,10 +191,12 @@ fn sem_map(conn: &Connection) -> Result<SemMap> {
             // 没带标记的选项（例如用户手加的状态）按内置默认理解，不是一律无语义
             let has_flags = ["spend", "alert", "timeline"].iter().any(|f| o.get(*f).is_some());
             let sem = if has_flags {
+                let alert = truthy(o.get("alert"));
+                // 提醒蕴含时间线：逐项提醒与摘要都只看时间线，只勾提醒的状态否则两头落空
                 StatusSem {
                     spend: truthy(o.get("spend")),
-                    alert: truthy(o.get("alert")),
-                    timeline: truthy(o.get("timeline")),
+                    alert,
+                    timeline: alert || truthy(o.get("timeline")),
                 }
             } else {
                 status_sem(v)
@@ -222,6 +225,8 @@ struct Row {
     name: String,
     status: String,
     price: Option<f64>,
+    /// 价格列存着读不出数的值：看着像没定价，其实是一笔漏算的钱，要点名
+    price_unreadable: bool,
     currency: Option<String>,
     cycle: Option<String>,
     cycle_days: Option<i64>,
@@ -267,9 +272,13 @@ impl Row {
     /// **买断要在最前面挡掉**：它没有"每月多少"可言，两种欠缺都不算它的——只豁免周期那一支的话，
     /// "买断 + 没填币种"仍会被点名，让人去补一个补了也照样不计入的字段。
     fn missing_for_spend(&self) -> Option<&'static str> {
-        if self.price.is_none() || self.cycle.as_deref() == Some("lifetime") {
+        if self.cycle.as_deref() == Some("lifetime") {
             return None;
         }
+        if self.price_unreadable {
+            return Some("金额");
+        }
+        self.price?; // 没填金额＝还没定价，不算欠缺
         if self.currency.as_deref().unwrap_or("").is_empty() {
             return Some("币种");
         }
@@ -306,6 +315,7 @@ fn rows(conn: &Connection) -> Result<Vec<Row>> {
     let out = stmt
         .query_map([], |r| {
             let extra: Option<String> = r.get(14)?;
+            let price = r.get_ref(8)?;
             Ok(Row {
                 key: r.get(0)?,
                 verb: r.get::<_, Option<String>>(1)?.unwrap_or_else(|| "续费".into()),
@@ -315,10 +325,11 @@ fn rows(conn: &Connection) -> Result<Vec<Row>> {
                 id: r.get(5)?,
                 name: r.get(6)?,
                 status: r.get(7)?,
-                price: r.get(8)?,
+                price: crate::db::as_real(price),
+                price_unreadable: !matches!(price, ValueRef::Null) && crate::db::as_real(price).is_none(),
                 currency: r.get(9)?,
                 cycle: r.get(10)?,
-                cycle_days: r.get(11)?,
+                cycle_days: crate::db::as_int(r.get_ref(11)?),
                 next_renewal: r.get(12)?,
                 last_renewed: r.get(13)?,
                 extra: crate::api::extra_json(extra),
@@ -487,6 +498,7 @@ mod tests {
             name: name.into(),
             status: "Active".into(),
             price: None,
+            price_unreadable: false,
             currency: None,
             cycle: None,
             cycle_days: None,
@@ -767,8 +779,8 @@ mod tests {
         assert_eq!(ups[1]["muted"], json!(true), "Ending 在时间线上但不提醒");
         assert_eq!(totals(&conn).unwrap(), [json!({ "currency": "USD", "monthly": 10.0, "annual": 120.0 })]);
 
-        // 词表里给「待寄回」加上标记：只上时间线、不计支出、不提醒；
-        // 把 Active 的时间线标记关掉：它应当从时间线上下来（语义是数据，不是字面量）
+        // 词表里给「待寄回」加上标记：只上时间线、不计支出、不提醒；把 Active 的时间线标记
+        // 连同提醒一起关掉（浮层取消时间线就这么发）：它应当从时间线上下来（语义是数据，不是字面量）
         let opts: String = conn
             .query_row("SELECT options FROM fields WHERE tbl='subs' AND key='status'", [], |r| r.get(0))
             .unwrap();
@@ -777,6 +789,7 @@ mod tests {
         for o in &mut opts {
             if o["v"] == "Active" {
                 o["timeline"] = json!(0);
+                o["alert"] = json!(0);
             }
         }
         conn.execute(
@@ -791,6 +804,31 @@ mod tests {
         // 词表存坏了（不是 JSON 数组）：整库回落内置默认
         conn.execute("UPDATE fields SET options='坏掉' WHERE tbl='subs' AND key='status'", []).unwrap();
         assert_eq!(names(&upcoming(&conn).unwrap()), ["活", "停"]);
+    }
+
+    /// 提醒只发给时间线上的条目：只勾了「提醒」的状态照样上时间线、发提醒、缺日期时点名，
+    /// 而不是逐项提醒与摘要两头都落空
+    #[test]
+    fn a_status_that_alerts_is_on_the_timeline_even_without_the_timeline_flag() {
+        let conn = seeded();
+        let due = (today() + Days::new(5)).to_string();
+        add(&conn, "subs", &json!({ "name": "寄", "status": "待寄回", "cycle": "monthly", "next_renewal": due }));
+        add(&conn, "subs", &json!({ "name": "无日期", "status": "待寄回", "cycle": "monthly" }));
+        let opts: String = conn
+            .query_row("SELECT options FROM fields WHERE tbl='subs' AND key='status'", [], |r| r.get(0))
+            .unwrap();
+        let mut opts: Vec<Value> = serde_json::from_str(&opts).unwrap();
+        opts.push(json!({ "v": "待寄回", "spend": 0, "alert": 1, "timeline": 0 }));
+        conn.execute(
+            "UPDATE fields SET options=?1 WHERE tbl='subs' AND key='status'",
+            [serde_json::to_string(&opts).unwrap()],
+        )
+        .unwrap();
+        let ups = upcoming(&conn).unwrap();
+        assert_eq!(names(&ups), ["寄"]);
+        assert_eq!(ups[0]["muted"], json!(false), "勾了提醒就要发");
+        assert_eq!(names(&undated(&conn).unwrap()), ["无日期"]);
+        assert!(off_timeline(&conn).unwrap().is_empty());
     }
 
     /// 时间线按到期日升序、带剩余天数与库给的动作说法；`note_field` 有值才带 `action`，空串不带。

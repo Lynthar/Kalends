@@ -1,6 +1,6 @@
 // 字段与列：自定义列全链路、选项排序、tel / url / email 三种有形状的类型、类型 × 场所的叉积、属性内核的单一真源、可建类型与后端对齐。
 export default async function (t) {
-  const { APP, sleep, post, put, patch, raw, items, fields, check, evl, menuClick } = t;
+  const { APP, sleep, post, put, patch, raw, items, fields, check, send, evl, menuClick, waitFor } = t;
   /* 12b. 自定义列全链路：新建 → 加选项 → 内联赋值 → 筛选 → 选项改名传播 → 删除列 */
   await evl(`document.querySelector('.tab[data-tab="subs"]').click()`);
   await sleep(200);
@@ -28,8 +28,8 @@ export default async function (t) {
   await sleep(250);
   check('单选就地编辑器出现', await evl(`!!document.querySelector('.cellpop')`) === true);
   await evl(`[...document.querySelectorAll('.cellpop .mi')].find(x => x.textContent.includes('官网')).click()`);
-  await sleep(700);
-  check('赋值后格内出现标签', await evl(`document.querySelector('#subs-body tr td[data-k="${ckey}"] .tag')?.textContent`) === '官网');
+  // 等结果出现而不是等固定时长：慢机上往返更久，下一步会点在还没重绘完的表格上
+  check('赋值后格内出现标签', await waitFor(`document.querySelector('#subs-body tr td[data-k="${ckey}"] .tag')?.textContent === '官网'`));
   check('三开编辑选项调色', await menuClick(`#view-subs th[data-k="${ckey}"]`, '编辑选项'));
   await evl(`(() => {
     const row = [...document.querySelectorAll('.optpop .opt-row')].find(r => r.textContent.includes('官网'));
@@ -37,12 +37,12 @@ export default async function (t) {
   })()`);
   await sleep(200);
   await evl(`document.querySelector('.optpop .cstrip .cdot.t5').click()`);
-  await sleep(600);
-  check('选项颜色应用到格内标签', await evl(`!!document.querySelector('#subs-body tr td[data-k="${ckey}"] .tag.t5')`) === true);
+  // 调色提交后重绘与重开浮层是同步连着的：等到新颜色出现，迟到的重开就不会再关掉下一步的浮层
+  check('选项颜色应用到格内标签', await waitFor(`!!document.querySelector('#subs-body tr td[data-k="${ckey}"] .tag.t5')`));
   await evl(`document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))`);
   await sleep(150);
   check('自定义列可筛选', await menuClick(`#view-subs th[data-k="${ckey}"]`, '筛选'));
-  await evl(`[...document.querySelectorAll('.filterpop input')].find(i => i.value === '官网').click()`);
+  await evl(`[...document.querySelectorAll('.filterpop input')].find(i => i.value === '官网')?.click()`);
   await sleep(250);
   check('按自定义列筛出 1 行', await evl(`document.querySelectorAll('#subs-body tr').length`) === 1);
   await evl(`document.querySelector('#view-pills .p-filt .x').click()`);
@@ -58,6 +58,20 @@ export default async function (t) {
   check('选项改名传播到行', await evl(`document.querySelector('#subs-body tr td[data-k="${ckey}"] .tag')?.textContent`) === '官方');
   await evl(`document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))`);
   await sleep(150);
+  // 改名框里按 Esc 是取消：从前关浮层带出的失焦照样提交，改成已有选项名就是合并、撤不回来
+  const catOpts = async () => JSON.stringify((await fields()).find(f => f.tbl === 'subs' && f.key === 'category').options);
+  const catOpts0 = await catOpts();
+  check('改名前开编辑选项', await menuClick('#view-subs th[data-k="category"]', '编辑选项'));
+  await evl(`[...document.querySelectorAll('.optpop .opt-row')].find(r => r.textContent.includes('AI')).querySelector('[data-rn]').click()`);
+  await sleep(200);
+  await evl(`(() => { const i = document.querySelector('.optpop .opt-row input'); i.focus(); i.select(); })()`);
+  await send('Input.insertText', { text: 'Streaming' });
+  for (const type of ['keyDown', 'keyUp'])
+    await send('Input.dispatchKeyEvent', { type, key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
+  await sleep(800);
+  const cats = (await items('subs')).map(r => r.extra?.category);
+  check('改名框按 Esc 不提交：词表与行里的值都原样', await catOpts() === catOpts0 && cats.includes('AI')
+    && await evl(`!document.querySelector('.optpop')`) === true, JSON.stringify([await catOpts(), cats]));
 
 
   /* 12c2. 选项手动排序：再添一项后把第一项拖到其后，词表顺序随之持久化 */
@@ -103,7 +117,7 @@ export default async function (t) {
   check('字段注册表已清空',
     (await (await fetch(APP + 'api/fields')).json()).every(f => f.key !== ckey));
   // 删列后接着改同一行的别的 extra 格（界面写入的同一条路）：本地行没重取的话，旧值会连键写回去
-  await evl(`(() => { const it = state.subs.find(r => r.id === ${ghostId}); return patchRow('subs', it, extraPatch(it, 'category', 'Video')); })()`);
+  await evl(`(() => { const it = state.subs.find(r => r.id === ${ghostId}); return patchRow('subs', it, extraPatch('category', 'Video')); })()`);
   await sleep(800);
   const ghostAfter = (await items('subs')).find(r => r.id === ghostId);
   check('删列后改同一行的别的格照常保存', ghostAfter.extra.category === 'Video', JSON.stringify(ghostAfter.extra));
