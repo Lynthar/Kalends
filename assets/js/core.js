@@ -283,8 +283,9 @@ function renderUpcoming() {
   more.hidden = hiddenN <= 0;
   const und = state.overview.undated || [];
   const off = (state.overview.off_timeline || []).filter(inWindow);
+  const unk = state.overview.unknown_status || [];
   // 窗口内空、窗口外还有，或下面有点名：都别说「诸项安然」，同屏两句读着矛盾
-  $('#up-empty').hidden = items.length > 0 || hiddenN > 0 || und.length > 0 || off.length > 0;
+  $('#up-empty').hidden = items.length > 0 || hiddenN > 0 || und.length > 0 || off.length > 0 || unk.length > 0;
   if (hiddenN > 0) more.textContent = `▾ 更远期还有 ${hiddenN} 项`;
   items.forEach((it, idx) => {
     const d = it.days_left;
@@ -320,6 +321,13 @@ function renderUpcoming() {
     const when = d => d === 0 ? '今天' : `${d} 天后`;
     const names = off.map(x => `${x.name}（${x.status} · ${when(x.days_left)}）`).join('、');
     offEl.textContent = `◌ 另有 ${off.length} 项状态不上时间线，到期不会提醒：${names}`;
+  }
+  // 状态不在所属库词表里的：写入口照收（导入要能先进来），语义只能回落到内置含义，说出来让人补
+  const unkEl = $('#up-unknown');
+  unkEl.hidden = !unk.length;
+  if (unk.length) {
+    const names = unk.map(x => `${x.name}（${x.status}）`).join('、');
+    unkEl.textContent = `⚠ 另有 ${unk.length} 项的状态不在所属库的词表里，加进词表或改成词表里的值：${names}`;
   }
 
   $('#up-panel').classList.toggle('folded', state.upFolded);
@@ -368,7 +376,13 @@ async function doRenew(key, btn) {
     || (state.overview?.upcoming || []).find(u => u.kind === kind && u.id === +id);
   const verb = it?.verb || collOf(kind)?.verb || '续费';
   if (busyWrite(`item:${id}`)) return void toast('上一次还在处理，稍等', true);
-  if (!confirm(`记一笔「${it?.name || ''}」的${verb}？`)) return;
+  // 响应在途中丢了的话，前端分不清记没记上（服务端可能已经提交），重试就多记一笔：今天记过就多问一句
+  let again = false;
+  try {
+    again = (await api('/api/ledger')).some(r => r.kind === kind && r.item_id === +id && r.renewed_at === state.overview?.today);
+  } catch { /* 读不出台账只是少问这一句，照常确认 */ }
+  const name = it?.name || '';
+  if (!confirm(again ? `「${name}」今天已经记过一笔${verb}，确定再记一笔？` : `记一笔「${name}」的${verb}？`)) return;
   // 慢链路上一个往返内毫无动静，用户就会再点一次、再确认一次——多记一笔、多推一期
   const was = btn?.textContent;
   if (btn) { btn.disabled = true; btn.textContent = '记账中…'; }

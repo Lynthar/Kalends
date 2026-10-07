@@ -12,6 +12,9 @@
   --aqua-soft: #d9f4ee;
   --coral: #e8543a;
   --coral-soft: #ffe4db;
+  --coral-ink: #bf3f27; /* 点名行这类小字的珊瑚色：--coral 对 bg 只有 3.4:1，e2e 现算对比度 */
+  --toast-bg: linear-gradient(135deg, var(--aqua), var(--aqua-deep));
+  --toast-err-bg: linear-gradient(135deg, var(--coral), #c93d24);
   --honey: #eda412;
   --lemon: #ffe27a;
   --ring: rgba(13, 176, 159, .24);
@@ -34,6 +37,10 @@
     --aqua-soft: #10393442;
     --coral: #ff7a5c;
     --coral-soft: #3d1d1566;
+    --coral-ink: #ff7a5c;
+    /* toast 是白字：深色下的亮水色渐变上只有 2–3:1，换深一档的底（e2e 现算对比度） */
+    --toast-bg: linear-gradient(135deg, #11806f, #0c655b);
+    --toast-err-bg: linear-gradient(135deg, #c4432b, #9e321d);
     --honey: #ffc24b;
     --lemon: #ffd166;
     --ring: rgba(34, 207, 188, .3);
@@ -702,13 +709,13 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
 }
 #toast {
   position: fixed; left: 50%; bottom: 1.7rem; transform: translateX(-50%);
-  background: linear-gradient(135deg, var(--aqua), var(--aqua-deep)); color: #fff;
+  background: var(--toast-bg); color: #fff;
   padding: .55rem 1.15rem; border-radius: 99px; font-size: .85rem; font-weight: 650;
   box-shadow: 0 10px 26px -8px rgba(13, 176, 159, .6);
   z-index: 50; animation: toast-in .4s var(--spring) both;
 }
 #toast.err {
-  background: linear-gradient(135deg, var(--coral), #c93d24);
+  background: var(--toast-err-bg);
   box-shadow: 0 10px 26px -8px rgba(232, 84, 58, .55);
 }
 @keyframes toast-in {
@@ -766,7 +773,7 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
   display: inline-flex; align-items: center; justify-content: center; cursor: help;
 }
 
-/* 算不出到期日的条目：它们不在时间线上，得在这里点名，否则等于从界面上消失 */
-.undated { color: var(--coral); margin: .4rem 0 0; }
+/* 算不出到期日、状态不在词表里的条目：都是数据要补的，得在这里点名，否则等于从界面上消失 */
+.undated, .unknown-status { color: var(--coral-ink); margin: .4rem 0 0; }
 /* 有到期日、状态却不上时间线的条目：是状态语义使然，不是故障，所以不用警示色 */
 .off-timeline { margin: .4rem 0 0; }

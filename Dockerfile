@@ -2,7 +2,11 @@
 FROM rust:1-bookworm@sha256:e536cf316987faedfe8ae120f83b70c7df0068fdb4fc9efcce55c71a625001d5 AS build
 WORKDIR /src
 COPY . .
-RUN cargo build --release --locked
+# 依赖与中间产物放缓存挂载，改一行源码不必整套重编（要 BuildKit，Docker 23 起默认）；
+# target 在挂载里不进镜像层，产物当场拷出来
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked && cp target/release/kalends /usr/local/bin/kalends
 
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 # /data 在镜像里就归非 root 用户：匿名卷继承这份属主；bind mount 则要宿主先 chown（见 docs/user-guide.md）
@@ -12,7 +16,7 @@ RUN apt-get update \
     && groupadd --system --gid 10001 kalends \
     && useradd --system --uid 10001 --gid 10001 --shell /usr/sbin/nologin kalends \
     && mkdir -p /data && chown kalends:kalends /data
-COPY --from=build /src/target/release/kalends /usr/local/bin/kalends
+COPY --from=build /usr/local/bin/kalends /usr/local/bin/kalends
 ENV KALENDS_ADDR=0.0.0.0:4180 KALENDS_DATA=/data
 EXPOSE 4180
 VOLUME /data

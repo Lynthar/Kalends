@@ -1,6 +1,6 @@
 // 台账与设置页：续费记账可见、通知记录空态、坏渠道配置停保存、阈值与默认值来自服务端声明。
 export default async function (t) {
-  const { APP, sleep, put, items, check, evl, shot, settle } = t;
+  const { APP, sleep, put, items, check, evl, shot, settle, waitFor } = t;
   /* 17.6. 「已续费」记的那笔账要能被看到：写台账这条路 e2e 从没走过，
      而台账在界面上一直没有入口——点完按钮，账进了库就再也见不到。 */
   const ledgerTarget = (await (await fetch(APP + 'api/collections/subs/items')).json())
@@ -16,6 +16,17 @@ export default async function (t) {
   check('续费把到期日往后推了',
     (await (await fetch(APP + 'api/collections/subs/items')).json())
       .find(r => r.id === ledgerTarget.id).next_renewal > ledgerTarget.next_renewal);
+  // 续费的响应在途中丢了，前端分不清记没记上：今天已经记过一笔的条目再点要多问一句，别的照常
+  const askFor = async row => evl(`(async () => {
+    const keep = window.confirm;
+    let asked = '';
+    window.confirm = m => { asked = m; return false; };
+    try { await doRenew('subs:${row.id}'); } finally { window.confirm = keep; }
+    return asked;
+  })()`);
+  const other = (await items('subs')).find(r => r.id !== ledgerTarget.id && r.name);
+  check('今天记过一笔的再续费要多问一句', (await askFor(ledgerTarget)).includes('今天已经记过一笔'));
+  check('今天没记过的照常问', (await askFor(other)) === `记一笔「${other.name}」的续费？`);
   await evl(`openSettings()`);
   await sleep(800);
   check('设置页里列出了这笔台账', await evl(
@@ -91,6 +102,34 @@ export default async function (t) {
   await put('/api/settings', { 'notify.digest_time': dfBefore['notify.digest_time'], 'notify.window_days': dfBefore['notify.window_days'], 'notify.email': dfBefore['notify.email'] });
   await evl(`document.querySelector('#dlg-settings').close()`);
   await sleep(200);
+
+
+  // 「发送测试」测表单里的当前值、不落盘：先落盘的话点完测试再取消，试填的值已经盖掉库里的
+  // 配置（清空 PIN 栏再点测试，门就静默打开了）。库里关着、表单里勾上：测的若是库里那份就是
+  // 「未启用」；代理指死端口，测的是表单那份就当场在发送层失败
+  const tgStored = { enabled: false, bot_token: 'TG-STORED', chat_id: '1', proxy: 'http://127.0.0.1:9' };
+  await put('/api/settings', { 'notify.telegram': JSON.stringify(tgStored) });
+  await evl(`loadAll()`);
+  await evl(`openSettings()`);
+  await sleep(300);
+  await evl(`(() => {
+    const t = document.querySelector('#toast'); clearTimeout(t._h); t.hidden = true; t.classList.remove('err');
+    const f = document.querySelector('#form-settings').elements;
+    f.tg_enabled.checked = true;
+    f.tg_chat.value = '999';
+    document.querySelector('[data-test=telegram]').click();
+  })()`);
+  check('发送测试拿的是表单里勾上的那份', await waitFor(`(() => {
+    const t = document.querySelector('#toast');
+    return !t.hidden && t.classList.contains('err') && t.textContent.includes('请求失败');
+  })()`), await evl(`document.querySelector('#toast').textContent`));
+  await evl(`document.querySelector('#dlg-settings').close()`);
+  const tgAfter = JSON.parse((await (await fetch(APP + 'api/settings')).json())['notify.telegram']);
+  check('点了测试再取消，库里的渠道配置一字未动', tgAfter.enabled === false && tgAfter.chat_id === '1',
+    JSON.stringify(tgAfter));
+  await put('/api/settings', { 'notify.telegram': JSON.stringify({ enabled: false, bot_token: '', chat_id: '', proxy: '' }) });
+  await evl(`(() => { const t = document.querySelector('#toast'); clearTimeout(t._h); t.hidden = true; t.classList.remove('err'); })()`);
+  await evl(`loadAll()`);
 
 
   // PIN 原样交给后端判：前端先剥符号的话，`12-34` 存成 `1234`（照原样输入反而进不去），

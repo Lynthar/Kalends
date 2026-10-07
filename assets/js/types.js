@@ -1,5 +1,5 @@
 /* Kalends 前端 · types.js —— 属性内核：一种字段类型的全部行为集中在 TYPES 一张表里。
-   加一种类型 = 这里加一行 + 后端 fields::FTYPES 加一项（有形状的再补 normalize_shaped），
+   加一种类型 = 这里加一行 + 后端 fields::FTYPES 加一项（值不是文本的补 extra_value，有格式的再补 normalize_shaped），
    **别往分派点里塞 if**：类型的行为只在这张表里声明，分派点一律查表。 */
 const TYPES = {
   text: {

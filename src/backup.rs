@@ -25,6 +25,7 @@ pub struct Report {
 }
 
 /// 快照（VACUUM INTO，按日期一份、保留最近 N 份）+ 全表 JSONL 明文导出（最新一份，覆盖）。
+/// 快照是整库、含明文密钥；导出里的渠道密钥与代理口令遮掉（`settings::exported`）。
 pub fn run(conn: &Connection, data_dir: &Path) -> Result<Report> {
     let backups = data_dir.join("backups");
     fs::create_dir_all(&backups)?;
@@ -64,6 +65,12 @@ pub fn run(conn: &Connection, data_dir: &Path) -> Result<Report> {
                     ValueRef::Blob(b) => Value::from(format!("<blob {} B>", b.len())),
                 };
                 obj.insert(col.clone(), v);
+            }
+            if *table == "settings" {
+                if let (Some(Value::String(k)), Some(Value::String(v))) = (obj.get("key"), obj.get("value")) {
+                    let v = crate::settings::exported(k, v);
+                    obj.insert("value".into(), Value::from(v));
+                }
             }
             lines.push_str(&serde_json::to_string(&obj)?);
             lines.push('\n');
@@ -405,6 +412,37 @@ mod tests {
         assert!(r.missing.is_empty(), "{:?}", r.missing);
         assert_eq!(r.user_version, 0);
         assert_eq!(r.pending, crate::db::known_version());
+    }
+
+    /// 导出是拿去搬运、diff 的明文：渠道密钥与代理口令不许明文落进 `settings.jsonl`。
+    /// ICS 令牌与 PIN 与设置接口一致，照旧导出。
+    #[test]
+    fn the_export_masks_channel_secrets_and_proxy_passwords() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let conn = crate::db::open(&data).unwrap();
+        crate::db::seed_defaults(&conn).unwrap();
+        let set = |k: &str, v: &str| {
+            assert_eq!(conn.execute("UPDATE settings SET value=?2 WHERE key=?1", [k, v]).unwrap(), 1, "{k}");
+        };
+        set(
+            "notify.telegram",
+            r#"{"enabled":true,"bot_token":"TG-CANARY","chat_id":"1","proxy":"socks5://tg:TGPROXY-CANARY@10.0.0.5:1080"}"#,
+        );
+        set("notify.email", r#"{"enabled":true,"host":"smtp.example.com","password":"MAIL-CANARY"}"#);
+        set("meta.proxy", "http://me:META-CANARY@10.0.0.5:3128");
+        set("auth.pin", "1234");
+        run(&conn, &data).unwrap();
+
+        let out = fs::read_to_string(data.join("export").join("settings.jsonl")).unwrap();
+        for canary in ["TG-CANARY", "TGPROXY-CANARY", "MAIL-CANARY", "META-CANARY"] {
+            assert!(!out.contains(canary), "{canary} 明文进了导出：{out}");
+        }
+        let m = crate::settings::SECRET_MASK;
+        assert!(out.contains(&format!("socks5://tg:{m}@10.0.0.5:1080")), "{out}");
+        assert!(out.contains(&format!("http://me:{m}@10.0.0.5:3128")), "{out}");
+        let token = crate::db::get_setting(&conn, "ics.token").unwrap().unwrap();
+        assert!(out.contains(&token) && out.contains(r#""value":"1234""#), "ICS 令牌与 PIN 照旧导出：{out}");
     }
 
     /// 快照轮转只认 `snapshot-*.db`、保留 14 份；开头扫掉上次硬杀留下的 `snapshot-*.tmp`。

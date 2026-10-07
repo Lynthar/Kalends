@@ -2,7 +2,7 @@
 // 表单只写动过的控件、编辑器保存失败留住输入、换图标后取消、改显示币种。
 // 每条都用「扣住响应 / 注入失败」造出缺陷发作的那一刻，而不是指望慢机碰巧撞上。
 export default async function (t) {
-  const { APP, put, items, mk, fields, check, evl, waitFor, settle } = t;
+  const { APP, put, items, mk, fields, check, evl, waitFor, settle, sql } = t;
 
   // 在页面里包一层 api：命中 __hold 的那次请求照常发出、服务端照常处理，只把响应扣住等测试放行；
   // 命中 __fail 的那次直接抛错。其余模块按全局名调用 api，所以都会走这一层
@@ -145,7 +145,10 @@ export default async function (t) {
   /* 6. 详情表单「打开 → 不改 → 保存」不能改写控件表达不了的存量值（词表外的状态与周期、非数字的数值）；
      只改一栏时，其余一字不变，extra 里没动的键也在。 */
   await evl(`switchTab('vps')`);
-  const odd = await mk('vps', { name: '表单往返', status: 'Trial', cycle: 'yearly', extra: { cores: '2 vCPU', ram_gb: 4, purpose: '建站' } });
+  const odd = await mk('vps', { name: '表单往返', status: 'Trial' });
+  // 档位外的周期与非数字的数值接口已经拒收，只会出现在存量库里：直接写库造出来
+  sql('UPDATE items SET cycle=?, extra=? WHERE id=?',
+    ['yearly', JSON.stringify({ cores: '2 vCPU', ram_gb: 4, purpose: '建站' }), odd.id]);
   await evl('loadAll()');
   const plain = r => { const { updated_at: _, ...rest } = r; return JSON.stringify(rest); };
   const before = await row('vps', odd.id);

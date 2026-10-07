@@ -53,6 +53,56 @@ pub fn spec(key: &str) -> Option<&'static Spec> {
     SPECS.iter().find(|s| s.key == key)
 }
 
+/// 密钥不出库的占位串。输入框里就是一排点，前端不必知道这套机制存在。
+pub const SECRET_MASK: &str = "••••••••";
+
+pub fn secret_field(key: &str) -> Option<&'static str> {
+    spec(key).and_then(|s| s.secret)
+}
+
+/// 设置接口回读的值：密钥字段换成占位串。带密钥的键存值解析不出时整串换掉——
+/// 原样吐出就把密钥连同坏 JSON 一起交了出去。
+pub fn masked(key: &str, stored: &str) -> String {
+    let Some(field) = secret_field(key) else { return stored.into() };
+    let Ok(mut v) = serde_json::from_str::<Value>(stored) else { return SECRET_MASK.into() };
+    if v[field].as_str().is_some_and(|s| !s.is_empty()) {
+        v[field] = Value::from(SECRET_MASK);
+    }
+    v.to_string()
+}
+
+/// JSONL 导出的值：在 `masked` 之外把代理地址里的口令也遮掉（裸值与 JSON 对象的字符串字段
+/// 都算）。ICS 令牌与 PIN 与设置接口一致，不遮。
+pub fn exported(key: &str, stored: &str) -> String {
+    let out = masked(key, stored);
+    let Ok(Value::Object(mut o)) = serde_json::from_str::<Value>(&out) else {
+        return without_url_password(&out);
+    };
+    let mut changed = false;
+    for v in o.values_mut() {
+        if let Value::String(s) = v {
+            let r = without_url_password(s);
+            changed |= r != *s;
+            *s = r;
+        }
+    }
+    if changed { Value::Object(o).to_string() } else { out }
+}
+
+/// `socks5://user:pass@host` → `socks5://user:••••••••@host`；没有口令的原样返回。
+fn without_url_password(s: &str) -> String {
+    let Some(start) = s.find("://").map(|i| i + 3) else { return s.into() };
+    let rest = &s[start..];
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let Some(at) = authority.rfind('@') else { return s.into() };
+    match authority[..at].find(':') {
+        Some(colon) if colon + 1 < at => {
+            format!("{}{SECRET_MASK}{}", &s[..=start + colon], &s[start + at..])
+        }
+        _ => s.into(),
+    }
+}
+
 /// 所有固定默认值，键即设置键（随机令牌与只由代码写的键不在其中）。
 pub fn defaults_json() -> Value {
     SPECS
@@ -229,6 +279,20 @@ mod tests {
                 assert_eq!(json[s.key], d, "{}", s.key);
             }
         }
+    }
+
+    /// 只遮口令一段：协议、用户名、主机端口留着，导出里还看得出连的是哪个代理。
+    #[test]
+    fn url_passwords_are_masked_and_nothing_else() {
+        let m = SECRET_MASK;
+        assert_eq!(without_url_password("socks5://u:p@10.0.0.5:1080"), format!("socks5://u:{m}@10.0.0.5:1080"));
+        assert_eq!(without_url_password("http://u:p@a@h/x?y=@z"), format!("http://u:{m}@h/x?y=@z"));
+        for same in ["", "socks5://10.0.0.5:1080", "http://u@h", "http://u:@h", "http://h/p:q@r", "not a url"] {
+            assert_eq!(without_url_password(same), same);
+        }
+        assert_eq!(exported("meta.proxy", "http://u:p@h"), format!("http://u:{m}@h"));
+        // 没东西可遮的 JSON 原样返回，不经重新序列化
+        assert_eq!(exported("fx.rates", r#"{"USD": 7.10}"#), r#"{"USD": 7.10}"#);
     }
 
     /// 读侧回落值恒等声明里的播种值：设置页「清空＝回默认」显示的就是它们，两边不等就是

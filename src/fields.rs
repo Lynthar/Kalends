@@ -9,7 +9,7 @@ use axum::{
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
-use crate::api::{bad, missing, s, R};
+use crate::api::{bad, check_shape, missing, s, R};
 use crate::App;
 
 /// 可建的列类型。`star` 已撤掉：它只是"数字加个星形壳"——要打分用 `num`，要档位用 `sel`。
@@ -45,26 +45,32 @@ fn scope(conn: &Connection, tbl: &str) -> anyhow::Result<(&'static str, String)>
 // 计支出 / 发提醒 / 上到期时间线。入参兼容纯字符串（老形态/顺手写法），一律常规化并按 v 去重。
 const SEM_FLAGS: &[&str] = &["spend", "alert", "timeline"];
 
-fn truthy(v: Option<&Value>) -> bool {
+/// 布尔标记只收 true/false 与 0/1：宽松地读，`"no"` 就成了真。
+fn flag(v: &Value, what: &str) -> anyhow::Result<bool> {
     match v {
-        Some(Value::Bool(b)) => *b,
-        Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0) != 0.0,
-        Some(Value::String(s)) => !s.is_empty() && s != "0" && s != "false",
-        _ => false,
+        Value::Bool(b) => Ok(*b),
+        _ => match v.as_i64() {
+            Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            _ => Err(bad(format!("{what} 要是 true / false 或 0 / 1"))),
+        },
     }
 }
 
-fn opts_array(b: &Value) -> Vec<Value> {
+/// `options` 必须是数组，元素是文本或带文本 `v` 的对象；读不出就 400——当成空数组的话，
+/// 一个传错类型的请求会把整份词表连同颜色清掉。
+fn opts_array(b: &Value) -> anyhow::Result<Vec<Value>> {
+    let arr = b.get("options").and_then(Value::as_array).ok_or_else(|| bad("options 要是数组"))?;
     let mut out: Vec<Value> = Vec::new();
-    for x in b.get("options").and_then(|x| x.as_array()).into_iter().flatten() {
+    for x in arr {
         let (v, c, obj) = match x {
             Value::String(s) => (s.trim().to_string(), None, None),
             Value::Object(o) => (
-                o.get("v").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).unwrap_or_default(),
+                o.get("v").and_then(Value::as_str).ok_or_else(|| bad("选项的 v 要是文本"))?.trim().to_string(),
                 o.get("c").and_then(Value::as_i64).filter(|c| (0..10).contains(c)),
                 Some(o),
             ),
-            _ => (String::new(), None, None),
+            _ => return Err(bad("选项要是文本或 {v} 对象")),
         };
         if v.is_empty() || out.iter().any(|o| o["v"] == v.as_str()) {
             continue;
@@ -74,16 +80,14 @@ fn opts_array(b: &Value) -> Vec<Value> {
             item["c"] = json!(c);
         }
         // 语义标记只在传了的时候落表，没传的选项不凭空获得语义
-        for flag in SEM_FLAGS {
-            if let Some(o) = obj {
-                if o.contains_key(*flag) {
-                    item[*flag] = json!(i64::from(truthy(o.get(*flag))));
-                }
+        for f in SEM_FLAGS {
+            if let Some(fv) = obj.and_then(|o| o.get(*f)) {
+                item[*f] = json!(i64::from(flag(fv, f)?));
             }
         }
         out.push(item);
     }
-    out
+    Ok(out)
 }
 
 fn field_json(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
@@ -116,6 +120,7 @@ async fn list(State(app): State<App>) -> R {
 
 // 新建自定义列：key 用 c<id>，值挂在实体行 extra JSON 里
 async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
+    check_shape(&b, &["tbl", "name", "ftype"], &[], &[])?;
     let tbl = s(&b, "tbl").ok_or_else(|| bad("缺少 tbl"))?;
     let name = s(&b, "name").ok_or_else(|| bad("列名不能为空"))?;
     let ftype = s(&b, "ftype").unwrap_or_else(|| "text".into());
@@ -150,11 +155,13 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
     if b.get("ftype").is_some() {
         return Err(bad("列类型建后不可改").into());
     }
+    check_shape(&b, &["name"], &[], &[])?;
     let name = s(&b, "name").ok_or_else(|| bad("列名不能为空"))?;
+    let shown = b.get("shown").map(|v| flag(v, "shown")).transpose()?;
     let conn = app.db.lock().unwrap();
-    let n = match b.get("shown") {
-        Some(v) => {
-            let shown = i64::from(truthy(Some(v)));
+    let n = match shown {
+        Some(shown) => {
+            let shown = i64::from(shown);
             // 名称列承载行的详情入口，且表头与行读同一份字段集——撤下它就会整表错位
             let key: String = conn
                 .query_row("SELECT key FROM fields WHERE id=?1", [id], |r| r.get(0))
@@ -178,11 +185,14 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
 // 字段顺序：整份键序落成 pos。这是库级设置（决定新设备看到的默认列序与详情表单的次序），
 // 与存在 localStorage 里的本机列序是两回事。
 async fn set_order(State(app): State<App>, Json(b): Json<Value>) -> R {
+    check_shape(&b, &["tbl"], &[], &[])?;
     let tbl = s(&b, "tbl").ok_or_else(|| bad("缺少 tbl"))?;
+    // 掺了非文本就整份拒：静默滤掉的话，排出来的序与请求的不是一回事
     let keys: Vec<&str> = b
         .get("keys")
-        .and_then(|x| x.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(Value::as_str).collect::<Option<_>>().ok_or_else(|| bad("keys 要是文本数组")))
+        .transpose()?
         .unwrap_or_default();
     if keys.is_empty() {
         return Err(bad("缺少 keys").into());
@@ -204,8 +214,10 @@ async fn set_order(State(app): State<App>, Json(b): Json<Value>) -> R {
 // 状态语义：只改状态词表选项上的 spend/alert/timeline 三个标记，不碰值本身。
 // 状态是 items 的真列，改名/删值得连行数据一起迁移，那不在这条路上做。
 async fn set_semantics(State(app): State<App>, Json(b): Json<Value>) -> R {
+    check_shape(&b, &["tbl", "key"], &[], &[])?;
     let tbl = s(&b, "tbl").ok_or_else(|| bad("缺少 tbl"))?;
     let key = s(&b, "key").ok_or_else(|| bad("缺少 key"))?;
+    let want = opts_array(&b)?;
     let conn = app.db.lock().unwrap();
     let stored: String = conn
         .query_row(
@@ -215,7 +227,6 @@ async fn set_semantics(State(app): State<App>, Json(b): Json<Value>) -> R {
         )
         .map_err(|_| bad("该列没有状态词表"))?;
     let mut opts: Vec<Value> = serde_json::from_str(&stored).unwrap_or_default();
-    let want = opts_array(&b);
     for o in &mut opts {
         let Some(w) = want.iter().find(|w| w["v"] == o["v"]) else { continue };
         // opts_array 只保留调用方真传了的标记，没传的保持原样
@@ -236,6 +247,7 @@ async fn set_semantics(State(app): State<App>, Json(b): Json<Value>) -> R {
 /// 还驱动支出/提醒/时间线三层语义），那两件事不在这条路上做。新值不带语义标记，
 /// engine 读不到标记就按内置默认理解——`status_sem` 对未知值返回三项全关，用户再去语义浮层里勾。
 async fn add_status(State(app): State<App>, Json(b): Json<Value>) -> R {
+    check_shape(&b, &["tbl", "key", "value"], &[], &[])?;
     let tbl = s(&b, "tbl").ok_or_else(|| bad("缺少 tbl"))?;
     let key = s(&b, "key").ok_or_else(|| bad("缺少 key"))?;
     let value = s(&b, "value").ok_or_else(|| bad("状态值不能为空"))?;
@@ -319,12 +331,13 @@ fn resolve(conn: &Connection, tbl: &str, key: &str) -> anyhow::Result<Target> {
 
 // 设置字段的选项清单
 async fn set_options(State(app): State<App>, Json(b): Json<Value>) -> R {
+    check_shape(&b, &["tbl", "key"], &[], &[])?;
     let tbl = s(&b, "tbl").ok_or_else(|| bad("缺少 tbl"))?;
     let key = s(&b, "key").ok_or_else(|| bad("缺少 key"))?;
+    let opts = serde_json::to_string(&opts_array(&b)?)?;
     let conn = app.db.lock().unwrap();
     // 走到这里说明 fields 里一定有这一行（resolve 是靠查它才放行的）
     resolve(&conn, &tbl, &key)?;
-    let opts = serde_json::to_string(&opts_array(&b))?;
     conn.execute(
         "UPDATE fields SET options=?1 WHERE tbl=?2 AND key=?3",
         params![opts, tbl, key],
@@ -334,6 +347,7 @@ async fn set_options(State(app): State<App>, Json(b): Json<Value>) -> R {
 
 // 选项改名：更新词表并传播到所有行
 async fn rename_option(State(app): State<App>, Json(b): Json<Value>) -> R {
+    check_shape(&b, &["tbl", "key", "from", "to"], &[], &[])?;
     let tbl = s(&b, "tbl").ok_or_else(|| bad("缺少 tbl"))?;
     let key = s(&b, "key").ok_or_else(|| bad("缺少 key"))?;
     let from = s(&b, "from").ok_or_else(|| bad("缺少 from"))?;
@@ -356,6 +370,7 @@ async fn rename_option(State(app): State<App>, Json(b): Json<Value>) -> R {
 
 // 删除选项：移出词表并从所有行清掉该值
 async fn remove_option(State(app): State<App>, Json(b): Json<Value>) -> R {
+    check_shape(&b, &["tbl", "key", "value"], &[], &[])?;
     let tbl = s(&b, "tbl").ok_or_else(|| bad("缺少 tbl"))?;
     let key = s(&b, "key").ok_or_else(|| bad("缺少 key"))?;
     let value = s(&b, "value").ok_or_else(|| bad("缺少 value"))?;
@@ -529,5 +544,55 @@ mod tests {
             .query_row("SELECT name, ftype FROM fields WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap();
         assert_eq!(now, ("费用".into(), ftype), "被拒的请求一个字段也不该写");
+    }
+
+    /// 字段端点与条目写入口同一分寸：选项不是数组、标记不是布尔或 0/1、ftype 不是文本、键序掺了
+    /// 非文本，一律 400 且什么都不动。从前 options 传错类型会把整份词表连同颜色清成 []、回 200。
+    #[tokio::test]
+    async fn field_endpoints_refuse_wrong_types_and_change_nothing() {
+        let db = Arc::new(Mutex::new(crate::db::fresh_in_memory().unwrap()));
+        let call = |method: &str, path: String, body: Value| {
+            let app = router().with_state(App { db: db.clone(), data_dir: std::path::PathBuf::from(".") });
+            let req = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            async move { app.oneshot(req).await.unwrap().status() }
+        };
+        let snapshot = || -> String {
+            crate::db::one(&db.lock().unwrap(), "SELECT group_concat(options || shown || name, '|') FROM fields", [])
+        };
+        let purpose_id: i64 = crate::db::one(&db.lock().unwrap(), "SELECT id FROM fields WHERE tbl='vps' AND key='purpose'", []);
+        let before = snapshot();
+        let refused = [
+            ("PUT", "/api/fields/options".to_string(), json!({ "tbl": "vps", "key": "purpose", "options": "建站" })),
+            ("PUT", "/api/fields/options".to_string(), json!({ "tbl": "vps", "key": "purpose" })),
+            ("PUT", "/api/fields/options".to_string(), json!({ "tbl": "vps", "key": "purpose", "options": [{ "v": "a" }, 3] })),
+            ("PUT", "/api/fields/options".to_string(), json!({ "tbl": "vps", "key": "purpose", "options": [{ "v": 3 }] })),
+            ("PUT", "/api/fields/semantics".to_string(),
+                json!({ "tbl": "subs", "key": "status", "options": [{ "v": "Planned", "timeline": "no" }] })),
+            ("PUT", "/api/fields/semantics".to_string(),
+                json!({ "tbl": "subs", "key": "status", "options": [{ "v": "Planned", "timeline": 2 }] })),
+            ("POST", "/api/fields".to_string(), json!({ "tbl": "subs", "name": "列", "ftype": 5 })),
+            ("PUT", format!("/api/fields/{purpose_id}"), json!({ "name": "用途", "shown": "no" })),
+            ("PUT", "/api/fields/order".to_string(), json!({ "tbl": "subs", "keys": ["name", 3] })),
+            ("POST", "/api/fields/add_status".to_string(), json!({ "tbl": "subs", "key": "status", "value": 5 })),
+        ];
+        for (method, path, body) in refused {
+            assert_eq!(call(method, path, body.clone()).await, StatusCode::BAD_REQUEST, "{body}");
+        }
+        assert_eq!(snapshot(), before, "被拒的请求一个字段也不该写");
+        // 负向对照：界面实际发的形状照常
+        let ok = [
+            ("PUT", "/api/fields/semantics".to_string(),
+                json!({ "tbl": "subs", "key": "status", "options": [{ "v": "Planned", "timeline": 1 }] })),
+            ("PUT", format!("/api/fields/{purpose_id}"), json!({ "name": "用途", "shown": false })),
+            ("PUT", "/api/fields/options".to_string(), json!({ "tbl": "vps", "key": "purpose", "options": [{ "v": "建站", "c": 2 }, "代理"] })),
+        ];
+        for (method, path, body) in ok {
+            assert_eq!(call(method, path, body.clone()).await, StatusCode::OK, "{body}");
+        }
     }
 }

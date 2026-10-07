@@ -3,4 +3,8 @@ target
 data
 node_modules
 deploy
+scripts
+site
+tests
+.github
 *.md

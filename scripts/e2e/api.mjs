@@ -206,5 +206,39 @@ export default async function (t) {
     'notify.telegram': JSON.stringify({ enabled: false, bot_token: '', chat_id: '', proxy: '' }),
   });
 
+  /* 17.36c. 发送测试可以带上表单里的当前值（config，与设置接口同形的串）：只测不存，
+     其中的占位串换回库里那份密钥。库里此刻关着、token 为空。 */
+  const ntConfig = token => JSON.stringify({ enabled: true, bot_token: token, chat_id: '1', proxy: 'http://127.0.0.1:9' });
+  check('config 里的占位串换回库里那份（库里为空 → 未配置 400）',
+    (await raw('/api/notify/test', 'POST', { channel: 'telegram', config: ntConfig('••••••••') })).status === 400);
+  check('带 config 的测试按它去发（发送层 500）',
+    (await raw('/api/notify/test', 'POST', { channel: 'telegram', config: ntConfig('typed') })).status === 500);
+  check('测完库里一字未动', JSON.parse((await (await fetch(APP + 'api/settings')).json())['notify.telegram']).enabled === false);
+  check('config 不是渠道配置 → 400',
+    (await raw('/api/notify/test', 'POST', { channel: 'telegram', config: '不是 JSON' })).status === 400);
+
+
+  /* 17.37. 写入口统一的形状规则：周期只收 engine 的封闭集、状态大小写对上词表就换成词表写法、
+     续费的币种与条目同一规范化、extra 按列类型判、字段端点同一分寸。 */
+  const sh_cycle = await raw('/api/collections/subs/items', 'POST', { name: '周期', cycle: 'yearly' });
+  check('档位外的周期 → 400 并列出可选值', sh_cycle.status === 400 && (await sh_cycle.text()).includes('monthly'));
+  const sh = await mk('subs', { name: '写法', status: 'active', cycle: 'Monthly', price: 3, currency: 'usd' });
+  const shRow = (await items('subs')).find(r => r.id === sh.id);
+  check('状态换成词表写法、周期小写、币种大写',
+    shRow.status === 'Active' && shRow.cycle === 'monthly' && shRow.currency === 'USD', JSON.stringify(shRow));
+  check('续费的币种不收「人民币」', (await raw(`/api/items/${sh.id}/renew`, 'POST', { currency: '人民币' })).status === 400);
+  await post(`/api/items/${sh.id}/renew`, { currency: 'cny', amount: 20 });
+  const shLedger = await (await fetch(APP + 'api/ledger')).json();
+  check('续费的币种与条目同一规范化', shLedger.find(x => x.item_id === sh.id)?.currency === 'CNY', JSON.stringify(shLedger[0]));
+  const shTrial = await mk('subs', { name: '词表外', status: 'Trial' });
+  const shOv = await (await fetch(APP + 'api/overview')).json();
+  check('词表外的状态照收、overview 点名',
+    shOv.unknown_status.some(x => x.id === shTrial.id && x.status === 'Trial'), JSON.stringify(shOv.unknown_status));
+  check('extra 数字列收到文本 → 400',
+    (await raw('/api/collections/vps/items', 'POST', { name: '规格', extra: { ram_gb: '4' } })).status === 400);
+  check('字段选项不是数组 → 400',
+    (await raw('/api/fields/options', 'PUT', { tbl: 'vps', key: 'purpose', options: '建站' })).status === 400);
+  for (const x of [sh, shTrial]) await raw(`/api/items/${x.id}`, 'DELETE');
+
 
 }

@@ -2,15 +2,29 @@
 
 Release notes are taken from this file verbatim — each `## vX.Y.Z` section becomes that release's body.
 
+## v0.3.0
+
+**Security**: the favicon fetcher's private-address filter now reads NAT64 addresses by the IPv4 they carry and matches `.local` / `.localhost` in any case; the calendar token is compared in constant time; rustls is past RUSTSEC-2026-0285, and a release now fails on any known advisory. The nightly JSONL export masks channel secrets and proxy passwords. The database and its snapshots still hold them in plain text, so protect those files (see `SECURITY.md`).
+
+**Reminders**: a failed delivery backs off and gives up after five attempts, and an SMTP session is capped at one minute. Adding a looser threshold no longer re-sends what was already sent. Entries whose status turns reminders off (such as Ending) keep their calendar event but lose the alarm. "Send test" tries what is in the form and saves nothing.
+
+**Data**: item and field ids are never reused, so a new column cannot pick up a deleted column's values. Every write follows one set of rules: a cycle outside the supported list is refused with the list in the error, a status that differs from the vocabulary only in case takes the vocabulary's spelling, and column values must match the column type (values already stored are left as they are). The item form saves only what you changed, a malformed stored value no longer breaks the overview or the calendar, and saves and refreshes in one tab run in order.
+
+**Home page**: alongside entries with no computable due date, it names entries whose status keeps them off the timeline and entries whose status is not in their collection's vocabulary. Renewing the same entry twice in a day asks first.
+
+**Command line and container**: unknown arguments exit 2 instead of starting the server (and migrating the database); `--version` is new. `restore` folds a `-wal` file next to the snapshot into the copy. `/api/health` reads every data table, not just three, and answers without the PIN, though without it you get only the `ok` field, so the container healthcheck notices a broken database even with a PIN set; `--health` now wants a 200. An unknown `TZ`, or none at all on a UTC host, is logged as a warning. A panic ends the process, so a supervisor such as compose's `restart:` can bring it back. Building the image needs BuildKit (the default since Docker 23); building from source needs Rust 1.91.
+
+**Upgrading**: a snapshot lands in `backups/` before the schema changes (one new table records the highest ids handed out). API clients that send a cycle outside the list, or a column value of the wrong type, now get a 400.
+
 ## v0.2.0
 
-Kalends is now the renewal tracker alone. The media library moved to its own project, [Ludi](https://github.com/Lynthar/Ludi), which ships `scripts/import-from-kalends.py` to carry your media rows, custom columns and cached posters across wholesale.
+There is now a [live demo](https://lynthar.github.io/Kalends/demo/) — read-only, synthetic data — if you want a look before installing.
 
-**Upgrading**: if your database still holds media entries, this version refuses to start and says so — move them to Ludi (or clear the media library in v0.1.x) first. A pre-migration snapshot lands in `backups/` before the schema changes either way. Once you are settled, the now-unused `covers/` directory in the data directory can be deleted by hand.
+**Fixed**: a failed settings read no longer passes for "not set". The notifier warns instead of silently skipping a run, exchange-rate and logo fetches refuse to go out when the proxy setting cannot be read, deleting an entry rolls back instead of orphaning its logo, and the settings form will not save over a channel config it could not read. A `days` cycle must carry a day count.
 
-**Removed**: the media pages and API (`/api/media`, `/api/tmdb/*`, `/covers`), the `KALENDS_MODULES` module switch and `/config.js`, and the TMDB key setting. Outbound traffic is down to exchange-rate refreshes, favicon fetches and your notification channels.
+**Removed**: `KALENDS_MODULES`, `/config.js` and the TMDB key setting. Outbound traffic is down to exchange rates, favicons and your notification channels.
 
-**Fixed**: a failed settings read no longer passes for "not set". The notifier stops with a warning instead of silently skipping a run, exchange-rate and logo fetches refuse to go out when the configured proxy cannot be read, deleting an entry rolls back instead of orphaning its logo, the settings form refuses to save over a channel config it could not read, and a `days` cycle must carry a day count.
+**Upgrading from v0.1.x**: a snapshot lands in `backups/` before the schema changes. The media library that used to sit alongside is gone: if you still have media entries, this version refuses to start and says so. `covers/` can go afterwards.
 
 ## v0.1.0
 

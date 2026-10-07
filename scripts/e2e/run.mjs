@@ -7,7 +7,7 @@
 // KALENDS_E2E_CHROME（默认 Playwright 缓存里的 headless shell）、KALENDS_E2E_OUT、KALENDS_E2E_PORT。
 import {
   APP, OUT, calendar, check, failureCount, fields, findBinary, findChrome, helpers, items, mk,
-  openPage, patch, post, put, raw, seed, skip, sleep, startBrowser, startServer, stopServer,
+  openPage, patch, post, put, raw, seed, skip, sleep, sqlOn, startBrowser, startServer, stopServer,
 } from './lib.mjs';
 
 // 顺序无关；api 排第一是因为它最快、不用浏览器
@@ -42,7 +42,7 @@ for (const name of names.length ? names : ALL) {
     const cal = await calendar();
     await seed(cal.day);
     if (needsBrowser) page = await openPage();
-    const t = { APP, OUT, sleep, post, put, patch, raw, mk, items, fields, check, skip, ...cal };
+    const t = { APP, OUT, sleep, post, put, patch, raw, mk, items, fields, check, skip, sql: sqlOn(server.data), ...cal };
     if (page) Object.assign(t, page, helpers(page.evl));
     await mod.default(t);
     if (page) {

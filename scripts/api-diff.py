@@ -62,8 +62,13 @@ def main():
     A, B = args.a, args.b
 
     print('=== 计数 ===')
-    ha, hb = get(A, '/api/health'), get(B, '/api/health')
-    check(f"计数一致 {hb['counts']}", ha['counts'] == hb['counts'], f"A {ha['counts']}")
+    ha, hb = get(A, '/api/health')['counts'], get(B, '/api/health')['counts']
+    # 只比两侧都数的表：健康检查的名单随版本变，多出来的表另行列出
+    both = sorted(set(ha) & set(hb))
+    check(f"计数一致 { {t: hb[t] for t in both} }", all(ha[t] == hb[t] for t in both),
+          f"A { {t: ha[t] for t in both} }")
+    if set(ha) ^ set(hb):
+        print(f"     仅一侧数的表：A {sorted(set(ha) - set(hb))} / B {sorted(set(hb) - set(ha))}")
 
     print('\n=== 库清单 ===')
     ca, cb = get(A, '/api/collections'), get(B, '/api/collections')

@@ -1,6 +1,6 @@
 // 端到端套件的公共部分：起一次性 Kalends 实例、播种、接 headless chromium 的 CDP、
 // 断言与截图。每个套件从 run.mjs 拿到同一形状的 `t`，套件之间不共享实例、页面或数据。
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs, { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import { join } from 'node:path';
@@ -48,10 +48,18 @@ export async function startServer(bin) {
   throw new Error(`Kalends 没起来（${bin}）：${stderr.slice(-800)}`);
 }
 
-// 端口上有没有东西在应答，不管答的是什么（设了 PIN 的实例答 401，也算有人）
+// 端口上有没有东西在应答，不管答的是什么（库坏了的实例答 503，也算有人）
 async function answering() {
   try { await fetch(APP + 'api/health'); return true; } catch { return false; }
 }
+
+// 绕过接口直接写一次性实例的库：只用来造接口已经拒收、存量库里却可能有的旧值。走 python3 的
+// sqlite3（仓库其余脚本本就依赖它，node:sqlite 还会打实验告警）；服务在跑也无妨，WAL 下照常写
+const PY_SQL = 'import sqlite3,sys,json\nc=sqlite3.connect(sys.argv[1])\nc.execute(sys.argv[2],json.loads(sys.argv[3]))\nc.commit()';
+export const sqlOn = data => (stmt, params = []) => {
+  const r = spawnSync('python3', ['-c', PY_SQL, join(data, 'kalends.db'), stmt, JSON.stringify(params)], { encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(`sql 失败：${r.stderr || r.error}`);
+};
 
 export async function stopServer({ proc, data }) {
   if (proc.exitCode === null) {

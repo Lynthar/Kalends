@@ -1,6 +1,6 @@
 // 首页：到期栏的默认态、折叠、窗口档位、不提醒的条目、算不出到期日的点名、支出折算与缺项点名。
 export default async function (t) {
-  const { APP, sleep, post, put, patch, raw, mk, items, check, day, send, evl, shot } = t;
+  const { APP, sleep, post, put, patch, raw, mk, items, check, day, send, evl, shot, waitFor } = t;
   /* 1. 即将到期默认态 */
   const ov = await (await fetch(APP + 'api/overview')).json();
   const expShown = ov.upcoming.filter(u => u.days_left <= 30).length;
@@ -154,6 +154,32 @@ export default async function (t) {
   await sleep(900);
   check('改回之后两条点名都消失',
     await evl(`document.querySelector('#up-undated').hidden && document.querySelector('#up-off').hidden`) === true);
+
+
+  /* 状态不在所属库词表里的条目：写入口照收（导入要能先进来），语义只能回落，首页要点名；
+     大小写不同而能唯一对上词表的，写入口直接换成词表写法，不点名。 */
+  const trial = await mk('subs', { name: '试用中的订阅', status: 'Trial' });
+  const spelled = await mk('subs', { name: '小写状态', status: 'active' });
+  await evl(`loadAll()`);
+  check('词表外的状态被点名，并说出它', await waitFor(`(() => {
+    const el = document.querySelector('#up-unknown');
+    return !el.hidden && el.textContent.includes('试用中的订阅') && el.textContent.includes('Trial');
+  })()`), await evl(`document.querySelector('#up-unknown').textContent`));
+  check('对得上词表的不点名', !(await evl(`document.querySelector('#up-unknown').textContent`)).includes('小写状态'));
+  check('只有这条点名时也不说「诸项安然」', await evl(`(() => {
+    const save = state.overview;
+    state.overview = { ...save, upcoming: [], undated: [], off_timeline: [] };
+    renderUpcoming();
+    const shown = !document.querySelector('#up-empty').hidden;
+    state.overview = save;
+    renderUpcoming();
+    return shown;
+  })()`) === false);
+  await patch(`/api/items/${trial.id}`, { status: 'Active' });
+  await evl(`loadAll()`);
+  check('改成词表里的值之后点名消失', await waitFor(`document.querySelector('#up-unknown').hidden`));
+  for (const x of [trial, spelled]) await raw(`/api/items/${x.id}`, 'DELETE');
+  await evl(`loadAll()`);
 
 
   // 这一段拿一条 USD 行做「存的仍是原币」的对照

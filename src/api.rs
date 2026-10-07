@@ -5,7 +5,7 @@ use axum::{
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use rusqlite::params;
 use serde_json::{json, Value};
@@ -150,14 +150,15 @@ pub fn check_shape(b: &Value, strs: &[&str], ints: &[&str], reals: &[&str]) -> a
     Ok(())
 }
 
-/// 健康详情。任何一张表读不出来就 ok=false——状态码必须跟着变：容器探针与监控只看
-/// 状态码，200 + ok:true 会把缺表的实例标成健康（`--health` 的判据是 <500，PIN 的 401 仍算活）。
+/// 健康详情。任何一张业务表读不出来就 ok=false——状态码必须跟着变：容器探针与监控只看
+/// 状态码，200 + ok:true 会把缺表的实例标成健康。计数带 `NOT INDEXED`：默认走覆盖索引，
+/// 表页坏了、索引完好时照样数得出来。
 pub(crate) fn health_payload(conn: &rusqlite::Connection) -> (bool, Value) {
     let count = |table: &str| -> Option<i64> {
-        conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+        conn.query_row(&format!("SELECT count(*) FROM {table} NOT INDEXED"), [], |r| r.get(0))
             .ok()
     };
-    let tables = ["collections", "items", "renewal_ledger"];
+    let tables = ["collections", "items", "fields", "renewal_ledger", "notification_log", "settings"];
     let counts: Vec<(&str, Option<i64>)> = tables.iter().map(|t| (*t, count(t))).collect();
     let ok = counts.iter().all(|(_, n)| n.is_some());
     let counts: serde_json::Map<String, Value> = counts
@@ -172,11 +173,17 @@ pub(crate) fn health_payload(conn: &rusqlite::Connection) -> (bool, Value) {
     (ok, payload)
 }
 
-async fn health(State(app): State<App>) -> Response {
+/// PIN 门放行时挂在请求上的标记（没设 PIN 也算放行）。健康检查不过门，靠它决定回多少。
+#[derive(Clone)]
+pub struct PinPassed;
+
+/// 不过 PIN 门（容器探针不带凭据）；没带对 PIN 只回状态码与 `{ok}`，计数与版本留给带凭据的人。
+async fn health(State(app): State<App>, passed: Option<Extension<PinPassed>>) -> Response {
     let conn = app.db.lock().unwrap();
     let (ok, payload) = health_payload(&conn);
     let status = if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
-    (status, Json(payload)).into_response()
+    let body = if passed.is_some() { payload } else { json!({ "ok": ok }) };
+    (status, Json(body)).into_response()
 }
 
 async fn overview(State(app): State<App>) -> R {
@@ -188,6 +195,8 @@ async fn overview(State(app): State<App>) -> R {
         "undated": engine::undated(&conn)?,
         // 有到期日、状态却不上时间线的（新建条目默认的 Planned 就是）：同理点名
         "off_timeline": engine::off_timeline(&conn)?,
+        // 状态不在所属库词表里的：写入口照收（导入要能先进来），语义只能回落，同样点名
+        "unknown_status": engine::unknown_status(&conn)?,
         "totals": engine::totals(&conn)?,
         // 该计支出却缺了金额/币种/周期里的一项，于是一分钱没进总额的：同样要点名
         "uncounted": engine::uncounted(&conn)?,
@@ -278,27 +287,12 @@ fn check_setting(k: &str, v: &str) -> anyhow::Result<()> {
     settings::spec(k).map_or(Ok(()), |s| (s.check)(v))
 }
 
-// 渠道密钥不回读明文：GET 把它换成占位串，PUT 收到占位串＝保持库里那份。
-// 占位串在输入框里就是一排点，前端不必知道这套机制存在；清空照旧发 ""。
-const SECRET_MASK: &str = "••••••••";
-
-fn secret_field(k: &str) -> Option<&'static str> {
-    settings::spec(k).and_then(|s| s.secret)
-}
-
-fn mask_secret(k: &str, stored: &str) -> String {
-    let Some(field) = secret_field(k) else { return stored.into() };
-    let Ok(mut v) = serde_json::from_str::<Value>(stored) else { return stored.into() };
-    if v[field].as_str().is_some_and(|s| !s.is_empty()) {
-        v[field] = Value::from(SECRET_MASK);
-    }
-    v.to_string()
-}
-
+// 渠道密钥不回读明文：GET 把它换成占位串（`settings::masked`），PUT 收到占位串＝保持库里那份；
+// 清空照旧发 ""。
 fn keep_masked_secret(conn: &rusqlite::Connection, k: &str, incoming: &str) -> anyhow::Result<String> {
-    let Some(field) = secret_field(k) else { return Ok(incoming.into()) };
+    let Some(field) = settings::secret_field(k) else { return Ok(incoming.into()) };
     let Ok(mut v) = serde_json::from_str::<Value>(incoming) else { return Ok(incoming.into()) };
-    if v[field].as_str() == Some(SECRET_MASK) {
+    if v[field].as_str() == Some(settings::SECRET_MASK) {
         // 读不出旧值要报错别吞：把故障当"没存过"会把密钥静默清空
         let stored = crate::db::get_setting(conn, k)?
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
@@ -323,7 +317,7 @@ async fn settings_get(State(app): State<App>) -> R {
     })?;
     for row in rows {
         let (k, v) = row?;
-        let masked = mask_secret(&k, &v);
+        let masked = settings::masked(&k, &v);
         out.insert(k, Value::String(masked));
     }
     Ok(Json(Value::Object(out)))
@@ -335,7 +329,8 @@ async fn settings_put(State(app): State<App>, Json(b): Json<Value>) -> R {
     let obj = b.as_object().ok_or_else(|| bad("需要对象"))?;
     let mut pairs = Vec::with_capacity(obj.len());
     for (k, v) in obj {
-        let val = v.as_str().ok_or_else(|| bad(format!("{k} 的值必须是字符串")))?;
+        // 存的就是判过的那份：校验 trim 过、落库却原样的话，读侧（不 trim）解析不出、静默回落成默认
+        let val = v.as_str().ok_or_else(|| bad(format!("{k} 的值必须是字符串")))?.trim();
         check_setting(k, val)?;
         pairs.push((k, val));
     }
@@ -363,20 +358,32 @@ async fn backup_run(State(app): State<App>) -> R {
     })))
 }
 
+/// 发送测试测哪份配置：请求带了 `config`（表单里该渠道的当前值）就测它、不落盘，其中的占位串
+/// 换回库里那份密钥；没带就测库里存着的。
+fn test_config(conn: &rusqlite::Connection, key: &str, config: Option<&Value>) -> anyhow::Result<String> {
+    let Some(v) = config else {
+        return Ok(db::get_setting(conn, key)?.unwrap_or_default());
+    };
+    let v = v.as_str().ok_or_else(|| bad("config 要是字符串"))?;
+    check_setting(key, v)?;
+    keep_masked_secret(conn, key, v)
+}
+
 async fn notify_test(State(app): State<App>, Json(b): Json<Value>) -> R {
     let channel = s(&b, "channel").ok_or_else(|| bad("缺少 channel"))?;
-    let (tg, mail) = {
+    let raw = |key| {
         let conn = app.db.lock().unwrap();
-        (notify::telegram_cfg(&conn)?, notify::email_cfg(&conn)?)
+        test_config(&conn, key, b.get("config"))
     };
     let text = "Kalends 通知测试 ✓";
     match channel.as_str() {
         "telegram" => {
-            let cfg = tg.ok_or_else(|| bad("Telegram 未启用或未配置完整"))?;
+            let cfg = notify::telegram_cfg_from(&raw("notify.telegram")?)
+                .ok_or_else(|| bad("Telegram 未启用或未配置完整"))?;
             notify::send_telegram(&cfg, text).await?;
         }
         "email" => {
-            let cfg = mail.ok_or_else(|| bad("邮件未启用或未配置完整"))?;
+            let cfg = notify::email_cfg_from(&raw("notify.email")?).ok_or_else(|| bad("邮件未启用或未配置完整"))?;
             notify::send_email(&cfg, "Kalends 通知测试", text).await?;
         }
         other => return Err(bad(format!("未知渠道：{other}")).into()),
@@ -444,8 +451,8 @@ mod tests {
         assert!(chk(&json!({})).is_ok());
     }
 
-    /// 已知键拦一眼可辨的垃圾，不认识的键照存——R3-#6 的拍板：不做键白名单，
-    /// 漏登记的键「存不进去且不报错」比存进垃圾更糟。
+    /// 已知键拦一眼可辨的垃圾，不认识的键照存——不做键白名单：漏登记的键「存不进去且不报错」
+    /// 比存进垃圾更糟。
     #[test]
     fn known_settings_are_shape_checked_and_unknown_keys_pass() {
         let ok = |k, v| assert!(check_setting(k, v).is_ok(), "{k}={v}");
@@ -494,8 +501,8 @@ mod tests {
         )
         .unwrap();
         let stored = crate::db::get_setting(&conn, "notify.telegram").unwrap().unwrap();
-        let masked = mask_secret("notify.telegram", &stored);
-        assert!(!masked.contains("tok123") && masked.contains(SECRET_MASK), "{masked}");
+        let masked = settings::masked("notify.telegram", &stored);
+        assert!(!masked.contains("tok123") && masked.contains(settings::SECRET_MASK), "{masked}");
         let kept = keep_masked_secret(&conn, "notify.telegram", &masked).unwrap();
         assert!(kept.contains("tok123"), "{kept}");
         let fresh = keep_masked_secret(&conn, "notify.telegram", r#"{"bot_token":"new"}"#).unwrap();
@@ -503,9 +510,54 @@ mod tests {
         let cleared = keep_masked_secret(&conn, "notify.telegram", r#"{"bot_token":""}"#).unwrap();
         assert!(!cleared.contains("tok123"));
         // 空 token 不上占位串（否则看起来像已配置）；无密钥可藏的键原样通过
-        assert!(!mask_secret("notify.telegram", r#"{"bot_token":""}"#).contains(SECRET_MASK));
-        assert_eq!(secret_field("notify.email"), Some("password"));
-        assert_eq!(mask_secret("fx.display", "CNY"), "CNY");
+        assert!(!settings::masked("notify.telegram", r#"{"bot_token":""}"#).contains(settings::SECRET_MASK));
+        assert_eq!(settings::secret_field("notify.email"), Some("password"));
+        assert_eq!(settings::masked("fx.display", "CNY"), "CNY");
+        // 存值解析不出时整串换掉：原样吐出就是连密钥一起交出去
+        assert_eq!(settings::masked("notify.telegram", r#"{"bot_token":"tok123""#), settings::SECRET_MASK);
+    }
+
+    /// 设置存 trim 后的值：校验判的是 trim 过的，原样落库的话读侧（不 trim）解析不出、静默回落成
+    /// 默认——存 " 30 " 回 200，调度器用的却是 14。
+    #[tokio::test]
+    async fn settings_are_stored_as_the_trimmed_value_that_was_checked() {
+        use axum::body::Body;
+        use tower::util::ServiceExt;
+        let app = App::for_tests(crate::db::fresh_in_memory().unwrap(), std::path::Path::new("."));
+        let req = axum::http::Request::put("/api/settings")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"notify.window_days":" 30 ","notify.digest_time":" 08:30"}"#))
+            .unwrap();
+        let resp = core_router().with_state(app.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let conn = app.db.lock().unwrap();
+        let get = |k| crate::db::get_setting(&conn, k).unwrap().unwrap();
+        assert_eq!(get("notify.window_days").parse::<i64>().ok(), Some(30));
+        assert_eq!(get("notify.digest_time"), "08:30");
+    }
+
+    /// 发送测试测表单里的当前值：带来的占位串换回库里那份密钥，坏形状拒收；不带 config 测库里存着的。
+    #[test]
+    fn the_send_test_takes_the_form_values_with_the_stored_secret_behind_the_mask() {
+        let conn = crate::db::fresh_in_memory().unwrap();
+        crate::db::seed_defaults(&conn).unwrap();
+        let key = "notify.telegram";
+        conn.execute(
+            "UPDATE settings SET value=?2 WHERE key=?1",
+            [key, r#"{"enabled":true,"bot_token":"STORED","chat_id":"1"}"#],
+        )
+        .unwrap();
+        let tg = |config: Option<&Value>| notify::telegram_cfg_from(&test_config(&conn, key, config).unwrap()).unwrap();
+
+        let form = json!(format!(r#"{{"enabled":true,"bot_token":"{}","chat_id":"2"}}"#, settings::SECRET_MASK));
+        let cfg = tg(Some(&form));
+        assert_eq!((cfg.bot_token.as_str(), cfg.chat_id.as_str()), ("STORED", "2"));
+        let cfg = tg(Some(&json!(r#"{"enabled":true,"bot_token":"TYPED","chat_id":"2"}"#)));
+        assert_eq!(cfg.bot_token, "TYPED");
+        let cfg = tg(None);
+        assert_eq!((cfg.bot_token.as_str(), cfg.chat_id.as_str()), ("STORED", "1"));
+        assert!(test_config(&conn, key, Some(&json!("不是 JSON"))).is_err());
+        assert!(test_config(&conn, key, Some(&json!({ "enabled": true }))).is_err(), "config 是串，与设置接口同形");
     }
 
     /// 通知记录是 `notification_log` 唯一的读路径：最新在前、covered 行不缺席、
@@ -531,19 +583,48 @@ mod tests {
         assert!(rows.iter().any(|r| r["item_name"] == json!("Example")));
     }
 
-    /// 缺表时 ok 必须翻假（状态码随之 503）：200 + ok:true 会让容器探针把
-    /// 结构损坏的实例标成健康，监控与自动发布全被骗过。
+    /// 任一业务表缺了 ok 都必须翻假（状态码随之 503）：`notification_log` 读不出时每轮提醒
+    /// 都在开头失败，健康检查不数它的话容器照样 healthy。
     #[test]
-    fn health_reports_false_when_a_table_cannot_be_read() {
+    fn health_reports_false_when_any_business_table_cannot_be_read() {
         let conn = crate::db::fresh_in_memory().unwrap();
         let (ok, payload) = health_payload(&conn);
         assert!(ok);
         assert!(payload["counts"]["items"].as_i64().unwrap() >= 0);
 
-        conn.execute_batch("DROP TABLE items").unwrap();
+        for table in ["collections", "items", "fields", "renewal_ledger", "notification_log", "settings"] {
+            let conn = crate::db::fresh_in_memory().unwrap();
+            conn.execute_batch(&format!("PRAGMA foreign_keys = OFF; DROP TABLE {table}")).unwrap();
+            let (ok, payload) = health_payload(&conn);
+            assert!(!ok, "缺了 {table} 还报健康就是骗探针");
+            assert_eq!(payload["ok"], json!(false));
+            assert_eq!(payload["counts"][table], json!(-1), "{table}");
+        }
+    }
+
+    /// 计数要读表本体：`count(*)` 默认走覆盖索引，表页坏了、索引完好时照样数得出来，
+    /// 首页与条目列表已经 500，健康检查还回 200。
+    #[test]
+    fn health_reads_the_table_pages_not_just_a_covering_index() {
+        use std::io::{Seek, SeekFrom, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(dir.path()).unwrap();
+        let root: u64 = conn
+            .query_row("SELECT rootpage FROM sqlite_master WHERE type='table' AND name='items'", [], |r| r.get(0))
+            .unwrap();
+        let page: u64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        drop(conn);
+
+        let path = dir.path().join("kalends.db");
+        let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.seek(SeekFrom::Start((root - 1) * page)).unwrap();
+        f.write_all(&vec![0; usize::try_from(page).unwrap()]).unwrap();
+        drop(f);
+
+        let conn = rusqlite::Connection::open(&path).unwrap();
         let (ok, payload) = health_payload(&conn);
-        assert!(!ok, "缺表还报健康就是骗探针");
-        assert_eq!(payload["ok"], json!(false));
+        assert!(!ok, "items 表页坏了还报健康：{payload}");
         assert_eq!(payload["counts"]["items"], json!(-1));
     }
 

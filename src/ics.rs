@@ -75,11 +75,14 @@ pub fn calendar(items: &[Value]) -> String {
         put(&mut out, &format!("DTSTART;VALUE=DATE:{date}"));
         put(&mut out, &format!("SUMMARY:{}", esc(&summary)));
         put(&mut out, &format!("DESCRIPTION:{}", esc(&desc)));
-        put(&mut out, "BEGIN:VALARM");
-        put(&mut out, "ACTION:DISPLAY");
-        put(&mut out, &format!("DESCRIPTION:{}", esc(&summary)));
-        put(&mut out, "TRIGGER:-P1D");
-        put(&mut out, "END:VALARM");
+        // 不提醒的状态（到期不续）只留事件：日历照着闹钟弹「续费」，与状态的意思正相反
+        if !it["muted"].as_bool().unwrap_or(false) {
+            put(&mut out, "BEGIN:VALARM");
+            put(&mut out, "ACTION:DISPLAY");
+            put(&mut out, &format!("DESCRIPTION:{}", esc(&summary)));
+            put(&mut out, "TRIGGER:-P1D");
+            put(&mut out, "END:VALARM");
+        }
         put(&mut out, "END:VEVENT");
     }
     put(&mut out, "END:VCALENDAR");
@@ -127,6 +130,20 @@ mod tests {
         assert!(ics.contains("SUMMARY:续费：Netflix\\, 家庭版"));
         assert!(ics.contains("DESCRIPTION:USD 15.50"));
         assert!(ics.contains("TRIGGER:-P1D"));
+    }
+
+    /// 不提醒的状态（Ending 到期不续）在日历上仍有事件，但不挂提醒：照执行 VALARM 的客户端会在
+    /// 到期前一天弹「续费：X」，与「到期不续」正相反。
+    #[test]
+    fn a_muted_item_keeps_its_event_but_not_the_alarm() {
+        let ics = calendar(&[
+            json!({ "kind": "subs", "id": 1, "due": "2026-08-01", "name": "续", "muted": false }),
+            json!({ "kind": "subs", "id": 2, "due": "2026-08-02", "name": "不续", "muted": true }),
+        ]);
+        assert_eq!(ics.matches("BEGIN:VEVENT").count(), 2);
+        assert_eq!(ics.matches("BEGIN:VALARM").count(), 1);
+        let muted = &ics[ics.find("UID:kalends-subs-2").unwrap()..];
+        assert!(!muted[..muted.find("END:VEVENT").unwrap()].contains("VALARM"));
     }
 
     #[test]

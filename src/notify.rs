@@ -28,34 +28,34 @@ pub struct EmailCfg {
 /// 设置读不出来是 `Err`，不折成「渠道没开」——那样提醒会静默停摆、日志零字。
 /// `Ok(None)` 只表示渠道关着、存着的值不是 JSON，或必填项没填全。
 pub fn telegram_cfg(conn: &Connection) -> Result<Option<TelegramCfg>> {
-    let Some(raw) = db::get_setting(conn, "notify.telegram")? else {
-        return Ok(None);
-    };
-    let Ok(v) = serde_json::from_str::<Value>(&raw) else {
-        return Ok(None);
-    };
+    Ok(db::get_setting(conn, "notify.telegram")?.and_then(|raw| telegram_cfg_from(&raw)))
+}
+
+/// 从一份渠道配置串解析；渠道关着、不是 JSON 或必填项没填全都是 None。
+pub fn telegram_cfg_from(raw: &str) -> Option<TelegramCfg> {
+    let v = serde_json::from_str::<Value>(raw).ok()?;
     if !v["enabled"].as_bool().unwrap_or(false) {
-        return Ok(None);
+        return None;
     }
     let cfg = TelegramCfg {
         bot_token: v["bot_token"].as_str().unwrap_or("").trim().to_string(),
         chat_id: v["chat_id"].as_str().unwrap_or("").trim().to_string(),
         proxy: v["proxy"].as_str().unwrap_or("").trim().to_string(),
     };
-    Ok((!cfg.bot_token.is_empty() && !cfg.chat_id.is_empty()).then_some(cfg))
+    (!cfg.bot_token.is_empty() && !cfg.chat_id.is_empty()).then_some(cfg)
 }
 
 /// # Errors
 /// 同 `telegram_cfg`：读不出设置是 `Err`，不是「渠道没开」。
 pub fn email_cfg(conn: &Connection) -> Result<Option<EmailCfg>> {
-    let Some(raw) = db::get_setting(conn, "notify.email")? else {
-        return Ok(None);
-    };
-    let Ok(v) = serde_json::from_str::<Value>(&raw) else {
-        return Ok(None);
-    };
+    Ok(db::get_setting(conn, "notify.email")?.and_then(|raw| email_cfg_from(&raw)))
+}
+
+/// 同 `telegram_cfg_from`。
+pub fn email_cfg_from(raw: &str) -> Option<EmailCfg> {
+    let v = serde_json::from_str::<Value>(raw).ok()?;
     if !v["enabled"].as_bool().unwrap_or(false) {
-        return Ok(None);
+        return None;
     }
     let cfg = EmailCfg {
         host: v["host"].as_str().unwrap_or("").trim().to_string(),
@@ -67,7 +67,7 @@ pub fn email_cfg(conn: &Connection) -> Result<Option<EmailCfg>> {
         from: v["from"].as_str().unwrap_or("").trim().to_string(),
         to: v["to"].as_str().unwrap_or("").trim().to_string(),
     };
-    Ok((!cfg.host.is_empty() && !cfg.from.is_empty() && !cfg.to.is_empty()).then_some(cfg))
+    (!cfg.host.is_empty() && !cfg.from.is_empty() && !cfg.to.is_empty()).then_some(cfg)
 }
 
 /// 出网请求（Telegram / 汇率 / 取图标共用）。**必须带超时**：reqwest 默认既没有连接超时

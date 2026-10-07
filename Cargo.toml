@@ -1,7 +1,9 @@
 [package]
 name = "kalends"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
+# 最低能编译的版本（用到 1.91 稳定的 Duration::from_mins），不是支持承诺
+rust-version = "1.91"
 description = "Self-hosted, local-first tracker for subscriptions, SIM keep-alives, VPS renewals and anything else with a next date"
 license = "AGPL-3.0-only"
 repository = "https://github.com/Lynthar/Kalends"
@@ -20,6 +22,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1", "tokio1-rustls-tls"] }
 # 只为令牌的常数时间比对；rustls 本就带着它，不是新家族
 subtle = { version = "2", default-features = false }
+
+# 任何 panic 都让进程退出、交给容器的 restart 拉起：持锁时 panic 会让锁中毒，进程活着却每个请求都失败
+[profile.release]
+panic = "abort"
 
 [dev-dependencies]
 # 只为中间件的 oneshot 测试（PIN 门接线）；tower 本就是 axum 的底座，不引入新家族

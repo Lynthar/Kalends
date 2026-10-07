@@ -61,7 +61,7 @@ KALENDS_DATA=./data TZ=Asia/Shanghai ./kalends-<version>-x86_64-unknown-linux-gn
 There's an `aarch64` build for ARM boxes and NAS units, and a `musl` build for
 old glibc or Alpine. `SHA256SUMS` ships alongside them.
 
-**Docker** — the compose file builds locally; no image is published anywhere:
+**Docker** — the compose file builds locally (BuildKit required, the default since Docker 23); no image is published anywhere:
 
 ```bash
 docker build -t kalends:local .
@@ -70,7 +70,7 @@ sudo chown -R 10001:10001 /path/to/appdata/kalends
 docker compose -f deploy/compose.yaml up -d
 ```
 
-**From source:**
+**From source** (Rust 1.91 or newer):
 
 ```bash
 cargo run

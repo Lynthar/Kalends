@@ -48,7 +48,7 @@ KALENDS_DATA=./data TZ=Asia/Shanghai ./kalends-<version>-x86_64-unknown-linux-gn
 
 另有 `aarch64` 版给 ARM 机器和 NAS，`musl` 版给老 glibc 或 Alpine，同批带 `SHA256SUMS`。
 
-**Docker**——compose 是本地构建的，没有发布任何镜像：
+**Docker**——compose 是本地构建的（要 BuildKit，Docker 23 起默认），没有发布任何镜像：
 
 ```bash
 docker build -t kalends:local .
@@ -57,7 +57,7 @@ sudo chown -R 10001:10001 /path/to/appdata/kalends
 docker compose -f deploy/compose.yaml up -d
 ```
 
-**从源码跑：**
+**从源码跑**（Rust 1.91 及以上）：
 
 ```bash
 cargo run

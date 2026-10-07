@@ -10,7 +10,7 @@ use axum::{
     routing::{get, patch, post, put},
     Json, Router,
 };
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
@@ -910,8 +910,11 @@ pub fn normalize_shaped(ftype: &str, raw: &str) -> anyhow::Result<String> {
             // 界面的原生 <input type=date> 写不出坏值，接口与导入脚本能——坏日期会让
             // 条目掉出到期时间线。认得出的松散写法补齐而不是拒掉：这些日期是当字符串
             // 排序的，`2026-8-5` 不补零会排到 `2026-12-01` 后面。
+            // 年份限四位：`%Y` 吃带符号与五位年，ICS 随之写出 9 位的 DTSTART
             let d = NaiveDate::parse_from_str(t, "%Y-%m-%d")
-                .map_err(|_| bad(format!("日期要写成 2026-08-15 这样的形状：{t}")))?;
+                .ok()
+                .filter(|d| (1..=9999).contains(&d.year()))
+                .ok_or_else(|| bad(format!("日期要写成 2026-08-15 这样的形状：{t}")))?;
             Ok(d.format("%Y-%m-%d").to_string())
         }
         _ => Ok(t.to_string()),
@@ -939,37 +942,91 @@ pub fn url_host(raw: &str) -> Option<String> {
     (!host.is_empty() && host.contains('.')).then(|| host.to_lowercase())
 }
 
-/// 把某张表里有形状的字段就地规范化。字段类型是数据，写入口按表名现查一次
-/// （`tbl`＝库键，没有这类列的表查询返回空集）。
-pub fn normalize_shaped_in(conn: &Connection, tbl: &str, b: &mut Value) -> anyhow::Result<()> {
-    let mut stmt =
-        conn.prepare("SELECT key, ftype FROM fields WHERE tbl=?1 AND ftype IN ('tel','url','email','date')")?;
-    let cols: Vec<(String, String)> = stmt
-        .query_map([tbl], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    for (k, ftype) in cols {
-        // url 既可能是真列，也可能是 extra 里的域字段/自定义列
-        if let Some(v) = b.get(&k).and_then(|v| v.as_str()) {
-            let fixed = normalize_shaped(&ftype, v)?;
-            b[&k] = json!(fixed);
-        }
-        if let Some(v) = b.get("extra").and_then(|e| e.get(&k)).and_then(|v| v.as_str()) {
-            let fixed = normalize_shaped(&ftype, v)?;
-            b["extra"][&k] = json!(fixed);
-        }
+/// 周期只收 engine 的封闭集（大小写不同的认下来）；集外的值落库后到期日算不出、续费推不动日期。
+fn normalize_cycle(raw: &str) -> anyhow::Result<String> {
+    let t = raw.trim().to_lowercase();
+    if t.is_empty() || engine::CYCLES.contains(&t.as_str()) {
+        return Ok(t);
     }
-    Ok(())
+    Err(bad(format!("周期只能是 {}：{raw}", engine::CYCLES.join(" / "))))
 }
 
-fn normalize_shaped_fields(conn: &Connection, coll: i64, b: &mut Value) -> anyhow::Result<()> {
-    let key: String = conn.query_row("SELECT key FROM collections WHERE id=?1", [coll], |r| {
-        r.get(0)
-    })?;
+/// 状态大小写不同、且恰好对上词表里一个值时换成词表写法；对不上的原样收，首页点名「状态不在词表里」——
+/// 拒收会让导入在第一行就停下，失去「先导入、再补词表」的余地。
+fn respell_status(conn: &Connection, coll_key: &str, raw: &str) -> anyhow::Result<String> {
+    let t = raw.trim();
+    let Some(vocab) = engine::status_vocab(conn, coll_key)? else { return Ok(t.into()) };
+    if vocab.iter().any(|v| v == t) {
+        return Ok(t.into());
+    }
+    let lower = t.to_lowercase();
+    let mut hits = vocab.iter().filter(|v| v.to_lowercase() == lower);
+    Ok(match (hits.next(), hits.next()) {
+        (Some(v), None) => v.clone(),
+        _ => t.into(),
+    })
+}
+
+/// extra 里一个值按它那列的类型判；`null` 与 `""` 是清空，照收。多选收文本或文本数组：
+/// 文本 / 单选 / 多选可互换呈现，多选列按文本呈现时写进来的就是文本。
+fn extra_value(ftype: &str, name: &str, v: &Value) -> anyhow::Result<Value> {
+    if v.is_null() || v.as_str() == Some("") {
+        return Ok(v.clone());
+    }
+    let wrong = |kind: &str| bad(format!("「{name}」要填{kind}"));
+    match ftype {
+        "num" => v.is_number().then(|| v.clone()).ok_or_else(|| wrong("数字")),
+        "multi" => match v {
+            Value::String(_) => Ok(v.clone()),
+            Value::Array(a) if a.iter().all(Value::is_string) => Ok(v.clone()),
+            _ => Err(wrong("文本或文本列表")),
+        },
+        "date" | "tel" | "url" | "email" => Ok(Value::from(normalize_shaped(ftype, v.as_str().ok_or_else(|| wrong("文本"))?)?)),
+        _ => v.is_string().then(|| v.clone()).ok_or_else(|| wrong("文本")),
+    }
+}
+
+/// 条目值的形状规则，全项目只此一处（新建与更新走它，续费用它的币种那支）：按注册表类型与周期封闭集
+/// 判这次请求带来的值，能规范的就地规范。`cur` 是这一行的现值（新建为 None）：extra 里与现值相同的键
+/// 不判——extra 整份往返，陈年坏值否则会让这行的任何编辑都 400。
+fn normalize_item(conn: &Connection, coll: i64, b: &mut Value, cur: Option<&Value>) -> anyhow::Result<()> {
+    let key: String = conn.query_row("SELECT key FROM collections WHERE id=?1", [coll], |r| r.get(0))?;
     // 币种自迁移 0013 起不是注册字段（并进了费用格），注册表那圈循环读不到它
-    if let Some(c) = b.get("currency").and_then(|v| v.as_str()) {
+    if let Some(c) = b.get("currency").and_then(Value::as_str) {
         b["currency"] = json!(normalize_currency(c)?);
     }
-    normalize_shaped_in(conn, &key, b)
+    if let Some(c) = b.get("cycle").and_then(Value::as_str) {
+        b["cycle"] = json!(normalize_cycle(c)?);
+    }
+    if let Some(st) = b.get("status").and_then(Value::as_str) {
+        b["status"] = json!(respell_status(conn, &key, st)?);
+    }
+    // 两个日期真列不看注册表：锚点另一侧那列不注册，照样被读、被导出
+    for k in ["next_renewal", "last_renewed"] {
+        if let Some(v) = b.get(k).and_then(Value::as_str) {
+            b[k] = json!(normalize_shaped("date", v)?);
+        }
+    }
+    let mut stmt = conn.prepare("SELECT key, name, ftype, src FROM fields WHERE tbl=?1")?;
+    let fields: Vec<(String, String, String, String)> = stmt
+        .query_map([&key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (k, name, ftype, src) in fields {
+        if src == "col" && matches!(ftype.as_str(), "tel" | "url" | "email" | "date") {
+            if let Some(v) = b.get(&k).and_then(Value::as_str) {
+                b[&k] = json!(normalize_shaped(&ftype, v)?);
+            }
+        }
+        if src != "extra" {
+            continue;
+        }
+        let Some(v) = b.get("extra").and_then(|e| e.get(&k)) else { continue };
+        if cur.and_then(|c| c["extra"].get(&k)) == Some(v) {
+            continue;
+        }
+        b["extra"][&k] = extra_value(&ftype, &name, v)?;
+    }
+    Ok(())
 }
 
 fn item_values(b: &Value) -> anyhow::Result<Vec<rusqlite::types::Value>> {
@@ -998,10 +1055,9 @@ fn item_values(b: &Value) -> anyhow::Result<Vec<rusqlite::types::Value>> {
 const WRITE_COLS: &str = "name,parent_id,status,price,currency,cycle,cycle_days,\
                           next_renewal,last_renewed,url,notes,extra";
 
-/// 条目写入口的校验：出现的键必须是它该有的类型（`api::check_shape`），logo 带非空值
+/// 条目写入口的类型校验：出现的键必须是它该有的类型（`api::check_shape`），logo 带非空值
 /// 直接拒——`null`/`""` 按「不在可写集」忽略，整行回读再 PATCH 回来的用法才过得去。
-/// `cur` 是这一行的现值（新建时 `None`），只给跨字段规则用；类型校验仍只看 `b`。
-fn check_item_shape(b: &Value, cur: Option<&Value>) -> anyhow::Result<()> {
+fn check_item_shape(b: &Value) -> anyhow::Result<()> {
     if b.get("logo").is_some_and(|v| !(v.is_null() || v.as_str() == Some(""))) {
         return Err(bad("图标不走这里：上传/抓取/清除各有专用端点"));
     }
@@ -1010,9 +1066,12 @@ fn check_item_shape(b: &Value, cur: Option<&Value>) -> anyhow::Result<()> {
         &["name", "status", "currency", "cycle", "next_renewal", "last_renewed", "url", "notes"],
         &["parent_id", "cycle_days"],
         &["price"],
-    )?;
-    // cycle='days' 缺天数就算不出到期日，周期还显示成 "Every 0 days"。只在请求碰了这两个
-    // 键之一时判：拿整行去判，库里一个陈年坏值就能把这行锁死，改别的字段都会被 400
+    )
+}
+
+/// cycle='days' 缺天数就算不出到期日，周期还显示成 "Every 0 days"。判规范化之后的值；`cur` 是这一行的
+/// 现值（新建为 None）。只在请求碰了这两个键之一时判：拿整行去判，库里一个陈年坏值就能把这行锁死
+fn check_cycle_days(b: &Value, cur: Option<&Value>) -> anyhow::Result<()> {
     if b.get("cycle").is_some() || b.get("cycle_days").is_some() {
         let pick = |k: &str| b.get(k).or_else(|| cur.and_then(|c| c.get(k)));
         if pick("cycle").and_then(Value::as_str) == Some("days")
@@ -1076,11 +1135,12 @@ fn check_extra_keys(conn: &Connection, coll: i64, b: &Value, cur: Option<&Value>
 }
 
 pub fn insert_item(conn: &Connection, coll: i64, b: &Value) -> anyhow::Result<i64> {
-    check_item_shape(b, None)?;
+    check_item_shape(b)?;
     check_extra_keys(conn, coll, b, None)?;
     check_parent(conn, coll, None, i(b, "parent_id"))?;
     let mut b = b.clone();
-    normalize_shaped_fields(conn, coll, &mut b)?;
+    normalize_item(conn, coll, &mut b, None)?;
+    check_cycle_days(&b, None)?;
     let b = &b;
     let mut vals = item_values(b)?;
     vals.insert(0, rusqlite::types::Value::from(coll));
@@ -1112,14 +1172,15 @@ pub fn update_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<()> 
     let cur = conn
         .query_row(&format!("SELECT {ITEM_COLS} FROM items WHERE id=?1"), [id], item_row)
         .map_err(|_| missing("条目不存在"))?;
-    check_item_shape(b, Some(&cur))?;
+    check_item_shape(b)?;
     let coll = cur["collection_id"].as_i64().unwrap_or_default();
     check_extra_keys(conn, coll, b, Some(&cur))?;
     // 规范化**只作用在这次请求带来的键上**，所以要赶在合并之前：拿合并后的整行去过校验，
     // 等于让库里一个陈年坏值（接口或导入脚本造得出来）把这一行永久锁死——
     // 改任何别的字段都会被一个自己没碰过的字段 400 掉。
     let mut incoming = b.clone();
-    normalize_shaped_fields(conn, coll, &mut incoming)?;
+    normalize_item(conn, coll, &mut incoming, Some(&cur))?;
+    check_cycle_days(&incoming, Some(&cur))?;
     // 父行规则同理只判请求带来的 parent_id：一条存量坏链接不该让这行连备注都改不了
     if incoming.get("parent_id").is_some() {
         check_parent(conn, coll, Some(id), i(&incoming, "parent_id"))?;
@@ -1250,6 +1311,8 @@ type RenewRow = (
 pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value> {
     // amount 传错类型会被 `f()` 当成缺席、静默回落到条目价格——台账会记下一个没人填过的数
     crate::api::check_shape(b, &["currency", "note"], &[], &["amount"])?;
+    // 币种与条目同一规范化：台账记下就改不了
+    let paid_in = s(b, "currency").map(|c| normalize_currency(&c)).transpose()?;
     let row: Option<RenewRow> = conn
         .query_row(
             "SELECT c.key, c.due_anchor, c.renew_from, i.price, i.currency,
@@ -1303,7 +1366,7 @@ pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value
             id,
             today.to_string(),
             f(b, "amount").or(price),
-            s(b, "currency").or(currency),
+            paid_in.or(currency),
             s(b, "note"),
             item_name,
             coll_name,
@@ -2186,6 +2249,112 @@ mod tests {
         let old = conn.last_insert_rowid();
         update_item(&conn, old, &json!({ "notes": "改个备注" })).unwrap();
         assert!(update_item(&conn, old, &json!({ "cycle": "days" })).is_err());
+    }
+
+    /// 条目值的形状规则只有一处：同一个坏币种在新建、更新、续费三个写入口都 400，续费的币种与
+    /// 条目同一规范化（台账记下就改不了）。
+    #[test]
+    fn every_item_write_entry_refuses_the_same_bad_currency() {
+        let conn = fresh();
+        let subs = coll(&conn, "subs");
+        let id = insert_item(&conn, subs, &json!({ "name": "A" })).unwrap();
+        assert!(insert_item(&conn, subs, &json!({ "name": "A", "currency": "人民币" })).is_err());
+        assert!(update_item(&conn, id, &json!({ "currency": "人民币" })).is_err());
+        assert!(renew_item(&conn, id, &json!({ "currency": "人民币" })).is_err());
+        assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM renewal_ledger", []), 0, "被拒的续费不该记账");
+        renew_item(&conn, id, &json!({ "currency": " usd " })).unwrap();
+        assert_eq!(one::<String>(&conn, "SELECT currency FROM renewal_ledger", []), "USD");
+    }
+
+    /// 周期是 engine 的封闭集：集外的值落库后到期日算不出、续费只记账不推日期。拒收并列出可选值；
+    /// 大小写不同的认下来，清空照旧。
+    #[test]
+    fn a_cycle_outside_the_engine_set_is_refused_with_the_choices() {
+        let conn = fresh();
+        let subs = coll(&conn, "subs");
+        let err = insert_item(&conn, subs, &json!({ "name": "A", "cycle": "yearly" })).unwrap_err().to_string();
+        assert!(err.contains("monthly") && err.contains("lifetime"), "{err}");
+        let id = insert_item(&conn, subs, &json!({ "name": "A", "cycle": "Annual" })).unwrap();
+        let cycle = |id: i64| -> Option<String> {
+            conn.query_row("SELECT cycle FROM items WHERE id=?1", [id], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(cycle(id).as_deref(), Some("annual"));
+        assert!(update_item(&conn, id, &json!({ "cycle": "fortnightly" })).is_err());
+        update_item(&conn, id, &json!({ "cycle": "" })).unwrap();
+        assert_eq!(cycle(id), None);
+    }
+
+    /// 状态只在大小写不同、且恰好对上词表里一个值时规范成词表写法；对不上的原样落库（首页点名）。
+    #[test]
+    fn a_status_is_respelled_only_when_it_matches_exactly_one_vocabulary_value() {
+        let conn = fresh();
+        let subs = coll(&conn, "subs");
+        let st = |id: i64| -> String {
+            conn.query_row("SELECT status FROM items WHERE id=?1", [id], |r| r.get(0)).unwrap()
+        };
+        let a = insert_item(&conn, subs, &json!({ "name": "A", "status": "active" })).unwrap();
+        assert_eq!(st(a), "Active");
+        let t = insert_item(&conn, subs, &json!({ "name": "T", "status": "Trial" })).unwrap();
+        assert_eq!(st(t), "Trial");
+        update_item(&conn, t, &json!({ "status": "ENDING" })).unwrap();
+        assert_eq!(st(t), "Ending");
+
+        let vocab: String =
+            conn.query_row("SELECT options FROM fields WHERE tbl='subs' AND key='status'", [], |r| r.get(0)).unwrap();
+        let mut v: Vec<Value> = serde_json::from_str(&vocab).unwrap();
+        v.push(json!({ "v": "ACTIVE" }));
+        conn.execute(
+            "UPDATE fields SET options=?1 WHERE tbl='subs' AND key='status'",
+            [serde_json::to_string(&v).unwrap()],
+        )
+        .unwrap();
+        update_item(&conn, t, &json!({ "status": "active" })).unwrap();
+        assert_eq!(st(t), "active", "两个候选时不猜");
+    }
+
+    /// 日期年份限 1..=9999（chrono 的 `%Y` 吃带符号与五位年，ICS 随之写出 9 位 DTSTART）。两个日期
+    /// 真列不论注册与否都按日期判：锚点另一侧那列不在注册表里，从前整条跳过校验。
+    #[test]
+    fn dates_have_four_digit_years_and_both_date_columns_are_always_checked() {
+        for bad_one in ["+12345-01-01", "0000-01-01", "-0001-01-01"] {
+            assert!(normalize_shaped("date", bad_one).is_err(), "{bad_one} 不该放行");
+        }
+        assert_eq!(normalize_shaped("date", "0001-01-01").unwrap(), "0001-01-01");
+        let conn = fresh();
+        let subs = coll(&conn, "subs");
+        assert!(insert_item(&conn, subs, &json!({ "name": "A", "last_renewed": "去年" })).is_err());
+        let id = insert_item(&conn, subs, &json!({ "name": "A", "last_renewed": "2026-8-5" })).unwrap();
+        assert_eq!(one::<String>(&conn, "SELECT last_renewed FROM items WHERE id=?1", [id]), "2026-08-05");
+    }
+
+    /// extra 的值按注册表的类型判：有形状的要是文本并规范化，数字列要是数，单选是文本，多选收文本或
+    /// 文本数组（呈现可互换）。与这一行现值相同的键不判：extra 整份往返，陈年坏值否则会让这行的
+    /// 任何编辑都 400。
+    #[test]
+    fn extra_values_follow_their_column_type_but_untouched_old_values_pass() {
+        let conn = fresh();
+        let (sims, vps) = (coll(&conn, "sims"), coll(&conn, "vps"));
+        let refused = [
+            (sims, json!({ "phone_number": 4_471_234 })),
+            (vps, json!({ "ram_gb": "4" })),
+            (vps, json!({ "locations": ["东京", 3] })),
+            (vps, json!({ "purpose": ["建站"] })),
+        ];
+        for (c, extra) in refused {
+            assert!(insert_item(&conn, c, &json!({ "name": "X", "extra": extra })).is_err(), "{extra}");
+        }
+        let id = insert_item(&conn, vps, &json!({ "name": "V", "extra": {
+            "ram_gb": 4, "locations": ["东京"], "routes": "CN2, 9929", "purpose": "建站", "cores": null,
+        } }))
+        .unwrap();
+
+        conn.execute(r#"UPDATE items SET extra='{"ram_gb":"四","locations":["东京"]}' WHERE id=?1"#, [id]).unwrap();
+        update_item(&conn, id, &json!({ "extra": { "ram_gb": "四", "locations": ["大阪"] } })).unwrap();
+        assert!(update_item(&conn, id, &json!({ "extra": { "ram_gb": "五" } })).is_err(), "改了的值照判");
+
+        let s = insert_item(&conn, sims, &json!({ "name": "S" })).unwrap();
+        conn.execute(r#"UPDATE items SET extra='{"phone_number":"打客服"}' WHERE id=?1"#, [s]).unwrap();
+        update_item(&conn, s, &json!({ "extra": { "phone_number": "打客服", "forms": ["eSIM"] } })).unwrap();
     }
 
     /// 模板落表的字段类型没有任何一道运行时检查（`seed_fields` 原样插进 fields 表）。

@@ -284,7 +284,7 @@ mod tests {
         assert_eq!(one::<String>(&conn, "SELECT renew_from FROM collections WHERE key='vps'", []), "schedule");
         // 0021：条目号越过台账与通知日志里悬空的旧 id（999）
         assert_eq!(one::<i64>(&conn, "SELECT seq FROM id_seq WHERE name='items'", []), 999);
-        // 0020：媒体表连媒体字段注册一起退场（数据先经 Ludi 搬走，fixture 里也不再有媒体行）
+        // 0020：媒体表连媒体字段注册一起退场（fixture 里没有媒体行）
         assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM sqlite_master WHERE name='media_items'", []), 0);
         assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM fields WHERE tbl='media'", []), 0);
     }
@@ -325,8 +325,8 @@ mod tests {
         assert_eq!(next_id(&conn, "items").unwrap(), 1000);
     }
 
-    /// 0020 只在媒体清空后放行：还有媒体行就整库拒绝迁移（先经 Ludi 导入或在旧版本界面清空）。
-    /// 守卫翻车时错误里带着自述表名——这条测试的前半就是它的负向对照。
+    /// 0020 只在媒体清空后放行：还有媒体行就整库拒绝迁移，原样无损。
+    /// 守卫翻车时错误里带着自述的约束名——这条测试的前半就是它的负向对照。
     #[test]
     fn the_media_drop_refuses_while_media_rows_remain() {
         let conn = Connection::open_in_memory().unwrap();
@@ -338,7 +338,7 @@ mod tests {
         conn.execute("INSERT INTO media_items(title) VALUES('还没搬走')", []).unwrap();
         let err = migrate(&conn).unwrap_err().to_string();
         assert!(
-            err.contains("0020") && err.contains("media_rows_remain_export_to_ludi_first"),
+            err.contains("0020") && err.contains("media_rows_remain"),
             "{err}"
         );
         // 拒绝之后原样无损：媒体行还在、版本没动

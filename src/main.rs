@@ -43,14 +43,13 @@ impl App {
 }
 
 /// `kalends --health`：容器 HEALTHCHECK 自检（镜像里没有 curl / wget，为一件事装包
-/// 不值当）。判据是"答得上话"（5xx 以下）而不是 200——设了 PIN 会被挡成 401，
-/// 那恰恰说明服务活着。
+/// 不值当）。只认 200：任一业务表读不出时 `/api/health` 回 503，它不过 PIN 门。
 async fn health_probe() -> ! {
     let addr = std::env::var("KALENDS_ADDR").unwrap_or_else(|_| "127.0.0.1:4180".into());
     // 0.0.0.0 是监听地址不是可连地址（容器里恒是它）
     let target = addr.replace("0.0.0.0:", "127.0.0.1:").replace("[::]:", "[::1]:");
     let alive = match reqwest::get(format!("http://{target}/api/health")).await {
-        Ok(r) => r.status().as_u16() < 500,
+        Ok(r) => r.status().is_success(),
         Err(e) => {
             eprintln!("health: {e}");
             false
@@ -145,11 +144,22 @@ async fn main() -> anyhow::Result<()> {
     let conn = db::open(&data_dir)?;
     db::seed_defaults(&conn)?;
     tracing::info!("database ready at {}", data_dir.join("kalends.db").display());
-    // 到期日、剩余天数、摘要时刻、备份边界全看本地时区，而容器默认 UTC——「今天」会
-    // 错位。启动时把本地时间与偏移打出来，好让这件事一眼看得见（compose 里设 TZ）。
+    // 到期日、剩余天数、摘要时刻、备份边界全看本地时区，而容器默认 UTC——「今天」会错位。
+    // 启动时把本地时间、偏移与 TZ 原值打出来；拼错了或没设而落成 UTC 都告警，但不拒绝启动
     {
         let now = chrono::Local::now();
-        tracing::info!("local time {} (UTC{})", now.format("%Y-%m-%d %H:%M"), now.format("%:z"));
+        let tz = std::env::var("TZ").ok();
+        let at = now.format("%Y-%m-%d %H:%M (UTC%:z)");
+        tracing::info!("local time {at}, TZ={}", tz.as_deref().unwrap_or("(unset)"));
+        match tz.as_deref() {
+            Some(t) if tz_unresolved(t) => {
+                tracing::warn!("TZ={t} is not a time zone this system knows; local time fell back to {at}");
+            }
+            None if now.offset().local_minus_utc() == 0 => {
+                tracing::warn!("TZ is not set and local time is UTC; set TZ so \"today\" follows your clock");
+            }
+            _ => {}
+        }
     }
 
     let app = App {
@@ -178,31 +188,53 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `TZ` 设了却既不在时区库里、也不是 POSIX 写法（如 `CST-8`）：chrono 这时静默回落，拼错的
+/// `Asia/Shangai` 跑出来就是 UTC。查找的目录与 chrono 一致；空 `TZ` 按约定就是 UTC，不算。
+fn tz_unresolved(tz: &str) -> bool {
+    const ZONE_DIRS: [&str; 4] = ["/usr/share/zoneinfo", "/share/zoneinfo", "/etc/zoneinfo", "/usr/share/lib/zoneinfo"];
+    if tz.is_empty() {
+        return false;
+    }
+    let (file_only, name) = tz.strip_prefix(':').map_or((false, tz), |n| (true, n));
+    let path = std::path::Path::new(name);
+    let found = if path.is_absolute() {
+        path.is_file()
+    } else {
+        ZONE_DIRS.iter().any(|d| std::path::Path::new(d).join(name).is_file())
+    };
+    let abbr = tz.chars().take_while(char::is_ascii_alphabetic).count();
+    let posix = tz.starts_with('<')
+        || (abbr >= 3 && tz[abbr..].starts_with(|c: char| c.is_ascii_digit() || c == '+' || c == '-'));
+    !found && (file_only || !posix)
+}
+
 /// 设置 auth.pin 后，/api/* 与 /logos/* 需要 X-Kalends-Pin 头或 `kalends_pin` cookie；
-/// 静态页与 /calendar.ics（自带令牌）不拦。
-async fn pin_gate(State(app): State<App>, req: Request, next: Next) -> Response {
+/// 静态页与 /calendar.ics（自带令牌）不拦。`/api/health` 也不拦：放行的请求挂上
+/// `api::PinPassed`，健康检查凭它决定回多少。
+async fn pin_gate(State(app): State<App>, mut req: Request, next: Next) -> Response {
     let path = req.uri().path();
     if !path.starts_with("/api") && !path.starts_with("/logos") {
         return next.run(req).await;
     }
-    let required = {
+    let health = path == "/api/health";
+    let stored = {
         let conn = app.db.lock().unwrap();
+        db::get_setting(&conn, "auth.pin")
+    };
+    let required = match stored {
+        Ok(v) => v.unwrap_or_default(),
+        // 健康检查自己数得到 settings 读不出、回 503，门不替它答话
+        Err(_) if health => return next.run(req).await,
         // 读不出设置 ≠ 没设 PIN：把数据库故障折成空串，门会在最不该开的时候敞开
-        match db::get_setting(&conn, "auth.pin") {
-            Ok(v) => v.unwrap_or_default(),
-            Err(e) => {
-                tracing::error!("pin gate cannot read settings: {e}");
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({ "error": "设置读不出来，先检查数据库" })),
-                )
-                    .into_response();
-            }
+        Err(e) => {
+            tracing::error!("pin gate cannot read settings: {e}");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "设置读不出来，先检查数据库" })),
+            )
+                .into_response();
         }
     };
-    if required.is_empty() {
-        return next.run(req).await;
-    }
     let header_ok = req
         .headers()
         .get("x-kalends-pin")
@@ -216,7 +248,10 @@ async fn pin_gate(State(app): State<App>, req: Request, next: Next) -> Response 
             c.split(';')
                 .any(|kv| kv.trim() == format!("kalends_pin={required}"))
         });
-    if header_ok || cookie_ok {
+    if required.is_empty() || header_ok || cookie_ok {
+        req.extensions_mut().insert(api::PinPassed);
+        next.run(req).await
+    } else if health {
         next.run(req).await
     } else {
         (StatusCode::UNAUTHORIZED, Json(json!({ "error": "需要 PIN" }))).into_response()
@@ -378,6 +413,63 @@ mod tests {
 
     async fn status_of(app: Router, req: Request<Body>) -> StatusCode {
         app.oneshot(req).await.unwrap().status()
+    }
+
+    /// 拼错的时区名、找不到的文件要认出来（chrono 会静默回落）；POSIX 写法、空值与真有的时区不算。
+    #[test]
+    fn a_misspelled_tz_is_told_apart_from_the_forms_chrono_accepts() {
+        for bad in ["Asia/Shangai", ":Asia/Shangai", "/nonexistent/zone", "Shanghai"] {
+            assert!(tz_unresolved(bad), "{bad}");
+        }
+        for ok in ["", "CST-8", "UTC0", "EST5EDT,M3.2.0,M11.1.0", "<+08>-8", "Etc/GMT-14", "Asia/Shanghai"] {
+            assert!(!tz_unresolved(ok), "{ok}");
+        }
+    }
+
+    fn health_app(conn: rusqlite::Connection) -> Router {
+        let app = App::for_tests(conn, std::path::Path::new("."));
+        api::core_router()
+            .with_state(app.clone())
+            .layer(middleware::from_fn_with_state(app, pin_gate))
+    }
+
+    async fn health_of(app: Router, pin: Option<&str>) -> (StatusCode, serde_json::Value) {
+        let mut req = Request::get("/api/health");
+        if let Some(pin) = pin {
+            req = req.header("x-kalends-pin", pin);
+        }
+        let resp = app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    /// 健康检查不过 PIN 门：容器探针不带凭据，过门的话设了 PIN 它只拿得到 401，表坏了
+    /// 容器照样 healthy。没带对 PIN 只回状态码与 `{ok}`，计数与版本留给带凭据的人。
+    #[tokio::test]
+    async fn health_answers_without_the_pin_but_shows_counts_only_with_it() {
+        let app = health_app(with_pin("1234"));
+        let bare = (StatusCode::OK, json!({ "ok": true }));
+        assert_eq!(health_of(app.clone(), None).await, bare);
+        assert_eq!(health_of(app.clone(), Some("4321")).await, bare);
+        let (status, body) = health_of(app.clone(), Some("1234")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["counts"]["items"].is_i64(), "{body}");
+        let settings = Request::get("/api/settings").body(Body::empty()).unwrap();
+        assert_eq!(status_of(app, settings).await, StatusCode::UNAUTHORIZED);
+
+        // 没设 PIN：人人都算带了凭据
+        let (_, body) = health_of(health_app(db::fresh_in_memory().unwrap()), None).await;
+        assert!(body["counts"]["items"].is_i64(), "{body}");
+
+        let down = (StatusCode::SERVICE_UNAVAILABLE, json!({ "ok": false }));
+        let conn = with_pin("1234");
+        conn.execute_batch("DROP TABLE notification_log").unwrap();
+        assert_eq!(health_of(health_app(conn), None).await, down);
+        // settings 读不出时门不替健康检查答话：形状同样是 {ok:false}
+        let conn = db::fresh_in_memory().unwrap();
+        conn.execute_batch("DROP TABLE settings").unwrap();
+        assert_eq!(health_of(health_app(conn), None).await, down);
     }
 
     /// PIN 门必须**故障即关死**：把"读不出设置"折成"没设 PIN"，settings 表一坏，

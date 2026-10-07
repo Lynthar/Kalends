@@ -855,7 +855,7 @@ async function openCollDialog(c) {
   del.hidden = !c;
   del.onclick = async () => {
     const n = (state[c.key] || []).length;
-    if (!confirm(`删除库「${c.name}」${n ? `及其 ${n} 个条目` : ''}？此操作不可撤销。`)) return;
+    if (!confirm(`删除库「${c.name}」${n ? `及其 ${n} 个条目` : ''}？此操作不可撤销；续费台账里的历史记录会保留。`)) return;
     // 当前标签落到哪张表，由刷新里的 syncColls 统一收拾
     if (await write(`coll:${c.id}`, () => api(`/api/collections/${c.id}`, { method: 'DELETE' }),
       { once: true, done: () => '已删除' })) d.close();

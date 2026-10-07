@@ -9,6 +9,10 @@ pub fn today() -> NaiveDate {
     Local::now().date_naive()
 }
 
+/// 周期的封闭集，写入口只收这些（`lifetime` 是买断、没有下一期）。`advance_n` 的分支与它一一对应，单测钉着。
+pub const CYCLES: &[&str] =
+    &["weekly", "monthly", "quarterly", "semiannual", "annual", "biennial", "triennial", "days", "lifetime"];
+
 /// 从某个到期日按周期前进 n 期；lifetime 或未知周期返回 None。
 /// **跨多期必须一次算第 n 期，不能循环调用 `advance` n 次**：月加法钳到月末后
 /// 锚点即丢（1/31 迭代六次得 7/28，正解 7/31）。
@@ -174,17 +178,36 @@ fn truthy(v: Option<&Value>) -> bool {
     }
 }
 
-fn sem_map(conn: &Connection) -> Result<SemMap> {
-    let mut out = SemMap::default();
+/// 各库状态词表的选项：库键 → 选项对象（老形态的纯字符串常规化成 `{v}`）。词表解析不出的库不在其中。
+fn vocabularies(conn: &Connection) -> Result<std::collections::HashMap<String, Vec<Value>>> {
     let mut stmt = conn.prepare("SELECT tbl,options FROM fields WHERE key='status'")?;
-    let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-    })?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let mut out = std::collections::HashMap::new();
     for row in rows {
         let (tbl, options) = row?;
-        let Ok(Value::Array(opts)) = serde_json::from_str::<Value>(&options) else {
-            continue;
-        };
+        let Ok(Value::Array(opts)) = serde_json::from_str::<Value>(&options) else { continue };
+        let opts = opts
+            .into_iter()
+            .map(|o| match o {
+                Value::String(s) => json!({ "v": s }),
+                o => o,
+            })
+            .collect();
+        out.insert(tbl, opts);
+    }
+    Ok(out)
+}
+
+/// 一个库状态词表里的值；词表解析不出时 None——没法判，调用方别当成「词表是空的」。
+pub fn status_vocab(conn: &Connection, coll: &str) -> Result<Option<Vec<String>>> {
+    Ok(vocabularies(conn)?
+        .remove(coll)
+        .map(|opts| opts.iter().filter_map(|o| o["v"].as_str().map(str::to_string)).collect()))
+}
+
+fn sem_map(conn: &Connection) -> Result<SemMap> {
+    let mut out = SemMap::default();
+    for (tbl, opts) in vocabularies(conn)? {
         let mut m = std::collections::HashMap::new();
         for o in opts {
             let Some(v) = o.get("v").and_then(|v| v.as_str()) else { continue };
@@ -389,6 +412,21 @@ pub fn off_timeline(conn: &Connection) -> Result<Vec<Value>> {
     }
     items.sort_by_key(|(d, _)| *d);
     Ok(items.into_iter().map(|(_, v)| v).collect())
+}
+
+/// 状态不在所属库词表里的条目：写入口不拒收这类值（导入要能先进来、再补词表），而它们的语义
+/// 只能回落到内置含义，多半是静默退出时间线、提醒与支出，得点名。词表解析不出的库跳过。
+pub fn unknown_status(conn: &Connection) -> Result<Vec<Value>> {
+    let vocab = vocabularies(conn)?;
+    let mut out = Vec::new();
+    for r in rows(conn)? {
+        let Some(opts) = vocab.get(&r.key) else { continue };
+        if opts.iter().any(|o| o["v"] == r.status.as_str()) {
+            continue;
+        }
+        out.push(json!({ "kind": r.key, "id": r.id, "name": r.title(), "status": r.status }));
+    }
+    Ok(out)
 }
 
 /// 合并到期时间线：所有库里状态语义为"上时间线"的条目，按到期日升序。
@@ -676,6 +714,18 @@ mod tests {
         assert_eq!(monthly_factor("days", Some(0)), None);
     }
 
+    /// 写入口照 `CYCLES` 收周期、`advance_n` 照分支推日期：两份对不上，收进来的周期就推不动。
+    #[test]
+    fn the_cycle_set_is_exactly_what_advance_can_move() {
+        let d = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+        for c in CYCLES {
+            assert_eq!(advance(d, c, Some(30)).is_some(), *c != "lifetime", "{c}");
+        }
+        for c in ["yearly", "Monthly", "", "custom"] {
+            assert!(advance(d, c, Some(30)).is_none(), "{c}");
+        }
+    }
+
     #[test]
     fn status_semantics_for_builtin_values() {
         let a = status_sem("Active");
@@ -808,6 +858,21 @@ mod tests {
 
     /// 提醒只发给时间线上的条目：只勾了「提醒」的状态照样上时间线、发提醒、缺日期时点名，
     /// 而不是逐项提醒与摘要两头都落空
+    #[test]
+    fn statuses_outside_their_vocabulary_are_named() {
+        let conn = crate::db::fresh_in_memory().unwrap();
+        add(&conn, "subs", &json!({ "name": "在册", "status": "Active" }));
+        add(&conn, "subs", &json!({ "name": "试用", "status": "Trial" }));
+        add(&conn, "sims", &json!({ "name": "卡", "status": "Trial" }));
+        assert_eq!(names(&unknown_status(&conn).unwrap()), ["试用", "卡"]);
+        // 词表解析不出的库没法判，不点名
+        conn.execute("UPDATE fields SET options='坏掉' WHERE tbl='sims' AND key='status'", []).unwrap();
+        assert_eq!(names(&unknown_status(&conn).unwrap()), ["试用"]);
+        // 老形态的纯字符串选项也算在词表里
+        conn.execute(r#"UPDATE fields SET options='["Trial"]' WHERE tbl='subs' AND key='status'"#, []).unwrap();
+        assert_eq!(names(&unknown_status(&conn).unwrap()), ["在册"]);
+    }
+
     #[test]
     fn a_status_that_alerts_is_on_the_timeline_even_without_the_timeline_flag() {
         let conn = seeded();

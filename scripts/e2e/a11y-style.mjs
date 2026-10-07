@@ -1,10 +1,37 @@
 // 无障碍与样式契约：深色截图、键盘可达性（CDP 真按键）、aria 与对比度。
+
+// 页面里算 WCAG 对比度的几样：rgb() 与 #hex 都认，ratio 取两色亮度比
+const CONTRAST = `
+  const lin = c => (c /= 255, c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+  const L = rgb => 0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2]);
+  const rgbOf = v => v.trim().startsWith('#')
+    ? [0, 2, 4].map(i => parseInt(v.trim().slice(1).slice(i, i + 2), 16)) : v.match(/[\\d.]+/g).slice(0, 3).map(Number);
+  const ratio = (a, b) => { const [hi, lo] = [L(a), L(b)].sort((x, y) => y - x); return (hi + 0.05) / (lo + 0.05); };
+  const token = name => rgbOf(getComputedStyle(document.documentElement).getPropertyValue(name));`;
+// 点名行（算不出到期日 / 状态不在词表里）是小字，在三种底上都要过 4.5
+const NOTE_CONTRAST = `(() => {${CONTRAST}
+  const ink = rgbOf(getComputedStyle(document.querySelector('#up-undated')).color);
+  return ['--bg', '--surface', '--surface-2'].map(b => +ratio(ink, token(b)).toFixed(2));
+})()`;
+
 export default async function (t) {
   const { sleep, fields, check, send, evl, shot } = t;
   /* 17. 深色 */
   await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] });
   await sleep(400);
   await shot('09-dark');
+  // toast 是唯一的成败反馈：白字压在渐变上，成功与失败两种底的两端都要过 4.5
+  const toastRatios = await evl(`(() => {${CONTRAST}
+    const t = document.querySelector('#toast');
+    const ends = err => { t.classList.toggle('err', err); const cs = getComputedStyle(t);
+      return cs.backgroundImage.match(/rgba?\\([^)]+\\)/g).map(c => +ratio(rgbOf(cs.color), rgbOf(c)).toFixed(2)); };
+    const out = [...ends(false), ...ends(true)];
+    t.classList.remove('err');
+    return out;
+  })()`);
+  check('深色 toast 白字在两种底的渐变两端都过 4.5', toastRatios.every(r => r >= 4.5), JSON.stringify(toastRatios));
+  const darkNote = await evl(NOTE_CONTRAST);
+  check('深色点名行在三种底上都过 4.5', darkNote.every(r => r >= 4.5), JSON.stringify(darkNote));
 
 
   await send('Emulation.setEmulatedMedia', { features: [] }); // 下面的对比度算的是浅色
@@ -96,17 +123,11 @@ export default async function (t) {
   await sleep(200);
 
   // 对比度：算给机器看，比目检稳。小字要 4.5，最差那一档是 --surface-2 当底（表头底/行悬停底）
-  check('浅色 --ink-2 在三种底上都过 WCAG AA 的 4.5', await evl(`(() => {
-    const lin = c => (c /= 255, c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
-    const L = rgb => 0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2]);
-    // 自定义属性拿到的是声明原样（#56766f 这种十六进制），不是 rgb()
-    const parse = v => { const h = v.trim().replace('#', ''); return [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16)); };
-    const cs = getComputedStyle(document.documentElement);
-    const ink = parse(cs.getPropertyValue('--ink-2'));
-    const ratio = b => { const [hi, lo] = [L(ink), L(parse(cs.getPropertyValue(b)))].sort((x, y) => y - x);
-      return (hi + 0.05) / (lo + 0.05); };
-    return ['--bg', '--surface', '--surface-2'].every(b => ratio(b) >= 4.5);
+  check('浅色 --ink-2 在三种底上都过 WCAG AA 的 4.5', await evl(`(() => {${CONTRAST}
+    return ['--bg', '--surface', '--surface-2'].every(b => ratio(token('--ink-2'), token(b)) >= 4.5);
   })()`) === true);
+  const lightNote = await evl(NOTE_CONTRAST);
+  check('浅色点名行在三种底上都过 4.5', lightNote.every(r => r >= 4.5), JSON.stringify(lightNote));
 
 
 }

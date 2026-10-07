@@ -197,13 +197,14 @@ $('#btn-backup').onclick = async () => {
   b.disabled = false;
 };
 
+// 测的是表单里这个渠道的当前值，不落盘：点完再取消就是什么都没改（占位串由后端换回库里的密钥）
 document.querySelectorAll('[data-test]').forEach(b => b.onclick = async () => {
   b.disabled = true;
   try {
-    // 先落盘当前填写的配置，再触发测试
-    await api('/api/settings', { method: 'PUT', body: JSON.stringify(settingsBody()) });
-    await api('/api/notify/test', { method: 'POST', body: JSON.stringify({ channel: b.dataset.test }) });
-    toast('测试已发送，请查收');
+    const channel = b.dataset.test;
+    const config = settingsBody()[`notify.${channel}`];
+    await api('/api/notify/test', { method: 'POST', body: JSON.stringify({ channel, config }) });
+    toast('测试已发送，请查收——设置还没保存');
   } catch (err) { toast(err.message, true); }
   b.disabled = false;
 });
