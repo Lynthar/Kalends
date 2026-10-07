@@ -100,9 +100,10 @@
 
 <section class="sec" id="install">
   <h2 class="sec-h">Install</h2>
-  <p class="sec-lede">Prebuilt binaries are Linux only — x86-64, aarch64 for ARM boxes and
-    NAS units, and a musl build for old glibc or Alpine. <code>SHA256SUMS</code> ships
-    alongside them.</p>
+  <p class="sec-lede">Prebuilt binaries are Linux only — x86-64 and aarch64 for ARM boxes and
+    NAS units, both needing glibc 2.34 or newer, plus a static musl build for older x86-64
+    systems or Alpine. On older ARM systems use Docker or build from source.
+    <code>SHA256SUMS</code> ships alongside them.</p>
   <div class="pill-row">
     <span class="pill">Linux</span><span class="pill">Docker</span><span class="pill">From source</span>
   </div>

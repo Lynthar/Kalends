@@ -133,19 +133,21 @@ function filterPred(tab, k, f) {
       return vals.length ? vals.some(x => f.includes(x)) : f.includes(BLANK);
     };
   }
-  const t = colType(tab, k);
+  // 谓词按类型表声明的筛选族分派，与操作符菜单（opKind）同源：两边各认各的，菜单出数字操作符、谓词却走文本「包含」
+  const kind = opKind(colType(tab, k));
   const col = COLS[tab][k];
-  if (t === 'num') {
+  if (kind === 'num') {
     const q = parseFloat(f.q);
     return r => {
+      // 空不空看存着的值，比大小看 col.val：开了显示币种时那是折算值，折不出来就是 null、比较一律不成立
+      if (f.op === 'empty') return !col.fvals(r).length;
+      if (f.op === 'nonempty') return !!col.fvals(r).length;
       const v = col.val(r);
-      if (f.op === 'empty') return v == null || v === '';
-      if (f.op === 'nonempty') return v != null && v !== '';
       if (!Number.isFinite(q) || v == null || v === '') return false;
       return { eq: v === q, ne: v !== q, gt: v > q, ge: v >= q, lt: v < q, le: v <= q }[f.op] ?? false;
     };
   }
-  if (t === 'date') {
+  if (kind === 'date') {
     return r => {
       const v = col.val(r) || '';
       if (f.op === 'empty') return !v;
@@ -320,7 +322,7 @@ function applyWidths(tab) {
   const w = v.widths || {};
   const table = thead.closest('table');
   if (!Object.keys(w).length) {
-    fitWidths(thead, table);
+    fitWidths(tab, thead, table);
     return;
   }
   table.classList.add('fixed');
@@ -350,7 +352,7 @@ function applyWidths(tab) {
 }
 
 // 无手动列宽时的自动布局：量一遍自然宽，超出容器就等比压进去（被下限顶住的列锁定后重分配）
-function fitWidths(thead, table) {
+function fitWidths(tab, thead, table) {
   const ths = [...thead.querySelectorAll('th')].filter(t => t.style.display !== 'none');
   table.classList.remove('fixed');
   table.style.width = '';
@@ -359,6 +361,9 @@ function fitWidths(thead, table) {
   if (!avail) return; // 表在隐藏页量不到，等可见时再排
   const nat = ths.map(t => ({ t, w: t.getBoundingClientRect().width, ops: t.classList.contains('ops') }));
   if (nat.reduce((s, x) => s + x.w, 0) <= avail + 1) return; // 天然放得下：保持 auto 铺满
+  // 等比压缩必然截到日期、金额这类一截就读不出的列（TYPES[t].whole，「2026-…」）：有它们可见就不压，
+  // 退回自然列宽加横滚
+  if (nat.some(x => !x.ops && TYPES[colType(tab, x.t.dataset.k)].whole)) return;
   const fitted = new Map(nat.filter(x => x.ops).map(x => [x.t, Math.round(x.w)]));
   let pool = nat.filter(x => !x.ops);
   let room = avail - [...fitted.values()].reduce((s, x) => s + x, 0);
@@ -812,12 +817,8 @@ function focusNewRow(tab, id) {
     const it = state[tab]?.find(x => x.id === id);
     if (td && it) openCellPop(tab, it, td.dataset.k, td);
   };
-  const r = tr.getBoundingClientRect();
-  if (r.top >= 0 && r.bottom <= innerHeight) return open();
-  // 全局 scroll 监听会关浮层（fixed 浮层滚动后脱锚），而 scrollIntoView 的 scroll 事件
-  // 是异步的——先开编辑器会被自己这下滚动关掉。滚动事件排在 rAF 回调之前，等一帧就够。
   tr.scrollIntoView({ block: 'nearest' });
-  requestAnimationFrame(open);
+  open();
 }
 
 // 每张表渲染完的收尾：列隐藏/列序、表宽对账、表头指示、视图胶囊行一次做齐
@@ -844,13 +845,14 @@ function syncHeads(tab) {
 }
 
 /* 列筛选浮层（多选 + 计数 + 清除） */
-let popEl = null, popKey = '';
+let popEl = null, popKey = '', popAnchor = null;
 
 function closePop() {
   if (!popEl) return;
   popEl.remove();
   popEl = null;
   popKey = '';
+  popAnchor = null;
   document.removeEventListener('pointerdown', popOutside, true);
   window.removeEventListener('keydown', popEsc, true);
 }
@@ -865,14 +867,26 @@ function popEsc(e) {
 
 function placePop(el, anchor) {
   document.body.appendChild(el);
-  const r = anchor.getBoundingClientRect();
-  // 浮层是 fixed 的，落到视口外就永远够不着（表格越长越容易撞上）：放不下就翻到锚点上方
+  popAnchor = anchor;
+  positionPop();
+  document.addEventListener('pointerdown', popOutside, true);
+  window.addEventListener('keydown', popEsc, true);
+}
+
+// 浮层是 fixed 的，落到视口外就永远够不着（表格越长越容易撞上）：放不下就翻到锚点上方
+function positionPop() {
+  const el = popEl, r = popAnchor.getBoundingClientRect();
   const h = el.offsetHeight;
   const below = r.bottom + 6;
   el.style.top = Math.max(8, below + h <= innerHeight - 8 ? below : Math.min(r.top - 6 - h, innerHeight - 8 - h)) + 'px';
   el.style.left = Math.max(8, Math.min(r.left, innerWidth - el.offsetWidth - 8)) + 'px';
-  document.addEventListener('pointerdown', popOutside, true);
-  window.addEventListener('keydown', popEsc, true);
+}
+
+// 页面或表格滚动时浮层跟着锚点走，锚点滚出视口才收起：手机转屏也会派发 scroll，一律收起就丢了正在输入的内容
+function followPop() {
+  const r = popAnchor?.isConnected && popAnchor.getBoundingClientRect();
+  if (r && r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth) positionPop();
+  else closePop();
 }
 
 function setFilter(tab, k, f) {
@@ -941,9 +955,7 @@ function listFilterBody(tab, k, t) {
   for (const x of keys) {
     const l = document.createElement('label');
     l.className = 'check fp-item';
-    const shown = x === BLANK ? esc(x)
-      : t === 'status' ? stPill(x)
-      : tagFor(tab, k, x);
+    const shown = x === BLANK ? esc(x) : TYPES[t].tag(x, tab, k);
     l.innerHTML = `<input type="checkbox" value="${esc(x)}"${sel.includes(x) ? ' checked' : ''}><span class="fp-v">${shown}</span><i>${counts.get(x)}</i>`;
     wrap.appendChild(l);
   }

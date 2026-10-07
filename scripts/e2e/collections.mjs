@@ -1,6 +1,6 @@
 // 库：自建库、建库模板、库设置（库序、字段序与上表、状态语义）、哪些列删得掉、移列与调宽、续费起算、换到期模型、删光也不崩（放最后）。
 export default async function (t) {
-  const { APP, sleep, post, put, patch, raw, mk, items, fields, check, today, day, send, evl, shot, consoleMsgs, menuClick, thWidthSum, tableW, evlSafe, settle } = t;
+  const { APP, sleep, post, put, patch, raw, mk, items, fields, check, today, day, send, evl, shot, consoleMsgs, menuClick, thWidthSum, tableW, evlSafe, settle, waitFor } = t;
   /* 12g. 自建库：新建 → 默认字段集 → 表头/行由字段生成 → 语义驱动的续费按钮 → 删库 */
   const nc = await post('/api/collections', { name: '域名', icon: '🌐', due_anchor: 'next' });
   check('新建库返回库键', /^k\d+$/.test(nc.key || ''), JSON.stringify(nc));
@@ -187,12 +187,20 @@ export default async function (t) {
   check('模板列的值渲染出来',
     await evl(`document.querySelector('#${DK}-body tr td[data-k="doc_type"]').textContent.includes('护照')`) === true);
   check('模板域字段在表头菜单里可编辑选项', await evl(`optionsEditable('${DK}','doc_type')`) === true);
-  // 没有周期就推不动到期日：只记一笔账，提示不能谎报"周期已推进"
+  // 没有周期就推不动到期日：只记一笔账，提示不能谎报"周期已推进"；当场开表单停在到期日那栏，
+  // 原因写在表单里（toast 盖不过模态对话框）
   await evl(`window.confirm = () => true`);
   await evl(`document.querySelector('#${DK}-body tr [data-renew]').click()`);
-  await sleep(900);
+  await waitFor(`!!document.querySelector('#dlg-item')?.open`);
+  await settle();
   const rmsg = await evl(`document.querySelector('#toast').textContent`);
-  check('无周期条目续费只记账、提示不谎报推进', rmsg.includes('手动改'), rmsg);
+  check('无周期条目续费只记账、提示不谎报推进', rmsg.includes('算不出下一个到期日'), rmsg);
+  check('推不动日期时当场开表单、停在到期日那栏、表单里说明原因', await evl(`(() => {
+    const note = document.querySelector('#dlg-item-note');
+    return !!document.querySelector('#dlg-item')?.open && document.activeElement?.dataset.f === 'next_renewal'
+      && note?.hidden === false && note.textContent.includes('到期日');
+  })()`) === true, await evl(`document.activeElement?.outerHTML.slice(0, 120)`));
+  await evl(`document.querySelector('#dlg-item').close()`);
 
   await evl(`document.querySelector('#coll-add').click()`);
   await sleep(600);
@@ -208,11 +216,21 @@ export default async function (t) {
     return g('name') === '域名' && g('icon') === '🌐' && g('due_anchor') === 'next' && g('verb') === '续费';
   })()`) === true);
   check('说明里列出模板预置的字段', await evl(`document.querySelector('#coll-tpl-desc').textContent.includes('注册商')`) === true);
+  // 「模板」二字只是说明：套着按钮的 label 被点时会激活第一颗按钮，把挑好的模板重置成空白、覆盖库名
+  await evl(`document.querySelector('#coll-tpl-row > span').click()`);
+  await sleep(150);
+  check('点「模板」二字不改已选模板与预填', await evl(`document.querySelector('#coll-tpl .chip.on').textContent.includes('域名')
+    && document.querySelector('#dlg-coll [data-c="name"]').value === '域名'`) === true);
   await evl(`document.querySelector('#dlg-coll').close()`);
   await sleep(150);
   await evl(`openCollDialog(collOf('${DK}'))`);
   await sleep(500);
   check('改已有库时不显示模板选择器', await evl(`document.querySelector('#coll-tpl-row').hidden`) === true);
+  // 同理：点「标签位置」那行说明不能把当前库前移一位并落库
+  const orderBefore = await evl(`colls().map(c => c.key).join()`);
+  await evl(`document.querySelector('#coll-order-row > * > span:first-child').click()`);
+  await settle();
+  check('点「标签位置」那行说明不挪库序', await evl(`colls().map(c => c.key).join()`) === orderBefore);
   await evl(`document.querySelector('#dlg-coll').close()`);
   await sleep(150);
   check('删掉模板建的两个库',
@@ -514,6 +532,31 @@ export default async function (t) {
   check('菜单也没长出视口', menuBox.bottom <= menuBox.vh, JSON.stringify(menuBox));
   await evl(`closePop()`);
   await sleep(120);
+  // 按这一列排过序后多出「清除排序」，一共十项；390 px 宽时折行还会把每项撑高。末项「删除列」都得整个看得见
+  const seededTh = `.tablewrap[data-tab="subs"] th[data-k="${seededExtra.key}"]`;
+  await menuClick(seededTh, '升序排序');
+  const sortedMenu = async () => {
+    await evl(`document.querySelector('${seededTh}').click()`);
+    await sleep(250);
+    const m = await evl(`(() => {
+      const m = document.querySelector('.thmenu'), r = m.getBoundingClientRect(), items = [...m.querySelectorAll('.mi')];
+      return { n: items.length, cut: m.scrollHeight > m.clientHeight, bottom: Math.round(r.bottom), vh: innerHeight,
+        last: items.at(-1)?.textContent, clear: items.some(x => x.textContent.includes('清除排序')) };
+    })()`);
+    await evl(`closePop()`);
+    return m;
+  };
+  const sortedWide = await sortedMenu();
+  check('排过序的最长菜单（含「清除排序」）整份放得下', sortedWide.clear && !sortedWide.cut
+    && sortedWide.bottom <= sortedWide.vh && sortedWide.last.includes('删除列'), JSON.stringify(sortedWide));
+  await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+  await sleep(400);
+  const sortedNarrow = await sortedMenu();
+  check('390 px 宽时同一份菜单也整份放得下', sortedNarrow.clear && !sortedNarrow.cut
+    && sortedNarrow.bottom <= sortedNarrow.vh, JSON.stringify(sortedNarrow));
+  await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 2, mobile: false });
+  await evl(`views.subs.sort = null; saveViews(); RENDER.subs()`);
+  await sleep(300);
 
 
   /* 12g2. 移列与调宽子菜单：列序/列宽的单指针替代（WCAG 2.5.7）。写入必须与拖动同一套：

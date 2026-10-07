@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::Connection;
 
 use crate::settings::{self, Seed};
@@ -51,9 +51,11 @@ pub fn collection_id(conn: &Connection, key: &str) -> i64 {
 }
 
 pub fn open(data_dir: &Path) -> Result<Connection> {
-    std::fs::create_dir_all(data_dir)?;
-    let conn = Connection::open(data_dir.join("kalends.db"))?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
+    std::fs::create_dir_all(data_dir).with_context(|| format!("建不了数据目录 {}", data_dir.display()))?;
+    let path = data_dir.join("kalends.db");
+    let conn = Connection::open(&path).with_context(|| format!("打不开数据库 {}", path.display()))?;
+    // SQLite 开库是惰性的：路径不可写、是个目录，要到第一条语句才报出来
+    conn.pragma_update(None, "journal_mode", "WAL").with_context(|| format!("打不开数据库 {}", path.display()))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     pre_migration_snapshot(&conn, data_dir)?;
     migrate(&conn)?;
@@ -74,15 +76,16 @@ fn pre_migration_snapshot(conn: &Connection, data_dir: &Path) -> Result<()> {
         return Ok(());
     }
     let backups = data_dir.join("backups");
-    std::fs::create_dir_all(&backups)?;
+    std::fs::create_dir_all(&backups).with_context(|| format!("迁移前快照：建不了 {}", backups.display()))?;
     let snap = backups.join(format!("pre-migration-v{current}.db"));
     let tmp = snap.with_extension("db.tmp");
     // 同名残留是上次失败重试的陈货：VACUUM INTO 不覆盖既有文件，先清掉；
     // 正式名等 tmp 写完才动，任何一步失败都不赔上一份已有的好快照
     let _ = std::fs::remove_file(&tmp);
-    conn.execute("VACUUM INTO ?1", [tmp.to_string_lossy().as_ref()])?;
+    conn.execute("VACUUM INTO ?1", [tmp.to_string_lossy().as_ref()])
+        .with_context(|| format!("迁移前快照：写不了 {}", tmp.display()))?;
     let _ = std::fs::remove_file(&snap);
-    std::fs::rename(&tmp, &snap)?;
+    std::fs::rename(&tmp, &snap).with_context(|| format!("迁移前快照：改名成 {} 失败", snap.display()))?;
     tracing::info!("pre-migration snapshot: {}", snap.display());
     Ok(())
 }
@@ -164,15 +167,23 @@ fn migrate(conn: &Connection) -> Result<()> {
         if current >= target {
             continue;
         }
-        conn.execute_batch("BEGIN")?;
+        let stuck = target - 1;
+        conn.execute_batch("BEGIN")
+            .with_context(|| format!("迁移 {target:04} 开不了事务，库停在版本 {stuck}"))?;
         let done = conn
             .execute_batch(sql)
             .and_then(|()| conn.pragma_update(None, "user_version", target));
         match done {
-            Ok(()) => conn.execute_batch("COMMIT")?,
+            Ok(()) => conn
+                .execute_batch("COMMIT")
+                .with_context(|| format!("迁移 {target:04} 提交失败，库停在版本 {stuck}"))?,
             Err(e) => {
-                conn.execute_batch("ROLLBACK")?;
-                return Err(anyhow::anyhow!("迁移 {target:04} 失败：{e}"));
+                // 盘满、触发器 RAISE(ROLLBACK) 时 SQLite 已自行回滚，再发 ROLLBACK 只会报「没有活动事务」盖掉真因
+                if !conn.is_autocommit() {
+                    conn.execute_batch("ROLLBACK")
+                        .with_context(|| format!("迁移 {target:04} 失败（{e}）且回滚失败"))?;
+                }
+                return Err(anyhow::anyhow!("迁移 {target:04} 失败，库停在版本 {stuck}：{e}"));
             }
         }
     }
@@ -397,6 +408,40 @@ mod tests {
         conn.pragma_update(None, "user_version", MIGRATIONS.len() as i64)
             .unwrap();
         assert!(migrate(&conn).is_ok());
+    }
+
+    /// 迁移失败要说出哪一步、库停在哪个版本、真因是什么。SQLite 自己回滚了事务时（盘满、
+    /// 触发器 RAISE(ROLLBACK)），再发 ROLLBACK 只会得到「没有活动事务」，它不能盖掉真因。
+    #[test]
+    fn a_failed_migration_names_the_step_the_version_and_the_cause() {
+        let conn = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..19] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 19).unwrap();
+        conn.execute_batch(
+            "INSERT INTO fields(tbl,key,name,ftype,src,pos) VALUES('media','x','x','text','extra',1);
+             CREATE TRIGGER boom BEFORE DELETE ON fields BEGIN SELECT RAISE(ROLLBACK, 'injected'); END;",
+        )
+        .unwrap();
+        let err = format!("{:#}", migrate(&conn).unwrap_err());
+        assert!(err.contains("迁移 0020") && err.contains("停在版本 19") && err.contains("injected"), "{err}");
+        assert_eq!(one::<i64>(&conn, "PRAGMA user_version", []), 19);
+    }
+
+    /// 启动时开不了数据目录或库文件，报错里要有路径：只有「os error 13」的话，
+    /// 容器里根本看不出是哪个挂载点的属主不对。
+    #[test]
+    fn opening_names_the_path_that_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let as_file = dir.path().join("data");
+        std::fs::write(&as_file, b"x").unwrap();
+        let err = format!("{:#}", open(&as_file).unwrap_err());
+        assert!(err.contains(&as_file.display().to_string()), "{err}");
+        let db_is_dir = dir.path().join("d2");
+        std::fs::create_dir_all(db_is_dir.join("kalends.db")).unwrap();
+        let err = format!("{:#}", open(&db_is_dir).unwrap_err());
+        assert!(err.contains(&db_is_dir.join("kalends.db").display().to_string()), "{err}");
     }
 
     /// 「没这个键」与「读不出来」必须分开：折成同一个 None，PIN 门就拿数据库故障当

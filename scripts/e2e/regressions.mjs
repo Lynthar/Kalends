@@ -64,4 +64,12 @@ export default async function (t) {
   await sleep(900);
 
 
+
+  /* 断网或服务没在跑时，报错要是人话：浏览器原文只有「Failed to fetch」 */
+  const offline = await evl(`(async () => {
+    const real = window.fetch;
+    window.fetch = () => Promise.reject(new TypeError('Failed to fetch'));
+    try { await api('/api/overview'); return '没有报错'; } catch (e) { return e.message; } finally { window.fetch = real; }
+  })()`);
+  check('连不上服务时报人话', offline.includes('连不上'), offline);
 }

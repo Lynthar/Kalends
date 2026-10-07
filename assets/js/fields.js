@@ -48,7 +48,7 @@ function openAddStatusPop(tab, k, anchor) {
     <div class="opt-add"><input class="fp-q" placeholder="新状态，回车加入"></div>`;
   const inp = popEl.querySelector('input');
   inp.addEventListener('keydown', async e => {
-    if (e.key !== 'Enter') return;
+    if (!enterPressed(e)) return;
     e.preventDefault();
     const value = inp.value.trim();
     if (!value) return;
@@ -183,7 +183,7 @@ function openOptionsPop(tab, k, anchor) {
           { method: 'POST', body: JSON.stringify({ tbl: tab, key: k, from: x, to }) }));
         reopen();
       };
-      inp.addEventListener('keydown', e => { if (e.key === 'Enter') commit(); });
+      inp.addEventListener('keydown', e => { if (enterPressed(e)) commit(); });
       inp.addEventListener('blur', commit);
     };
     row.querySelector('[data-del]').onclick = async () => {
@@ -199,7 +199,7 @@ function openOptionsPop(tab, k, anchor) {
   addRow.innerHTML = `<input class="fp-q" placeholder="新选项，回车添加">`;
   const addInp = addRow.querySelector('input');
   addInp.addEventListener('keydown', async e => {
-    if (e.key !== 'Enter') return;
+    if (!enterPressed(e)) return;
     const val = addInp.value.trim();
     if (!val) return;
     if (!effectiveOptions(tab, k).includes(val)) {
@@ -230,7 +230,7 @@ function openNewColPop(tab, anchor) {
     if (await fieldCall('/api/fields', 'POST', { tbl: tab, name, ftype })) await rebuildHead(tab);
   };
   popEl.querySelector('[data-go]').onclick = go;
-  popEl.querySelector('[data-name]').addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+  popEl.querySelector('[data-name]').addEventListener('keydown', e => { if (enterPressed(e)) go(); });
   placePop(popEl, anchor);
   popEl.querySelector('[data-name]').focus();
 }
@@ -246,7 +246,7 @@ function openRenameColPop(tab, k, th) {
     <div class="fp-form"><input class="fp-q" value="${esc(f.name)}"></div>`;
   const inp = popEl.querySelector('input');
   inp.addEventListener('keydown', async e => {
-    if (e.key !== 'Enter') return;
+    if (!enterPressed(e)) return;
     const name = inp.value.trim();
     if (!name || name === f.name) { closePop(); return; }
     closePop();
@@ -396,9 +396,9 @@ function filtDesc(tab, k, f) {
   if (Array.isArray(f)) return `${name}: ${f.length === 1 ? f[0] : f.length + ' 项'}`;
   if (f.op === 'empty') return `${name}: 空`;
   if (f.op === 'nonempty') return `${name}: 非空`;
-  const t = colType(tab, k);
-  if (t === 'num') return `${name} ${NUM_OP_SIGN[f.op] || '='} ${f.q}`;
-  if (t === 'date') return `${name} ${{ is: '=', before: '早于', after: '晚于' }[f.op] || '='} ${f.q}`;
+  const kind = opKind(colType(tab, k));
+  if (kind === 'num') return `${name} ${NUM_OP_SIGN[f.op] || '='} ${f.q}`;
+  if (kind === 'date') return `${name} ${{ is: '=', before: '早于', after: '晚于' }[f.op] || '='} ${f.q}`;
   return `${name} ${f.op === 'not' ? '不含' : '含'}「${f.q}」`;
 }
 

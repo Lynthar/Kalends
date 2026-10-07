@@ -48,7 +48,13 @@ async fn health_probe() -> ! {
     let addr = std::env::var("KALENDS_ADDR").unwrap_or_else(|_| "127.0.0.1:4180".into());
     // 0.0.0.0 是监听地址不是可连地址（容器里恒是它）
     let target = addr.replace("0.0.0.0:", "127.0.0.1:").replace("[::]:", "[::1]:");
-    let alive = match reqwest::get(format!("http://{target}/api/health")).await {
+    // 连的是本机，环境代理变量不能把它绕走；超时赶在 HEALTHCHECK 的 --timeout=5s 之前，好留下自己的报错
+    let client = reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(4)).build();
+    let sent = match client {
+        Ok(c) => c.get(format!("http://{target}/api/health")).send().await,
+        Err(e) => Err(e),
+    };
+    let alive = match sent {
         Ok(r) => r.status().is_success(),
         Err(e) => {
             eprintln!("health: {e}");

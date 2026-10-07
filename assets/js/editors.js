@@ -80,7 +80,7 @@ function inputsEditor(tab, it, td, fieldsDef, save) {
     save(patch, closerOf());
   };
   foot.querySelector('button').onclick = commit;
-  box.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') commit(); });
+  box.addEventListener('keydown', e => { if (enterPressed(e) && e.target.tagName === 'INPUT') commit(); });
   placePop(box, td);
   box.querySelector('input')?.focus();
 }
@@ -97,7 +97,7 @@ function pickEditor(tab, it, td, k, save) {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'mi';
-    b.innerHTML = `<span class="fp-v">${t === 'status' ? stPill(x) : tagFor(tab, k, x)}</span>${x === cur ? '<span class="mon">✓</span>' : ''}`;
+    b.innerHTML = `<span class="fp-v">${TYPES[t].tag(x, tab, k)}</span>${x === cur ? '<span class="mon">✓</span>' : ''}`;
     b.onclick = () => { closePop(); if (x !== cur) save(x); };
     box.appendChild(b);
   }
@@ -115,7 +115,7 @@ function pickEditor(tab, it, td, k, save) {
     addRow.innerHTML = '<input class="fp-q" placeholder="新选项，回车选用">';
     const inp = addRow.querySelector('input');
     inp.addEventListener('keydown', async e => {
-      if (e.key !== 'Enter') return;
+      if (!enterPressed(e)) return;
       const val = inp.value.trim();
       if (!val) return;
       closePop();
@@ -151,7 +151,7 @@ function multiEditor(tab, it, td, k, save) {
   addRow.innerHTML = '<input class="fp-q" placeholder="新选项，回车加入">';
   const inp = addRow.querySelector('input');
   inp.addEventListener('keydown', async e => {
-    if (e.key !== 'Enter') return;
+    if (!enterPressed(e)) return;
     const val = inp.value.trim();
     if (!val) return;
     // 读**此刻**勾着的，不是开浮层那会儿的快照：同一次浮层里先取消勾选再回车加值，
@@ -231,7 +231,7 @@ function priceEditor(tab, it, td) {
   };
   box.querySelector('.cp-foot button').onclick = commit;
   box.addEventListener('keydown', e => {
-    if (e.key !== 'Enter' || e.target.tagName !== 'INPUT') return;
+    if (!enterPressed(e) || e.target.tagName !== 'INPUT') return;
     // 「新币种」框里的回车是"把它加进候选"，不是"保存"——不放行的话这一格里的回车
     // 会被这条监听抢走，浮层当场关掉，刚打的币种一次都存不进去
     if (e.target.classList.contains('sopt-add')) return;
@@ -245,7 +245,7 @@ function priceEditor(tab, it, td) {
 // 每个部分的标签、类型、选项都来自字段注册表——模板串只声明"要哪几项、怎么排版"。
 function tplEditor(tab, it, td, f) {
   const parts = tplKeys(f).map(k => fieldOf(tab, k)).filter(Boolean);
-  if (!parts.length) return openItemDialog(tab, it); // 模板串指向的字段都没了，退回详情表单
+  if (!parts.length) { popKey = ''; return openItemDialog(tab, it); } // 模板串指向的字段都没了，退回详情表单
   const box = cellPopShell(td, f.name || f.key);
   for (const p of parts) {
     // 值按注册表的 src 取：模板串引用真列键是允许的定制，恒读写 extra 会生出同名键
@@ -294,7 +294,7 @@ function tplEditor(tab, it, td, f) {
     }, { written: closerOf() });
   };
   foot.querySelector('button').onclick = commit;
-  box.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') commit(); });
+  box.addEventListener('keydown', e => { if (enterPressed(e) && e.target.tagName === 'INPUT') commit(); });
   placePop(box, td);
   box.querySelector('input,select')?.focus();
 }
@@ -312,8 +312,9 @@ function openCellPop(tab, it, k, td) {
   // 点它就地把整套改完，不必为了改个内存开一次详情表单
   const fdef = fieldOf(tab, k);
   if (fdef?.ftype === 'tpl') return tplEditor(tab, it, td, fdef);
-  // 其余算出来的列（剩余天数）没有可写的源，点它开详情表单
-  if (col.src === 'calc') return openItemDialog(tab, it);
+  // 其余算出来的列（剩余天数）没有可写的源，点它开详情表单。开的不是浮层，popKey 得清掉：
+  // 留着的话下一次点同一格命中「同键即关闭」，什么也不开
+  if (col.src === 'calc') { popKey = ''; return openItemDialog(tab, it); }
   // 周期是复合格：周期枚举 + 自定义天数
   if (k === 'cycle') return cycleEditor(tab, it, td);
   // 费用也是：金额 + 币种（币种并进了这一格，不再单独占一列）

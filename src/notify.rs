@@ -220,9 +220,35 @@ async fn send_email_within(cfg: &EmailCfg, subject: &str, body: &str, budget: st
             .build()
     };
     match tokio::time::timeout(budget, transport.send(msg)).await {
-        Ok(sent) => sent.map(drop).map_err(Into::into),
+        Ok(sent) => sent.map(drop).map_err(|e| {
+            let e = anyhow::Error::new(e);
+            match tls_hint(&format!("{e:#}")) {
+                Some(h) => e.context(h),
+                None => e,
+            }
+        }),
         Err(_) => Err(anyhow!("邮件服务器连上了，但在时限内没有走完一次会话")),
     }
+}
+
+/// 把 rustls 的握手错误翻成能照着改的话；认不出就 None（原文照样在原因链里）。
+/// 证书类只在 rustls 的「invalid peer certificate: 」之后找，别处碰巧带 Expired 之类字样的错误不算。
+fn tls_hint(chain: &str) -> Option<&'static str> {
+    if chain.contains("received corrupt message of type InvalidContentType") {
+        return Some("对端没按 TLS 应答：多半是端口与 STARTTLS 对不上（465 不勾 STARTTLS，587 勾上）");
+    }
+    let (_, cert) = chain.split_once("invalid peer certificate: ")?;
+    [
+        ("UnknownIssuer", "证书不受信任：只认公共 CA 签发的证书，自签名或私有 CA 的服务器接不上"),
+        ("CaUsedAsEndEntity", "对端出示的是 CA 证书而不是服务器证书"),
+        ("certificate not valid for name", "证书上的域名与填的服务器地址对不上"),
+        ("NotValidForName", "证书上的域名与填的服务器地址对不上"),
+        ("certificate expired", "服务器证书已过期"),
+        ("Expired", "服务器证书已过期"),
+    ]
+    .into_iter()
+    .find(|(word, _)| cert.contains(word))
+    .map(|(_, hint)| hint)
 }
 
 /// 单条到期项的通知文案。
@@ -636,6 +662,21 @@ mod tests {
     fn muted(mut v: Value) -> Value {
         v["muted"] = json!(true);
         v
+    }
+
+    /// 邮件握手失败时 rustls 只给内部词（UnknownIssuer、InvalidContentType）：翻成用户能照着改的话，
+    /// 原文仍留在原因链里；认不出的不硬翻。
+    #[test]
+    fn tls_failures_get_a_plain_reading() {
+        // 原文照 rustls 0.23 的 Display：过期与域名不符走带上下文的变体，不再是裸的 Expired / NotValidForName
+        let says = |raw: &str| tls_hint(raw).unwrap_or_default();
+        assert!(says("Connection error: invalid peer certificate: UnknownIssuer").contains("公共 CA"));
+        assert!(says("Connection error: received corrupt message of type InvalidContentType").contains("STARTTLS"));
+        assert!(says("invalid peer certificate: Other(OtherError(CaUsedAsEndEntity))").contains("CA 证书"));
+        assert!(says("invalid peer certificate: certificate not valid for name \"smtp.example.com\"; certificate is only valid for mail.example.org").contains("域名"));
+        assert!(says("invalid peer certificate: certificate expired: verification time 1790000000 (UNIX), but certificate is not valid after 1780000000 (10000000 seconds ago)").contains("过期"));
+        assert_eq!(tls_hint("Connection error: Connection refused (os error 61)"), None);
+        assert_eq!(tls_hint("permanent error (530): session Expired, log in again"), None, "不是证书错误");
     }
 
     /// 摘要时刻恒为 09:00、窗口 14 天。`now` 传 "08:00" 就只剩逐项提醒那一半，

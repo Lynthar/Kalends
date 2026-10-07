@@ -1,6 +1,6 @@
 // 表格的本机视图层：渲染基础、子行树、排序、筛选、搜索、隐藏列、类型覆写、列宽与列序、窄窗与窄屏、schema 与 view 两层的结算。
 export default async function (t) {
-  const { APP, sleep, put, fields, check, skip, send, evl, shot, menuClick, dragW, thWidthSum, tableW } = t;
+  const { APP, sleep, put, mk, fields, check, skip, send, evl, shot, menuClick, dragW, thWidthSum, tableW, waitFor } = t;
   /* 4. Notion 式视觉基础 + 状态收进列 */
   check('订阅表彩色标签', await evl(`document.querySelectorAll('#subs-body .tag').length`) > 0);
   check('标签 4px 圆角', await evl(`getComputedStyle(document.querySelector('#subs-body .tag')).borderRadius`) === '4px');
@@ -152,8 +152,18 @@ export default async function (t) {
   check('标签数恢复', await evl(`document.querySelectorAll('#subs-body .tag').length`) === tagsBefore);
 
 
-  /* 9b. 窄窗自动装容器：无手动列宽时表格等比压缩，右边框不越界，窗口变宽自动还原 */
+  /* 9b. 窄窗自动装容器：无手动列宽时表格等比压缩，右边框不越界，窗口变宽自动还原。
+     有日期、金额这类一截就读不出的列可见时不压，退回自然列宽加横滚 */
   await send('Emulation.setDeviceMetricsOverride', { width: 960, height: 1000, deviceScaleFactor: 2, mobile: false });
+  await sleep(600);
+  check('有日期列可见时窄窗不压缩、改横滚', await evl(`(() => {
+    const wrap = document.querySelector('#view-subs');
+    return !wrap.querySelector('table').classList.contains('fixed') && wrap.scrollWidth > wrap.clientWidth;
+  })()`) === true);
+  const hidBefore = await evl(`JSON.stringify(views.subs.hiddenCols || [])`);
+  await evl(`views.subs.hiddenCols = [...document.querySelectorAll('#view-subs thead th')].map(t => t.dataset.k)
+    .filter(k => COLS.subs[k] && TYPES[colType('subs', k)].whole); saveViews(); RENDER.subs()`);
+  await send('Emulation.setDeviceMetricsOverride', { width: 700, height: 1000, deviceScaleFactor: 2, mobile: false });
   await sleep(600);
   check('窄窗压缩进容器不越界', await evl(`(() => {
     const wrap = document.querySelector('#view-subs');
@@ -163,6 +173,7 @@ export default async function (t) {
   })()`) === true);
   check('窄窗压缩走 fixed 布局', await evl(`document.querySelector('#view-subs table').classList.contains('fixed')`) === true);
   check('压缩宽度不落存储', await evl(`Object.keys(JSON.parse(localStorage.getItem('kalends.views.v1')).subs.widths).length`) === 0);
+  await evl(`views.subs.hiddenCols = ${hidBefore}; saveViews(); RENDER.subs()`);
   await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 2, mobile: false });
   await sleep(600);
   check('宽窗恢复自然布局', await evl(`document.querySelector('#view-subs table').classList.contains('fixed')`) === false);
@@ -467,5 +478,45 @@ export default async function (t) {
     return withW.includes('还原列宽') && !noW.includes('还原列宽');
   })()`) === true);
 
+  /* 筛选谓词按类型表声明的筛选族分派：新加一种 filter:'num' 的类型，菜单出数字操作符，谓词也得按数字比 */
+  check('声明 filter:num 的新类型按数字筛选，不走文本「包含」', await evl(`(() => {
+    TYPES.score = { ...TYPES.num, label: '评分' };
+    views.subs.types.price = 'score';
+    const names = state.subs.filter(filterPred('subs', 'price', { op: 'ge', q: '16' })).map(x => x.name).sort().join();
+    delete views.subs.types.price;
+    delete TYPES.score;
+    return names;
+  })()`) === 'Basic Plan,ChatGPT Plus');
 
+  /* 开了显示币种：价格列的排序与数字筛选跟着格子里显示的折算值走，折不出来的沉底 */
+  await mk('subs', { name: '日元服务', status: 'Active', price: 1000, currency: 'JPY', cycle: 'monthly' });
+  await mk('subs', { name: '没汇率的', status: 'Active', price: 1, currency: 'XTS', cycle: 'monthly' });
+  await put('/api/settings', { 'fx.display': 'CNY' });
+  await evl(`loadAll()`);
+  await waitFor(`state.fx?.display === 'CNY' && state.subs.some(x => x.name === '没汇率的')`);
+  await evl(`switchTab('subs'); views.subs.sort = { key: 'price', dir: 1 }; RENDER.subs()`);
+  const priced = await evl(`[...document.querySelectorAll('#subs-body tr')].map(tr => state.subs.find(x => x.id === +tr.dataset.id))
+    .filter(r => r && r.price != null && !r.parent_id).map(r => r.name).join()`);
+  check('折算后升序：1000 日元排在 15.49 美元前面，没汇率的沉底',
+    priced === 'iCloud+,日元服务,Netflix,ChatGPT Plus,没汇率的', priced);
+  check('数字筛选比的是折算值（≥ 100 元）', await evl(
+    `state.subs.filter(filterPred('subs', 'price', { op: 'ge', q: '100' })).map(x => x.name).sort().join()`)
+    === 'Basic Plan,ChatGPT Plus,Netflix');
+  check('「非空」看存着的值：没汇率的也有价格', await evl(
+    `state.subs.filter(filterPred('subs', 'price', { op: 'nonempty' })).some(x => x.name === '没汇率的')`) === true);
+  await evl(`views.subs.sort = null; saveViews(); RENDER.subs()`);
+  await put('/api/settings', { 'fx.display': '' });
+  await evl(`loadAll()`);
+
+  /* 自动装宽不压日期与金额：约 760–1000 px 的视口里，它们曾被压成「2026-…」 */
+  await evl(`views.subs.widths = {}; saveViews()`);
+  await send('Emulation.setDeviceMetricsOverride', { width: 900, height: 1000, deviceScaleFactor: 2, mobile: false });
+  await sleep(500);
+  await evl(`switchTab('subs'); applyWidths('subs')`);
+  const cut = await evl(`[...document.querySelectorAll('#subs-body td.cdate, #subs-body td.amt')]
+    .filter(td => td.textContent.trim() && td.scrollWidth > td.clientWidth + 1).map(td => td.dataset.k + ':' + td.textContent.trim())`);
+  check('900 px 宽时日期与金额一格都没被截断', cut.length === 0, JSON.stringify(cut));
+  await shot('32-fit-900');
+  await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 2, mobile: false });
+  await sleep(300);
 }

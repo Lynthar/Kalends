@@ -1,6 +1,6 @@
 // 点格即编：新建空行、内置字段与 SIM 的就地编辑、筛选中新建、费用格的币种、规格格、多选呈现与浮层快照。
 export default async function (t) {
-  const { APP, sleep, patch, raw, items, fields, check, day, send, evl, shot, settle } = t;
+  const { APP, sleep, patch, raw, items, fields, check, skip, day, send, evl, shot, settle, waitFor } = t;
   /* 9. ＋新建行直接插一行空行（Notion 式，不再弹表单），右上角那颗绿按钮是建库 */
   const subsN0 = await evl(`document.querySelectorAll('#subs-body tr').length`);
   await evl(`document.querySelector('#view-subs .newrow').click()`);
@@ -275,6 +275,59 @@ export default async function (t) {
     JSON.stringify(hostAfter?.extra?.locations) === '["东京","京都"]', JSON.stringify(hostAfter?.extra?.locations));
   await evl(`loadAll()`);
   await sleep(700);
+
+  /* 算出来的格（剩余天数）点开的是详情表单；第二次点同一格也得开——popKey 残留会命中「同键即关闭」 */
+  const leftTd = `document.querySelector('#vps-body tr[data-id="${hostA.id}"] td[data-k="left"]')`;
+  for (const n of [1, 2]) {
+    await evl(`${leftTd}.click()`);
+    check(`第 ${n} 次点剩余天数格都打开详情表单`, await waitFor(`!!document.querySelector('#dlg-item')?.open`, 2000));
+    await evl(`document.querySelector('#dlg-item').close()`);
+    await sleep(150);
+  }
+
+  /* 输入法组字时确认候选的那一下回车不是提交：没定稿的拼音不能被存成值（CDP 真组字，合成事件带不出 isComposing） */
+  await evl(`switchTab('subs')`);
+  await sleep(300);
+  const nfx = (await items('subs')).find(x => x.name === 'Netflix');
+  const nfxName = `document.querySelector('#subs-body tr[data-id="${nfx.id}"] td[data-k="name"]')`;
+  await evl(`${nfxName}.click()`);
+  await waitFor(`document.activeElement?.closest('.cellpop') != null`);
+  await send('Input.imeSetComposition', { text: 'nihao', selectionStart: 5, selectionEnd: 5 });
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 229, nativeVirtualKeyCode: 229 });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
+  await sleep(500);
+  await settle();
+  const nfxAfter = (await items('subs')).find(x => x.id === nfx.id);
+  check('组字中的回车不提交：浮层还开着、名称没被改', await evl(`!!document.querySelector('.cellpop')`) === true
+    && nfxAfter.name === 'Netflix', JSON.stringify(nfxAfter.name));
+  await send('Input.insertText', { text: '' });
+  await evl(`closePop()`);
+
+  /* 滚动时浮层跟着锚点走（手机转屏也会派发 scroll，一律收起就丢了正在输入的内容）；锚点滚出视口才收起 */
+  await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 500, deviceScaleFactor: 2, mobile: false });
+  await evl(`window.scrollTo(0, 0)`);
+  await evl(`${nfxName}.scrollIntoView({ block: 'center' })`);
+  await sleep(200);
+  await evl(`${nfxName}.click()`);
+  await waitFor(`!!document.querySelector('.cellpop')`);
+  // 量 style.top 而不是外框：浮层有入场动画，动画中途的外框是偏的
+  const gap = () => evl(`(() => { const p = document.querySelector('.cellpop'), a = ${nfxName};
+    return p ? Math.round(parseFloat(p.style.top) - a.getBoundingClientRect().bottom) : null; })()`);
+  const gap0 = await gap();
+  await evl(`window.scrollBy(0, 40)`);
+  await sleep(250);
+  const gap1 = await gap();
+  check('锚点还在视口里时滚动不关浮层，且浮层跟着锚点走', gap0 != null && gap1 === gap0, JSON.stringify([gap0, gap1]));
+  // 往上滚，让锚点从视口下沿出去（这一行靠近页尾，往下滚不走它）
+  await evl(`window.scrollBy(0, -(innerHeight - ${nfxName}.getBoundingClientRect().top + 10))`);
+  await sleep(250);
+  if (await evl(`${nfxName}.getBoundingClientRect().top < innerHeight`)) {
+    skip('锚点滚出视口就收起浮层', '页面不够长，滚不走这一格');
+  } else {
+    check('锚点滚出视口就收起浮层', await evl(`!document.querySelector('.cellpop')`) === true);
+  }
+  await evl(`closePop(); window.scrollTo(0, 0)`);
+  await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 2, mobile: false });
 
 
 }

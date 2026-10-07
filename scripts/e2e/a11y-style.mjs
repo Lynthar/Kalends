@@ -15,7 +15,7 @@ const NOTE_CONTRAST = `(() => {${CONTRAST}
 })()`;
 
 export default async function (t) {
-  const { sleep, fields, check, send, evl, shot } = t;
+  const { sleep, fields, check, skip, send, evl, shot } = t;
   /* 17. 深色 */
   await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] });
   await sleep(400);
@@ -129,5 +129,74 @@ export default async function (t) {
   const lightNote = await evl(NOTE_CONTRAST);
   check('浅色点名行在三种底上都过 4.5', lightNote.every(r => r >= 4.5), JSON.stringify(lightNote));
 
+  /* 样式契约：深浅色下的原生控件、减弱动态、折叠区的键盘焦点、吸附格底色、窄屏居中、触屏命中区 */
+  check('页面声明了 color-scheme，原生控件跟着深浅色走', await evl(
+    `getComputedStyle(document.documentElement).colorScheme`) === 'light dark');
+  await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+  check('减弱动态时背景光斑也停下（它们在 body 的伪元素上）', await evl(
+    `[getComputedStyle(document.body, '::before').animationName, getComputedStyle(document.body, '::after').animationName].every(n => n === 'none')`) === true);
+  await send('Emulation.setEmulatedMedia', { features: [] });
 
+  // 到期栏折叠后，Tab 不该走进看不见的「已续费」按钮（回车就对看不见的条目弹续费确认）
+  await evl(`state.upFolded || toggleUpFold()`);
+  await evl(`document.querySelector('#up-window').focus()`);
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9 });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9 });
+  check('到期栏折叠后 Tab 跳过里面的按钮', await evl(`(() => {
+    const a = document.activeElement;
+    return a !== document.body && !document.querySelector('#up-body').contains(a);
+  })()`) === true, await evl(`document.activeElement?.outerHTML.slice(0, 100)`));
+  await evl(`state.upFolded && toggleUpFold()`);
+
+  // 深色下被勾选行的吸附首格：底色必须不透明，否则横滚时后面几列透出来压在名称上
+  await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] });
+  await evl(`switchTab('subs')`);
+  await evl(`document.querySelector('#subs-body tr [data-sel]').click()`);
+  const c0Bg = await evl(`getComputedStyle(document.querySelector('#subs-body tr.selrow td.c0')).backgroundColor`);
+  const alpha = (c0Bg.match(/[\d.]+/g) || [])[3];
+  check('深色下勾选行的吸附首格底色不透明', alpha === undefined || +alpha === 1, c0Bg);
+  await send('Emulation.setEmulatedMedia', { features: [] });
+
+  // 390 px：批量条与长 toast 都居中，且能用满视口宽度（不再只占右半边、按钮竖排）
+  await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+  await sleep(500);
+  const bar = await evl(`(() => {
+    const b = document.querySelector('#bulkbar'), r = b.getBoundingClientRect();
+    const tops = [...b.querySelectorAll('button')].map(x => Math.round(x.getBoundingClientRect().top));
+    // 按钮文字各自只占一行（旧写法下批量条只有半个视口宽，按钮里的字被挤成两行）
+    const lines = [...b.querySelectorAll('button')].map(x => { const rg = document.createRange(); rg.selectNodeContents(x); return rg.getClientRects().length; });
+    return { mid: r.left + r.width / 2, vw: innerWidth, oneRow: new Set(tops).size === 1, lines, w: Math.round(r.width) };
+  })()`);
+  check('窄屏批量条居中、按钮排成一行且字不折行', Math.abs(bar.mid - bar.vw / 2) <= 1 && bar.oneRow && bar.lines.every(n => n === 1), JSON.stringify(bar));
+  await evl(`toast('这是一条很长很长的提示，用来看它在窄屏上能不能用满宽度，而不是挤成好几行')`);
+  await sleep(600);
+  const tst = await evl(`(() => { const r = document.querySelector('#toast').getBoundingClientRect();
+    return { mid: r.left + r.width / 2, w: r.width, vw: innerWidth }; })()`);
+  check('窄屏长 toast 居中且用得上大半个视口', Math.abs(tst.mid - tst.vw / 2) <= 1 && tst.w > tst.vw * 0.7, JSON.stringify(tst));
+  await evl(`clearAllSel()`);
+
+  // 触屏没有悬停：行首复选框与 ⤢ 是删除与完整表单的唯一入口，得常显且命中区 ≥ 24 px（WCAG 2.5.8）
+  await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
+  await send('Emulation.setEmulatedMedia', { features: [{ name: 'hover', value: 'none' }, { name: 'pointer', value: 'coarse' }] });
+  await sleep(300);
+  if (!await evl(`matchMedia('(hover: none)').matches`)) {
+    skip('触屏常显行首入口', '这个浏览器模拟不出 (hover: none)');
+  } else {
+    const touch = await evl(`(() => {
+      const tr = document.querySelector('#subs-body tr');
+      const box = el => { const r = el.getBoundingClientRect(); return { w: r.width, h: r.height, l: r.left, r: r.right, op: +getComputedStyle(el).opacity }; };
+      return { sel: box(tr.querySelector('[data-sel]')), grip: box(tr.querySelector('[data-grip]')), open: box(tr.querySelector('[data-open]')) };
+    })()`);
+    const big = b => b.w >= 24 && b.h >= 24 && b.op > 0;
+    check('触屏上行首复选框、拖手与 ⤢ 常显且命中区 ≥ 24 px', big(touch.sel) && big(touch.grip) && big(touch.open), JSON.stringify(touch));
+    check('触屏上拖手与复选框不重叠', touch.grip.r <= touch.sel.l || touch.sel.r <= touch.grip.l, JSON.stringify(touch));
+    await evl(`(() => { const t = document.querySelector('#toast'); clearTimeout(t._h); t.hidden = true;
+      document.querySelector('#view-subs').scrollIntoView(); })()`);
+    await sleep(300);
+    await shot('31-touch-390');
+  }
+  await send('Emulation.setEmulatedMedia', { features: [] });
+  await send('Emulation.setTouchEmulationEnabled', { enabled: false });
+  await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 2, mobile: false });
+  await sleep(300);
 }

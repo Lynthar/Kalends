@@ -1,6 +1,7 @@
 /* Kalends — 苏打水色·朔月：清水薄荷底、漂浮光斑、果冻弹性反馈 */
 
 :root {
+  color-scheme: light dark; /* 日期控件图标、滚动条、未上样式的输入框跟着深浅色走 */
   --bg: #f3faf7;
   --surface: #ffffff;
   --surface-2: #ecf6f1;
@@ -327,10 +328,10 @@ main { max-width: 1400px; margin: 0 auto; padding: .6rem 1.4rem 3rem; }
 .vpill .x:hover { opacity: 1; color: var(--coral); }
 /* 表头属性菜单 */
 .thmenu {
-  /* 最长的那份菜单（可改选项的 extra 列有九项）要整份放得下，
+  /* 最长的那份菜单（可改选项的 extra 列排过序时十项）要整份放得下，
      末项「删除列」不能被切进滚动条；视口矮时仍退回滚动。 */
   position: fixed; z-index: 40; min-width: 11.5rem;
-  max-height: min(24rem, calc(100vh - 4rem)); overflow-y: auto;
+  max-height: min(28rem, calc(100vh - 4rem)); overflow-y: auto;
   background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
   padding: .3rem; box-shadow: var(--shadow-lift);
   animation: dlg-in .28s var(--spring);
@@ -344,7 +345,7 @@ main { max-width: 1400px; margin: 0 auto; padding: .6rem 1.4rem 3rem; }
   display: flex; align-items: center; gap: .5rem; width: 100%;
   border: 0; background: none; font: inherit; font-size: .85rem; color: var(--ink);
   padding: .34rem .55rem; border-radius: 8px; cursor: pointer; text-align: left;
-  transition: background .12s;
+  transition: background .12s; white-space: nowrap; /* 窄屏上折行会把菜单撑高、末项被切进滚动区 */
 }
 .thmenu .mi:hover { background: var(--surface-2); }
 .thmenu .mic {
@@ -407,15 +408,19 @@ tr:hover .rgrip { opacity: .5; }
 tr:hover .rgsel, .grid.selecting .rgsel, .rgsel:checked { opacity: 1; }
 .rgrip:focus-visible, .rgsel:focus-visible { opacity: 1; outline: 2.5px solid var(--aqua); outline-offset: 1px; }
 tr.selrow td { background: var(--aqua-soft); }
-tr.selrow td.c0 { background: var(--aqua-soft); }
+/* 吸附格的底必须不透明：深色下 --aqua-soft 是半透明的，横滚时后面几列会透出来压在名称上 */
+tr.selrow td.c0 { background: linear-gradient(var(--aqua-soft), var(--aqua-soft)), var(--surface); }
 /* 拖动中的落点提示：画在行的上/下缘 */
 tr.dragging td { opacity: .45; }
 tr.drop-before td { box-shadow: inset 0 2px 0 var(--aqua); }
 tr.drop-after td { box-shadow: inset 0 -2px 0 var(--aqua); }
 
 /* 批量操作条：勾选任意行后浮出 */
+/* 居中靠 margin-inline:auto。换回 left:50% + translateX(-50%) 的话自适应宽度只够视口右半边（窄屏上
+   按钮挤成竖排），入场动画的 transform 还会把它从偏右拽回中间 */
 #bulkbar {
-  position: fixed; left: 50%; bottom: 1.4rem; transform: translateX(-50%);
+  position: fixed; left: 0; right: 0; bottom: 1.4rem; margin-inline: auto;
+  width: max-content; max-width: calc(100% - 2rem);
   display: flex; align-items: center; gap: .7rem; z-index: 40;
   padding: .5rem .6rem .5rem 1.1rem; border-radius: 99px;
   background: var(--surface); border: 1.5px solid var(--line);
@@ -572,6 +577,17 @@ tr:hover .rowopen { opacity: .75; }
 /* 平时靠 opacity:0 藏着，键盘走到它上面必须现身——否则焦点环画在一个透明元素上，
    等于键盘用户完全够不着全表单入口 */
 .rowopen:focus-visible { opacity: 1; outline: 2.5px solid var(--aqua); outline-offset: 1px; }
+/* 触屏没有悬停：行首复选框（唯一的删除入口）、拖手（挪行菜单）与 ⤢（唯一的完整表单入口）常显，
+   命中区放大到 24px（WCAG 2.5.8），首格让出相应的位置 */
+@media (hover: none) {
+  .grid td.c0, .grid th.c0 { padding-left: 3.7rem; }
+  tr.subrow td.c0 { padding-left: 5.2rem; }
+  .rowgut { width: 3.3rem; }
+  .rowgut .rgrip, .rowopen { min-width: 1.5rem; min-height: 1.5rem; }
+  .rowgut .rgsel { width: 1.5rem; height: 1.5rem; opacity: 1; }
+  .rowgut .rgrip { opacity: .5; }
+  .rowopen { opacity: .75; }
+}
 /* 表头是自己加的 tabindex，得自己画焦点环（默认那圈会被格线盖掉看不清） */
 .grid th:focus-visible { outline: 2.5px solid var(--aqua); outline-offset: -2px; background: var(--surface-2); }
 .newrow:focus-visible { outline: 2.5px solid var(--aqua); outline-offset: -2px; color: var(--aqua-deep); }
@@ -679,6 +695,7 @@ dialog h3 {
 .lg-d { color: var(--ink-2); font-variant-numeric: tabular-nums; }
 .lg-n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lg-n small { color: var(--ink-2); margin-left: .45rem; font-size: .72rem; }
+.lg-n .lg-why { display: block; margin: .1rem 0 0; color: var(--coral-ink); white-space: normal; overflow-wrap: anywhere; }
 .lg-a { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .lg-a.lg-bad { color: var(--coral); }
 .chanset { border: 1px solid var(--line); border-radius: 12px; padding: .7rem .8rem .8rem; margin-top: 1rem; }
@@ -708,7 +725,8 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
   color: var(--ink-2); font-size: .7rem; letter-spacing: .32em; text-align: center; opacity: .8;
 }
 #toast {
-  position: fixed; left: 50%; bottom: 1.7rem; transform: translateX(-50%);
+  position: fixed; left: 0; right: 0; bottom: 1.7rem; margin-inline: auto; /* 居中方式同 #bulkbar */
+  width: max-content; max-width: calc(100% - 2rem);
   background: var(--toast-bg); color: #fff;
   padding: .55rem 1.15rem; border-radius: 99px; font-size: .85rem; font-weight: 650;
   box-shadow: 0 10px 26px -8px rgba(13, 176, 159, .6);
@@ -719,7 +737,7 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
   box-shadow: 0 10px 26px -8px rgba(232, 84, 58, .55);
 }
 @keyframes toast-in {
-  from { opacity: 0; transform: translateX(-50%) translateY(16px) scale(.9); }
+  from { opacity: 0; transform: translateY(16px) scale(.9); }
 }
 
 @keyframes rise {
@@ -727,7 +745,7 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
   to { opacity: 1; }
 }
 @media (prefers-reduced-motion: reduce) {
-  * { animation: none !important; transition: none !important; }
+  *, *::before, *::after { animation: none !important; transition: none !important; } /* 背景光斑在 body 的伪元素上 */
 }
 @media (max-width: 640px) {
   .ledger li { grid-template-columns: 3.4rem 1fr auto; }

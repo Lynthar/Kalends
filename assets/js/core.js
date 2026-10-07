@@ -65,19 +65,33 @@ function toast(msg, err) {
   t._h = setTimeout(() => { t.hidden = true; }, err ? 4200 : 1800);
 }
 
+// 一波并发请求同时吃 401 时只问一次 PIN：先回来的那个问，同一波里其余的沿用它的答复
+let pinWave = 0, pinGiven = false;
 async function api(path, opts = {}, mayAskPin = true) {
-  const r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
-  if (r.status === 401 && mayAskPin) {
-    const pin = prompt('此 Kalends 设置了访问 PIN，请输入：');
-    if (pin != null && pin !== '') {
-      document.cookie = `kalends_pin=${pin};path=/;max-age=31536000;SameSite=Lax`;
-      return api(path, opts, false);
-    }
+  const wave = pinWave;
+  let r;
+  try {
+    r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  } catch {
+    throw new Error('连不上 Kalends：网络断开，或服务没在运行'); // 浏览器原文只有「Failed to fetch」
   }
+  if (r.status === 401 && mayAskPin) {
+    if (wave === pinWave) {
+      pinWave++;
+      const pin = prompt('此 Kalends 设置了访问 PIN，请输入：');
+      pinGiven = pin != null && pin !== '';
+      if (pinGiven) document.cookie = `kalends_pin=${pin};path=/;max-age=31536000;SameSite=Lax`;
+    }
+    if (pinGiven) return api(path, opts, false);
+  }
+  if (r.status === 401) throw new Error('访问 PIN 不对或没填：刷新页面重新输入');
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
   return d;
 }
+
+// 提交用的回车：输入法组字时确认候选的那一下也是 Enter（isComposing / keyCode 229），当成提交就把没定稿的拼音存进去
+const enterPressed = e => e.key === 'Enter' && !e.isComposing && e.keyCode !== 229;
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c =>
@@ -330,8 +344,7 @@ function renderUpcoming() {
     unkEl.textContent = `⚠ 另有 ${unk.length} 项的状态不在所属库的词表里，加进词表或改成词表里的值：${names}`;
   }
 
-  $('#up-panel').classList.toggle('folded', state.upFolded);
-  $('#up-toggle').setAttribute('aria-expanded', String(!state.upFolded));
+  syncUpFold();
   const sum = $('#up-summary');
   sum.hidden = !state.upFolded;
   if (state.upFolded) {
@@ -346,6 +359,13 @@ function renderUpcoming() {
       sum.classList.toggle('hot', w.days_left <= 3);
     }
   }
+}
+
+// 折叠只是视觉上收起：不 inert 的话里面的按钮仍在 Tab 序里，回车会对看不见的条目弹出续费确认
+function syncUpFold() {
+  $('#up-panel').classList.toggle('folded', state.upFolded);
+  $('#up-toggle').setAttribute('aria-expanded', String(!state.upFolded));
+  $('#up-body').inert = state.upFolded;
 }
 
 function toggleUpFold() {
@@ -386,15 +406,18 @@ async function doRenew(key, btn) {
   // 慢链路上一个往返内毫无动静，用户就会再点一次、再确认一次——多记一笔、多推一期
   const was = btn?.textContent;
   if (btn) { btn.disabled = true; btn.textContent = '记账中…'; }
-  await write(`item:${id}`, () => api(`/api/items/${id}/renew`, { method: 'POST', body: '{}' }), {
+  const r = await write(`item:${id}`, () => api(`/api/items/${id}/renew`, { method: 'POST', body: '{}' }), {
     once: true,
     // 报出下次到期是哪天（renew_from='today' 会把账单日拽走，说出来才看得见）；日期由
     // 后端算，前端不自己算。算不出到期日时后端仍把上次续费日记成今天——旧日期被覆盖要说出来
     done: r => r?.due ? `已记账，下次到期 ${r.due}`
-      : r?.last_renewed ? `已记账，上次${verb}日记作 ${r.last_renewed}；这条算不出到期日（没有周期或买断），到期日请手动改`
-      : '已记一笔；这条算不出到期日（没有周期或买断），到期日请手动改',
+      : r?.last_renewed ? `已记账，上次${verb}日记作 ${r.last_renewed}；没有周期（或是买断），算不出下一个到期日`
+      : '已记一笔；没有周期，算不出下一个到期日',
   });
   if (btn?.isConnected) { btn.disabled = false; btn.textContent = was; }
+  // 直接记下次到期日、又没有周期的（证件）推不动日期：记完账就开表单让人当场填新的到期日
+  const fresh = r && !r.due && 'next_renewal' in r && state[kind]?.find(x => x.id === +id);
+  if (fresh) openItemDialog(kind, fresh, { focus: 'next_renewal', note: `已记一笔${verb}；没有周期，算不出下一个到期日——在这里填上新的到期日再保存` });
 }
 
 /* ── 支出 ── */

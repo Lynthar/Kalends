@@ -6,7 +6,7 @@ use axum::{
     routing::{get, post, put},
     Json, Router,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 use crate::api::{bad, check_shape, missing, s, R};
@@ -19,7 +19,8 @@ pub(crate) const FTYPES: &[&str] =
 /// tbl 是库键（字段值在 `items.extra`，按 `collection_id` 圈定）；库表已泛化，不再有按表名写死的映射。
 fn owner(conn: &Connection, tbl: &str) -> anyhow::Result<i64> {
     conn.query_row("SELECT id FROM collections WHERE key=?1", [tbl], |r| r.get(0))
-        .map_err(|_| bad(format!("未知表：{tbl}")))
+        .optional()?
+        .ok_or_else(|| bad(format!("未知表：{tbl}")))
 }
 
 pub fn router() -> Router<App> {
@@ -165,7 +166,8 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
             // 名称列承载行的详情入口，且表头与行读同一份字段集——撤下它就会整表错位
             let key: String = conn
                 .query_row("SELECT key FROM fields WHERE id=?1", [id], |r| r.get(0))
-                .map_err(|_| missing("列不存在"))?;
+                .optional()?
+                .ok_or_else(|| missing("列不存在"))?;
             if shown == 0 && key == "name" {
                 return Err(bad("名称列必须留在表格上").into());
             }
@@ -225,7 +227,8 @@ async fn set_semantics(State(app): State<App>, Json(b): Json<Value>) -> R {
             params![tbl, key],
             |r| r.get(0),
         )
-        .map_err(|_| bad("该列没有状态词表"))?;
+        .optional()?
+        .ok_or_else(|| bad("该列没有状态词表"))?;
     let mut opts: Vec<Value> = serde_json::from_str(&stored).unwrap_or_default();
     for o in &mut opts {
         let Some(w) = want.iter().find(|w| w["v"] == o["v"]) else { continue };
@@ -258,7 +261,8 @@ async fn add_status(State(app): State<App>, Json(b): Json<Value>) -> R {
             params![tbl, key],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .map_err(|_| bad("该列没有状态词表"))?;
+        .optional()?
+        .ok_or_else(|| bad("该列没有状态词表"))?;
     let mut opts: Vec<Value> = serde_json::from_str(&stored).unwrap_or_default();
     for o in &mut opts {
         if let Value::String(s) = o {
@@ -286,7 +290,7 @@ async fn delete_field(State(app): State<App>, Path(id): Path<i64>) -> R {
             [id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .ok();
+        .optional()?;
     let Some((tbl, key)) = row else {
         return Err(missing("列不存在或不可删除").into());
     };
@@ -321,7 +325,7 @@ fn resolve(conn: &Connection, tbl: &str, key: &str) -> anyhow::Result<Target> {
             params![tbl, key],
             |r| r.get(0),
         )
-        .ok();
+        .optional()?;
     match ftype.as_deref() {
         Some("sel" | "multi") => Ok(Target { table, cond, key: key.to_string() }),
         Some(_) => Err(bad("该列类型没有选项")),
@@ -391,7 +395,7 @@ fn swap_option_in_list(conn: &Connection, tbl: &str, key: &str, from: &str, to: 
             params![tbl, key],
             |r| r.get(0),
         )
-        .ok();
+        .optional()?;
     let Some(stored) = stored else { return Ok(()) };
     let mut opts: Vec<Value> = serde_json::from_str(&stored).unwrap_or_default();
     for o in &mut opts {

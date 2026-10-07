@@ -2,6 +2,18 @@
 
 Release notes are taken from this file verbatim — each `## vX.Y.Z` section becomes that release's body.
 
+## v0.3.1
+
+**Looks different**: in a narrow window, a table showing a date or number column now scrolls sideways instead of squeezing dates down to "2026-…". On touch screens the row checkbox, drag handle and ⤢ are always visible and large enough to tap. Scrolling no longer closes the cell editor, so rotating a phone keeps what you typed. Renewing something with no cycle, like an ID document, opens its form at the due date.
+
+**Errors**: an unreadable table is a 500, not a 404, and a 500's `error` carries the full cause. Migration, startup, backup and restore failures name the step, version or path.
+
+**Fixed**: the PIN is asked for once on first load, and a wrong one is reported as such. Enter that confirms an input-method candidate no longer saves half-typed text. Pasted phone numbers with full-width digits, dots or invisible marks are accepted. With a display currency set, prices sort and filter by the converted amount. The icon fetcher's 45-second limit now covers redirects, and `--health` ignores proxy variables and times out after 4 seconds.
+
+**Docs**: the glibc builds need glibc 2.34 or newer; on older ARM systems use Docker or build from source.
+
+**Upgrading**: no schema change.
+
 ## v0.3.0
 
 **Security**: the favicon fetcher's private-address filter now reads NAT64 addresses by the IPv4 they carry and matches `.local` / `.localhost` in any case; the calendar token is compared in constant time; rustls is past RUSTSEC-2026-0285, and a release now fails on any known advisory. The nightly JSONL export masks channel secrets and proxy passwords. The database and its snapshots still hold them in plain text, so protect those files (see `SECURITY.md`).

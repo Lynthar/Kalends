@@ -168,6 +168,8 @@ export async function openPage() {
   const pending = new Map();
   const consoleMsgs = [];
   const badLoads = [];
+  // 弹框一律点「确定」；prompt 填 promptText。seen 按弹出顺序记下类型，好断言「问了几次」
+  const dialogs = { seen: [], promptText: '' };
   ws.onmessage = ev => {
     const m = JSON.parse(ev.data);
     if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); }
@@ -180,8 +182,10 @@ export async function openPage() {
         && ['Document', 'Script', 'Stylesheet', 'Image', 'Font', 'Manifest'].includes(m.params.type)
         && !m.params.response.url.includes('favicon'))
       badLoads.push(`${m.params.response.status} ${m.params.type} ${m.params.response.url}`);
-    if (m.method === 'Page.javascriptDialogOpening')
-      ws.send(JSON.stringify({ id: ++msgId, method: 'Page.handleJavaScriptDialog', params: { accept: true } }));
+    if (m.method === 'Page.javascriptDialogOpening') {
+      dialogs.seen.push(m.params.type);
+      ws.send(JSON.stringify({ id: ++msgId, method: 'Page.handleJavaScriptDialog', params: { accept: true, promptText: dialogs.promptText } }));
+    }
   };
   const send = (method, params = {}) => new Promise(res => { pending.set(++msgId, res); ws.send(JSON.stringify({ id: msgId, method, params })); });
   const evl = async expr => {
@@ -209,7 +213,7 @@ export async function openPage() {
     ws.close();
     await fetch(`http://127.0.0.1:${CDP_PORT}/json/close/${info.id}`).catch(() => {});
   };
-  return { send, evl, shot, consoleMsgs, badLoads, close };
+  return { send, evl, shot, consoleMsgs, badLoads, dialogs, close };
 }
 
 // 表格与菜单的度量助手：多个套件共用，量的都是 #view-subs

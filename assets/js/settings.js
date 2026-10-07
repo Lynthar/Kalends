@@ -41,16 +41,18 @@ function openSettings() {
   f.pin.value = st['auth.pin'] || '';
   f.meta_proxy.value = st['meta.proxy'] || '';
   f.thresholds.placeholder = JSON.parse(D['notify.thresholds']).join(',');
+  const broken = [];
   try {
-    f.thresholds.value = JSON.parse(st['notify.thresholds'] || '[]').join(',');
-  } catch { f.thresholds.value = ''; }
+    const th = JSON.parse(st['notify.thresholds'] || '[]');
+    if (!Array.isArray(th)) throw new Error('不是数组');
+    f.thresholds.value = th.join(',');
+  } catch { f.thresholds.value = ''; broken.push('提醒阈值'); }
   f.digest_time.value = st['notify.digest_time'] || D['notify.digest_time'];
   f.window_days.value = st['notify.window_days'] || D['notify.window_days'];
   syncFxPanel();
   let tg = {}, em = {};
-  const broken = [];
-  try { tg = JSON.parse(st['notify.telegram'] || '{}'); } catch { broken.push('Telegram'); }
-  try { em = JSON.parse(st['notify.email'] || '{}'); } catch { broken.push('邮件'); }
+  try { tg = JSON.parse(st['notify.telegram'] || '{}'); } catch { broken.push('Telegram 配置'); }
+  try { em = JSON.parse(st['notify.email'] || '{}'); } catch { broken.push('邮件配置'); }
   f.tg_enabled.checked = !!tg.enabled;
   f.tg_token.value = tg.bot_token || '';
   f.tg_chat.value = tg.chat_id || '';
@@ -67,10 +69,11 @@ function openSettings() {
   $('#ics-url').value = `${location.origin}/calendar.ics?token=${st['ics.token'] || ''}`;
   // 存着的渠道配置解析不出来时，上面那圈会把它渲染成「渠道关着、字段全空」——用户一保存，
   // settingsBody() 就用这些空值把凭据覆盖掉。停掉保存并说出来，别让它悄悄发生
-  f.tg_enabled.closest('fieldset').disabled = broken.includes('Telegram');
-  f.em_enabled.closest('fieldset').disabled = broken.includes('邮件');
+  f.tg_enabled.closest('fieldset').disabled = broken.includes('Telegram 配置');
+  f.em_enabled.closest('fieldset').disabled = broken.includes('邮件配置');
+  // 阈值同理：表单显示成空、读侧却在按默认值发，一保存就写成 []，逐项提醒静默关掉
   $('#form-settings').querySelector('button[type=submit]').disabled = broken.length > 0;
-  if (broken.length) toast(`存着的${broken.join(' 与 ')}配置读不出来，先别保存：保存会用空值盖掉凭据`, true);
+  if (broken.length) toast(`存着的${broken.join('、')}读不出来，先别保存：保存会用表单里的空值盖掉它`, true);
   $('#dlg-settings').showModal();
   loadLedger();
   loadNotifyLog(); // 不挡对话框，读回来再填
@@ -124,10 +127,11 @@ async function loadNotifyLog() {
       div.className = 'lg-row';
       const what = r.kind === 'digest' ? '每日摘要' : esc(r.item_name || `#${r.item_id}`);
       const when = r.threshold_days == null ? '' : (r.threshold_days === 0 ? '当天' : `提前${r.threshold_days}天`);
-      const status = r.ok ? '<span class="lg-a">已发</span>'
-        : `<span class="lg-a lg-bad" title="${esc(r.error || '')}">失败</span>`;
+      const status = r.ok ? '<span class="lg-a">已发</span>' : '<span class="lg-a lg-bad">失败</span>';
+      // 失败原因另起一行写出来：只放在悬停提示里的话，触屏与键盘都读不到，而排查第一步就靠它
+      const why = r.ok || !r.error ? '' : `<small class="lg-why">${esc(r.error)}</small>`;
       div.innerHTML = `<span class="lg-d">${esc(localTime(r.sent_at))}</span>
-        <span class="lg-n">${what}<small>${esc([r.channel, when].filter(Boolean).join(' · '))}</small></span>
+        <span class="lg-n">${what}<small>${esc([r.channel, when].filter(Boolean).join(' · '))}</small>${why}</span>
         ${status}`;
       box.appendChild(div);
     }
@@ -209,9 +213,15 @@ document.querySelectorAll('[data-test]').forEach(b => b.onclick = async () => {
   b.disabled = false;
 });
 
+// 经 http:// 访问局域网地址时没有 navigator.clipboard（只给安全上下文），退到 execCommand；仍不行就说一声
 $('#btn-copy-ics').onclick = async () => {
+  const box = $('#ics-url');
   try {
-    await navigator.clipboard.writeText($('#ics-url').value);
-    toast('已复制');
-  } catch { $('#ics-url').select(); }
+    await navigator.clipboard.writeText(box.value);
+    return void toast('已复制');
+  } catch { /* 往下退 */ }
+  box.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch { /* 当作没复制成 */ }
+  toast(ok ? '已复制' : '浏览器不让网页写剪贴板：链接已选中，请手动复制', !ok);
 };

@@ -78,7 +78,8 @@ async fn list(State(app): State<App>) -> R {
 /// 库 id：按 key 找。找不到就是 404 级错误，交给调用方兜。
 fn coll_id(conn: &Connection, key: &str) -> anyhow::Result<i64> {
     conn.query_row("SELECT id FROM collections WHERE key=?1", [key], |r| r.get(0))
-        .map_err(|_| missing(format!("库不存在：{key}")))
+        .optional()?
+        .ok_or_else(|| missing(format!("库不存在：{key}")))
 }
 
 fn anchor_of(conn: &Connection, id: i64) -> anyhow::Result<String> {
@@ -683,7 +684,8 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
             [id],
             coll_row,
         )
-        .map_err(|_| missing("库不存在"))?;
+        .optional()?
+        .ok_or_else(|| missing("库不存在"))?;
     // 逐字段合并：只改传来的键，其余保留
     let pick = |k: &str| -> Option<String> { s(&b, k) };
     let anchor = pick("due_anchor").unwrap_or_else(|| cur["due_anchor"].as_str().unwrap().into());
@@ -762,7 +764,8 @@ async fn remove(State(app): State<App>, Path(id): Path<i64>) -> R {
     let conn = app.db.lock().unwrap();
     let key: String = conn
         .query_row("SELECT key FROM collections WHERE id=?1", [id], |r| r.get(0))
-        .map_err(|_| missing("库不存在"))?;
+        .optional()?
+        .ok_or_else(|| missing("库不存在"))?;
     // 条目随库走（外键 ON DELETE CASCADE），先把 logo 文件清掉免得留孤儿
     let mut stmt = conn.prepare("SELECT logo FROM items WHERE collection_id=?1 AND logo IS NOT NULL")?;
     let logos: Vec<String> = stmt
@@ -856,9 +859,18 @@ pub fn normalize_shaped(ftype: &str, raw: &str) -> anyhow::Result<String> {
     }
     match ftype {
         "tel" => {
-            // **折叠必须先于字符白名单**：粘来的号码常带全角空格 U+3000，而白名单里的
-            // 空格是 ASCII 的——次序反了就把该折叠的输入 400 掉，报错还几乎读不出所以然。
-            let folded = t.split_whitespace().collect::<Vec<_>>().join(" ");
+            // **折叠必须先于字符白名单**：粘来的号码常带全角字符、方向符与零宽字符，点号或 en dash
+            // 当分隔——次序反了就把真号码 400 掉，报错里那个字符还可能根本看不见。
+            let plain: String = t
+                .chars()
+                .filter(|c| !matches!(c, '\u{AD}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'))
+                .map(|c| match c {
+                    '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c), // 全角 ASCII
+                    '.' | '\u{2013}' => ' ',
+                    _ => c,
+                })
+                .collect();
+            let folded = plain.split_whitespace().collect::<Vec<_>>().join(" ");
             if let Some(c) = folded
                 .chars()
                 .find(|c| !(c.is_ascii_digit() || " +-()".contains(*c)))
@@ -1096,7 +1108,8 @@ fn check_parent(conn: &Connection, coll: i64, id: Option<i64>, parent: Option<i6
             [p],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .map_err(|_| missing("父行不存在"))?;
+        .optional()?
+        .ok_or_else(|| missing("父行不存在"))?;
     if pcoll != coll {
         return Err(bad("父行必须与本条目在同一个库"));
     }
@@ -1171,7 +1184,8 @@ pub fn insert_item(conn: &Connection, coll: i64, b: &Value) -> anyhow::Result<i6
 pub fn update_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<()> {
     let cur = conn
         .query_row(&format!("SELECT {ITEM_COLS} FROM items WHERE id=?1"), [id], item_row)
-        .map_err(|_| missing("条目不存在"))?;
+        .optional()?
+        .ok_or_else(|| missing("条目不存在"))?;
     check_item_shape(b)?;
     let coll = cur["collection_id"].as_i64().unwrap_or_default();
     check_extra_keys(conn, coll, b, Some(&cur))?;
@@ -1335,7 +1349,7 @@ pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value
                 ))
             },
         )
-        .ok();
+        .optional()?;
     let Some((
         key,
         anchor,
@@ -1471,7 +1485,7 @@ pub fn set_logo(
     }
     let old: Option<Option<String>> = conn
         .query_row("SELECT logo FROM items WHERE id=?1", [id], |r| r.get(0))
-        .ok();
+        .optional()?;
     let Some(old) = old else {
         return Err(missing("条目不存在"));
     };
@@ -1760,8 +1774,6 @@ fn attr_value<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
 
 /// 从条目的网址取 favicon 存成它的图标。
 async fn logo_fetch(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value>) -> R {
-    // 不带 UA 会被一部分站点当爬虫直接 403（update-fx-baseline.py 同一个坑）
-    const UA: &str = "kalends-icon-fetch";
     // 整轮总截止：候选最多 8 条、每条各 30s 上限，对着黑洞式丢包的目标能停四分钟；
     // 常见失败都在秒级，这道闸只砍最坏的尾巴
     const DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
@@ -1769,7 +1781,7 @@ async fn logo_fetch(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<V
         let conn = app.db.lock().unwrap();
         let stored: Option<Option<String>> = conn
             .query_row("SELECT url FROM items WHERE id=?1", [id], |r| r.get(0))
-            .ok();
+            .optional()?;
         let Some(stored) = stored else {
             return Err(missing("条目不存在").into());
         };
@@ -1787,39 +1799,45 @@ async fn logo_fetch(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<V
     }
     // 协议沿用条目自己那个网址：恒拼 https 的话，http-only 站点每条路径都在做
     // TLS 握手、全数"连不上"，报出来的方向还全错
-    let scheme = full.split_once("://").map_or("https", |x| x.0).to_string();
-    let started = std::time::Instant::now();
+    let scheme = full.split_once("://").map_or("https", |x| x.0);
+    Ok(Json(grab_logo(&app, id, &proxy, scheme, &host, DEADLINE).await?))
+}
+
+/// 挨个候选地址取图标，取到第一张可用的就存成条目 `id` 的图标。`budget` 是整轮总截止。
+async fn grab_logo(app: &App, id: i64, proxy: &str, scheme: &str, host: &str, budget: std::time::Duration) -> anyhow::Result<Value> {
+    // 不带 UA 会被一部分站点当爬虫直接 403（update-fx-baseline.py 同一个坑）
+    const UA: &str = "kalends-icon-fetch";
+    // 截止时刻管住**每一次**网络等待：只在候选之间判的话，一个候选跟几跳慢速重定向就能拖过两倍
+    let deadline = tokio::time::Instant::now() + budget;
     let mut last = String::from("没找到图标");
     // 先问网页自己：多数站点的图标不在 /favicon.ico，而是 <link rel="icon"> 指到别处。
     // 取不到就退回常规路径挨个试。
-    let mut paths: Vec<String> = discover_icon_paths(&proxy, UA, &scheme, &host).await;
+    let mut paths: Vec<String> =
+        tokio::time::timeout_at(deadline, discover_icon_paths(proxy, UA, scheme, host)).await.unwrap_or_default();
     paths.extend(FAVICON_PATHS.iter().map(|p| (*p).to_string()));
     for path in paths {
-        if started.elapsed() > DEADLINE {
-            last = format!("{last}；试了 {}s 还没结果，先收手", started.elapsed().as_secs());
-            break;
-        }
         let target = if path.starts_with("http") {
             path.clone()
         } else {
             format!("{scheme}://{host}{}", if path.starts_with('/') { path.clone() } else { format!("/{path}") })
         };
-        let resp = match get_public(&proxy, &target, UA).await {
-            Ok(r) if r.status().is_success() => r,
-            Ok(r) => {
-                last = format!("{host} 返回 {}", r.status());
-                continue;
+        let fetched = tokio::time::timeout_at(deadline, async {
+            let resp = get_public(proxy, &target, UA).await?;
+            if !resp.status().is_success() {
+                return Err(format!("{host} 返回 {}", resp.status()));
             }
-            Err(e) => {
+            crate::notify::body_capped(resp, ICON_MAX).await
+        })
+        .await;
+        let bytes = match fetched {
+            Ok(Ok(x)) => x,
+            Ok(Err(e)) => {
                 last = e;
                 continue;
             }
-        };
-        let bytes = match crate::notify::body_capped(resp, ICON_MAX).await {
-            Ok(x) => x,
-            Err(e) => {
-                last = e;
-                continue;
+            Err(_) => {
+                last = format!("{last}；试了 {}s 还没结果，先收手", budget.as_secs());
+                break;
             }
         };
         // 格式按**字节**认，不从 URL 后缀猜：/favicon.ico 返回 PNG 字节是极常见的部署，
@@ -1831,20 +1849,20 @@ async fn logo_fetch(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<V
         };
         // 体积上限与旧文件清理仍由 set_logo 兜着
         let conn = app.db.lock().unwrap();
-        match set_logo(&app, &conn, id, ext, &bytes) {
-            Ok(name) => return Ok(Json(json!({ "logo": name, "from": target }))),
+        match set_logo(app, &conn, id, ext, &bytes) {
+            Ok(name) => return Ok(json!({ "logo": name, "from": target })),
             Err(e) => last = format!("{target} 取到的不是可用图片（{e}）"),
         }
     }
     // Cloudflare 前置的站按 TLS 指纹挡非浏览器客户端，改请求头绕不过去（伪装指纹
     // 要引重依赖、性质上是欺骗，不做）——老实告诉用户手动传一张
-    Err(bad(format!("{last}；这个站可能不给自动抓取，可以手动选一张图片")).into())
+    Err(bad(format!("{last}；这个站可能不给自动抓取，可以手动选一张图片")))
 }
 
 pub fn clear_logo(app: &App, conn: &Connection, id: i64) -> anyhow::Result<()> {
     let old: Option<Option<String>> = conn
         .query_row("SELECT logo FROM items WHERE id=?1", [id], |r| r.get(0))
-        .ok();
+        .optional()?;
     let Some(old) = old else {
         return Err(missing("条目不存在"));
     };
@@ -2399,6 +2417,20 @@ mod tests {
         assert_eq!(normalize_shaped("tel", "+1\t424\n4329266").unwrap(), "+1 424 4329266");
     }
 
+    /// 从通讯录、输入法、网页粘来的真号码：全角数字与符号、点号与 en dash 分隔、夹带的
+    /// 方向符与零宽字符（后者 400 时报错里那个字符看不见）。都折成白名单里的写法再判。
+    #[test]
+    fn pasted_phone_numbers_keep_working() {
+        assert_eq!(normalize_shaped("tel", "020.7946.0958").unwrap(), "020 7946 0958");
+        assert_eq!(normalize_shaped("tel", "+1 424\u{2013}432\u{2013}9266").unwrap(), "+1 424 432 9266");
+        assert_eq!(normalize_shaped("tel", "＋８６ １３８ ００００ ００００").unwrap(), "+86 138 0000 0000");
+        assert_eq!(normalize_shaped("tel", "（０２０）７９４６－０９５８").unwrap(), "(020)7946-0958");
+        assert_eq!(normalize_shaped("tel", "\u{202A}+44 20 7946 0958\u{202C}").unwrap(), "+44 20 7946 0958");
+        assert_eq!(normalize_shaped("tel", "\u{2066}+44\u{200B}20\u{FEFF}\u{2069}").unwrap(), "+4420");
+        assert!(normalize_shaped("tel", "\u{200B}").is_err(), "只剩看不见的字符，等于没填数字");
+        assert!(normalize_shaped("tel", "+44 12ab").is_err());
+    }
+
 
     #[test]
     fn url_and_email_shapes_are_normalised() {
@@ -2825,6 +2857,68 @@ mod tests {
         router().merge(crate::fields::router()).with_state(App::for_tests(conn, data_dir))
     }
 
+    /// 只有「没有这一行」才是 404 / 400；表读不出是真故障，要 500 并留 warn，
+    /// 报成「条目不存在」的话排障方向全错。逐张表改名弄坏，碰到它的端点一律 500。
+    #[tokio::test]
+    async fn a_table_that_cannot_be_read_is_a_500_not_a_missing_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::for_tests(fresh(), dir.path());
+        let r = router().merge(crate::fields::router()).with_state(app.clone());
+        let (_, it) = call(&r, "POST", "/api/collections/subs/items", Some(json!({ "name": "A", "url": "https://example.com" }))).await;
+        let id = it["id"].as_i64().unwrap();
+        let (_, f) = call(&r, "POST", "/api/fields", Some(json!({ "tbl": "subs", "name": "标签", "ftype": "sel" }))).await;
+        let (fid, fkey) = (f["id"].as_i64().unwrap(), f["key"].as_str().unwrap().to_string());
+        let cid = coll(&app.db.lock().unwrap(), "subs");
+        let rename = |from: &str, to: &str| {
+            app.db.lock().unwrap().execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}")).unwrap();
+        };
+        let cases = [
+            ("items", vec![
+                ("PATCH", format!("/api/items/{id}"), Some(json!({ "note": "x" }))),
+                ("POST", format!("/api/items/{id}/renew"), Some(json!({}))),
+                ("DELETE", format!("/api/items/{id}/logo"), None),
+                ("POST", format!("/api/items/{id}/logo/fetch"), Some(json!({}))),
+            ]),
+            ("collections", vec![
+                ("GET", "/api/collections/subs/items".into(), None),
+                ("PUT", format!("/api/collections/{cid}"), Some(json!({ "name": "x" }))),
+                ("DELETE", format!("/api/collections/{cid}"), None),
+                ("POST", "/api/fields".into(), Some(json!({ "tbl": "subs", "name": "x" }))),
+            ]),
+            ("fields", vec![
+                ("PUT", format!("/api/fields/{fid}"), Some(json!({ "name": "标签", "shown": false }))),
+                ("PUT", "/api/fields/semantics".into(), Some(json!({ "tbl": "subs", "key": "status", "options": [{ "v": "Active", "spend": true }] }))),
+                ("POST", "/api/fields/add_status".into(), Some(json!({ "tbl": "subs", "key": "status", "value": "New" }))),
+                ("PUT", "/api/fields/options".into(), Some(json!({ "tbl": "subs", "key": fkey, "options": ["a"] }))),
+                ("DELETE", format!("/api/fields/{fid}"), None),
+            ]),
+        ];
+        let mut wrong = Vec::new();
+        for (table, reqs) in cases {
+            rename(table, "gone");
+            for (method, path, body) in reqs {
+                let (st, b) = call(&r, method, &path, body).await;
+                if st != StatusCode::INTERNAL_SERVER_ERROR {
+                    wrong.push(format!("{table} 读不出时 {method} {path} → {st} {b}"));
+                }
+            }
+            if table == "items" {
+                let e = set_logo(&app, &app.db.lock().unwrap(), id, "png", b"\x89PNG....").unwrap_err();
+                if e.downcast_ref::<crate::api::ClientError>().is_some() {
+                    wrong.push(format!("items 读不出时 set_logo → 客户端错误 {e}"));
+                }
+            }
+            rename("gone", table);
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+        // 真没有这一行时照旧是客户端错误
+        assert_eq!(call(&r, "PATCH", "/api/items/9999", Some(json!({ "note": "x" }))).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(call(&r, "DELETE", "/api/fields/9999", None).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(call(&r, "GET", "/api/collections/nope/items", None).await.0, StatusCode::NOT_FOUND);
+        let st = call(&r, "PUT", "/api/fields/semantics", Some(json!({ "tbl": "subs", "key": "nope", "options": [] }))).await.0;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
     /// 建库：到期模型与续费起算方式只认已知值；键由服务端编；模板值只在请求压根没提这个键时兜底，
     /// 留空的属性落成 null 而不是 ""（空串 verb 会把「续费」回落顶掉）。
     #[tokio::test]
@@ -2880,6 +2974,33 @@ mod tests {
         assert_eq!(call(&r, "PUT", &path, Some(json!({ "due_anchor": "next" }))).await.0, StatusCode::OK);
         assert_eq!(date_fields(&r).await, ["last_renewed", "next_renewal"]);
         assert_eq!(call(&r, "PUT", "/api/collections/9999", Some(json!({ "name": "x" }))).await.0, StatusCode::NOT_FOUND);
+    }
+
+    /// 取图标的整轮截止要管住每一次网络等待，不只在候选之间判：一个候选跟几跳慢速重定向，
+    /// 就能把一轮拖到截止的两倍多。本地代理每次应答都慢半秒再 302，截止给 1 s。
+    #[tokio::test]
+    async fn fetching_a_logo_stops_at_the_deadline_even_mid_redirect() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let _ = sock.read(&mut [0u8; 4096]).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    let _ = sock
+                        .write_all(b"HTTP/1.1 302 Found\r\nLocation: /next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .await;
+                });
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::for_tests(fresh(), dir.path());
+        let started = std::time::Instant::now();
+        let err = grab_logo(&app, 1, &proxy, "http", "1.1.1.1", std::time::Duration::from_secs(1)).await.unwrap_err();
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_millis(1400), "{took:?}：{err:#}");
+        assert!(format!("{err:#}").contains("收手"), "{err:#}");
     }
 
     /// 上传图标：格式白名单、非空且 ≤1 MB、魔数与声明格式一致；换图时删旧文件；

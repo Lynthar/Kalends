@@ -1,6 +1,6 @@
 [package]
 name = "kalends"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 # 最低能编译的版本（用到 1.91 稳定的 Duration::from_mins），不是支持承诺
 rust-version = "1.91"

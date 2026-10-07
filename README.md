@@ -58,8 +58,10 @@ tar xzf kalends-<version>-x86_64-unknown-linux-gnu.tar.gz
 KALENDS_DATA=./data TZ=Asia/Shanghai ./kalends-<version>-x86_64-unknown-linux-gnu/kalends
 ```
 
-There's an `aarch64` build for ARM boxes and NAS units, and a `musl` build for
-old glibc or Alpine. `SHA256SUMS` ships alongside them.
+There's an `aarch64` build for ARM boxes and NAS units. Both glibc builds need
+glibc 2.34 or newer (Debian 12, Ubuntu 22.04, RHEL 9 and later); on older x86-64
+systems or Alpine use the static `musl` build, and on older ARM systems use
+Docker or build from source. `SHA256SUMS` ships alongside them.
 
 **Docker** — the compose file builds locally (BuildKit required, the default since Docker 23); no image is published anywhere:
 
@@ -112,6 +114,12 @@ Four environment variables, and everything else lives in the settings page.
 In the settings page: an optional PIN, the ICS token, a shared outbound proxy,
 a display currency, Telegram and SMTP credentials, reminder thresholds and the
 digest time.
+
+Outbound HTTP requests also honour `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and
+`NO_PROXY` from the environment, unless the settings page gives them a proxy:
+Telegram has its own proxy field, while exchange rates and icon fetching share
+the outbound one. A proxy set there replaces the environment ones for those
+requests. SMTP always connects directly.
 
 ## Limitations
 

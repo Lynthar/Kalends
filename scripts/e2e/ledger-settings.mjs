@@ -1,6 +1,6 @@
 // 台账与设置页：续费记账可见、通知记录空态、坏渠道配置停保存、阈值与默认值来自服务端声明。
 export default async function (t) {
-  const { APP, sleep, put, items, check, evl, shot, settle, waitFor } = t;
+  const { APP, sleep, put, items, check, send, evl, shot, settle, waitFor, dialogs } = t;
   /* 17.6. 「已续费」记的那笔账要能被看到：写台账这条路 e2e 从没走过，
      而台账在界面上一直没有入口——点完按钮，账进了库就再也见不到。 */
   const ledgerTarget = (await (await fetch(APP + 'api/collections/subs/items')).json())
@@ -150,4 +150,53 @@ export default async function (t) {
   await evl(`document.querySelector('#dlg-settings').close()`);
 
 
+
+  /* 存着的提醒阈值读不出来时，表单显示成空、读侧却在按默认值发——一保存就写成 []，逐项提醒静默关掉 */
+  await evl(`(() => { window._thStash = state.settings['notify.thresholds']; state.settings['notify.thresholds'] = 'oops'; openSettings(); })()`);
+  await sleep(400);
+  check('阈值读不出时停用保存并说明', await evl(`document.querySelector('#form-settings button[type=submit]').disabled
+    && document.querySelector('#toast').textContent.includes('提醒阈值')`) === true, await evl(`document.querySelector('#toast').textContent`));
+  await evl(`document.querySelector('#dlg-settings').close(); state.settings['notify.thresholds'] = window._thStash`);
+  await evl(`(() => { const t = document.querySelector('#toast'); clearTimeout(t._h); t.hidden = true; t.classList.remove('err'); })()`);
+
+  /* 发送记录的失败原因写在那一行里：只放在悬停提示里的话，触屏与键盘都读不到 */
+  t.sql(`INSERT INTO notification_log(kind,item_id,channel,threshold_days,due_date,ok,error) VALUES('digest',NULL,'telegram',NULL,'2026-01-01',0,'连不上 api.telegram.org')`);
+  await evl(`openSettings()`);
+  await waitFor(`!!document.querySelector('#notify-log .lg-row')`);
+  check('发送记录的失败原因直接写在行里', await evl(`(() => {
+    const why = document.querySelector('#notify-log .lg-why');
+    return !!why && why.textContent.includes('api.telegram.org') && why.getBoundingClientRect().height > 0;
+  })()`) === true);
+
+  /* 经 http:// 访问局域网地址时没有 navigator.clipboard：退到 execCommand，再不行就说「已选中，请手动复制」 */
+  await evl(`(() => {
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+    window._exec = document.execCommand;
+    document.execCommand = () => false;
+    document.querySelector('#btn-copy-ics').click();
+  })()`);
+  await sleep(200);
+  check('复制不了时选中链接并说请手动复制', await evl(`(() => {
+    const t = document.querySelector('#toast'), box = document.querySelector('#ics-url');
+    return t.classList.contains('err') && t.textContent.includes('手动复制')
+      && box.selectionStart === 0 && box.selectionEnd === box.value.length;
+  })()`) === true, await evl(`document.querySelector('#toast').textContent`));
+  await evl(`document.execCommand = window._exec; document.querySelector('#dlg-settings').close()`);
+
+  /* 设了 PIN 时首次开页：首屏并发的几个请求同时吃 401，只该问一次 PIN（放最后：之后不带 PIN 的接口调用都会 401） */
+  await put('/api/settings', { 'auth.pin': '2468' });
+  await send('Network.clearBrowserCookies');
+  dialogs.seen.length = 0;
+  dialogs.promptText = 'wrong';
+  await send('Page.reload');
+  const told = await waitFor(`document.querySelector('#toast')?.textContent.includes('PIN 不对')`, 8000);
+  check('PIN 答错时也只问一次，并说是 PIN 不对', told && dialogs.seen.filter(x => x === 'prompt').length === 1,
+    JSON.stringify([dialogs.seen, await evl(`document.querySelector('#toast')?.textContent`)]));
+  dialogs.seen.length = 0;
+  dialogs.promptText = '2468';
+  await send('Page.reload');
+  const loaded = await waitFor(`document.querySelectorAll('#up-list li').length > 0`, 8000);
+  check('设了 PIN 首次开页只问一次，答对后页面照常加载', loaded && dialogs.seen.filter(x => x === 'prompt').length === 1,
+    JSON.stringify(dialogs.seen));
+  dialogs.promptText = '';
 }

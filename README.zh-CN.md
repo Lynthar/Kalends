@@ -46,7 +46,9 @@ tar xzf kalends-<version>-x86_64-unknown-linux-gnu.tar.gz
 KALENDS_DATA=./data TZ=Asia/Shanghai ./kalends-<version>-x86_64-unknown-linux-gnu/kalends
 ```
 
-另有 `aarch64` 版给 ARM 机器和 NAS，`musl` 版给老 glibc 或 Alpine，同批带 `SHA256SUMS`。
+另有 `aarch64` 版给 ARM 机器和 NAS。两个 glibc 版要求 glibc 2.34 及以上（Debian 12、Ubuntu 22.04、
+RHEL 9 起）；更老的 x86-64 系统或 Alpine 用静态的 `musl` 版，更老的 ARM 系统用 Docker 或从源码构建。
+同批带 `SHA256SUMS`。
 
 **Docker**——compose 是本地构建的（要 BuildKit，Docker 23 起默认），没有发布任何镜像：
 
@@ -96,6 +98,10 @@ kalends restore --from backups/snapshot-2026-08-25.db --to ./data-new
 
 设置页里的：可选的 PIN、ICS token、共用的出网代理、显示币种、Telegram 与 SMTP 凭据、
 提醒阈值、摘要时间。
+
+出网的 HTTP 请求也认进程环境里的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 与 `NO_PROXY`，
+除非设置页给它配了代理：Telegram 有自己的代理栏，汇率与取图标共用出网代理。配了的那类请求只用配的那个。
+SMTP 一律直连。
 
 ## 能力边界
 

@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::{types::ValueRef, Connection};
 use serde_json::{Map, Value};
 
@@ -28,9 +28,9 @@ pub struct Report {
 /// 快照是整库、含明文密钥；导出里的渠道密钥与代理口令遮掉（`settings::exported`）。
 pub fn run(conn: &Connection, data_dir: &Path) -> Result<Report> {
     let backups = data_dir.join("backups");
-    fs::create_dir_all(&backups)?;
+    fs::create_dir_all(&backups).with_context(|| format!("建不了 {}", backups.display()))?;
     // 顺手扫掉上一次被硬杀留下的半截快照
-    for entry in fs::read_dir(&backups)?.flatten() {
+    for entry in fs::read_dir(&backups).with_context(|| format!("读不了 {}", backups.display()))?.flatten() {
         let p = entry.path();
         let looks_ours = p
             .file_name()
@@ -44,11 +44,12 @@ pub fn run(conn: &Connection, data_dir: &Path) -> Result<Report> {
     // 快照不要先删：rename 本就原地覆盖，先删了再失败，赔上的是今天那份好快照。
     let snapshot = backups.join(format!("snapshot-{}.db", crate::engine::today()));
     let tmp = snapshot.with_extension("db.tmp");
-    conn.execute("VACUUM INTO ?1", [tmp.to_string_lossy().as_ref()])?;
-    fs::rename(&tmp, &snapshot)?;
+    conn.execute("VACUUM INTO ?1", [tmp.to_string_lossy().as_ref()])
+        .with_context(|| format!("快照写不了 {}", tmp.display()))?;
+    fs::rename(&tmp, &snapshot).with_context(|| format!("快照改名成 {} 失败", snapshot.display()))?;
 
     let export_dir = data_dir.join("export");
-    fs::create_dir_all(&export_dir)?;
+    fs::create_dir_all(&export_dir).with_context(|| format!("建不了 {}", export_dir.display()))?;
     for table in TABLES {
         let mut stmt = conn.prepare(&format!("SELECT * FROM {table}"))?;
         let cols: Vec<String> = stmt.column_names().iter().map(ToString::to_string).collect();
@@ -78,11 +79,12 @@ pub fn run(conn: &Connection, data_dir: &Path) -> Result<Report> {
         // 先写临时文件再改名：原地写崩在半途留下的是一份看着像样、实则截断的导出
         let out = export_dir.join(format!("{table}.jsonl"));
         let tmp = out.with_extension("jsonl.tmp");
-        fs::write(&tmp, lines)?;
-        fs::rename(&tmp, &out)?;
+        fs::write(&tmp, lines).with_context(|| format!("导出写不了 {}", tmp.display()))?;
+        fs::rename(&tmp, &out).with_context(|| format!("导出改名成 {} 失败", out.display()))?;
     }
 
-    let mut snaps: Vec<PathBuf> = fs::read_dir(&backups)?
+    let mut snaps: Vec<PathBuf> = fs::read_dir(&backups)
+        .with_context(|| format!("读不了 {}", backups.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
             p.file_name()
@@ -93,7 +95,8 @@ pub fn run(conn: &Connection, data_dir: &Path) -> Result<Report> {
     snaps.sort();
     let mut removed = 0;
     while snaps.len() > KEEP_SNAPSHOTS {
-        fs::remove_file(snaps.remove(0))?;
+        let old = snaps.remove(0);
+        fs::remove_file(&old).with_context(|| format!("轮转删不掉 {}", old.display()))?;
         removed += 1;
     }
     Ok(Report {
@@ -124,8 +127,8 @@ pub fn restore(from: &Path, to: &Path) -> Result<RestoreReport> {
     }
     let created = !to.exists();
     if created {
-        fs::create_dir_all(to)?;
-    } else if fs::read_dir(to)?.next().is_some() {
+        fs::create_dir_all(to).with_context(|| format!("建不了目标目录 {}", to.display()))?;
+    } else if fs::read_dir(to).with_context(|| format!("读不了目标目录 {}", to.display()))?.next().is_some() {
         anyhow::bail!("目标目录非空：{}（恢复只装配全新目录，不覆盖既有数据）", to.display());
     }
     assemble(from, to).inspect_err(|_| {
@@ -149,12 +152,12 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
 
 fn assemble(from: &Path, to: &Path) -> Result<RestoreReport> {
     let db = to.join("kalends.db");
-    fs::copy(from, &db)?;
+    fs::copy(from, &db).with_context(|| format!("复制 {} 到 {} 失败", from.display(), db.display()))?;
     // 输入可能是在用库的主文件，检查点之后提交的写入只在 -wal 里：一并拷来，在副本上回放并收成
     // 单个文件（-shm 只是索引，能从 -wal 重建）。源文件一律不动，它可能在只读的备份盘上。
     let wal = sidecar(from, "-wal");
     if wal.is_file() {
-        fs::copy(&wal, sidecar(&db, "-wal"))?;
+        fs::copy(&wal, sidecar(&db, "-wal")).with_context(|| format!("复制 {} 失败", wal.display()))?;
     }
     {
         let conn = Connection::open(&db)?;
@@ -191,10 +194,11 @@ fn assemble(from: &Path, to: &Path) -> Result<RestoreReport> {
     let mut assets_copied = 0usize;
     if let Some(src) = &assets_from {
         if let Ok(entries) = fs::read_dir(src.join("logos")) {
-            fs::create_dir_all(to.join("logos"))?;
+            fs::create_dir_all(to.join("logos")).with_context(|| format!("建不了 {}", to.join("logos").display()))?;
             for entry in entries.flatten() {
                 if entry.path().is_file() {
-                    fs::copy(entry.path(), to.join("logos").join(entry.file_name()))?;
+                    fs::copy(entry.path(), to.join("logos").join(entry.file_name()))
+                        .with_context(|| format!("复制图标 {} 失败", entry.path().display()))?;
                     assets_copied += 1;
                 }
             }
@@ -321,6 +325,29 @@ mod tests {
         fs::remove_file(src.join("logos").join("a.png")).unwrap();
         let r = restore(&snapshot, &root.path().join("restored2")).unwrap();
         assert_eq!(r.missing, ["logos/a.png"]);
+    }
+
+    /// 备份与恢复的 I/O 错误要带路径：只有「Permission denied (os error 13)」的话，
+    /// 看不出是哪个挂载点、哪一步。
+    #[test]
+    fn io_failures_name_the_path() {
+        let root = tempfile::tempdir().unwrap();
+        let conn = crate::db::fresh_in_memory().unwrap();
+        let has = |e: anyhow::Error, p: &Path| {
+            let e = format!("{e:#}");
+            assert!(e.contains(&p.display().to_string()), "{e}");
+        };
+        for sub in ["backups", "export"] {
+            let d = root.path().join(sub);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join(sub), b"x").unwrap();
+            let Err(e) = run(&conn, &d) else { panic!("{sub} 被文件占位，备份却成了") };
+            has(e, &d.join(sub));
+        }
+        let snapshot = run(&conn, &root.path().join("ok")).unwrap().snapshot;
+        let file = root.path().join("a-file");
+        fs::write(&file, b"x").unwrap();
+        has(restore(&snapshot, &file).unwrap_err(), &file);
     }
 
     /// 挡得住的三种坏输入：非空目标（防覆盖在用数据）、根本不是数据库的文件、未来版本的快照。

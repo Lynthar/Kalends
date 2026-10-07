@@ -69,6 +69,7 @@ function colFromField(key, f) {
   const t = f.ftype === 'tpl' ? 'text' : f.ftype;
   const numeric = !!TYPES[t]?.numeric;
   const isCycle = f.src === 'col' && f.key === 'cycle';
+  const isPrice = f.src === 'col' && f.key === 'price';
   const get = r => fieldVal(f, r);
   return {
     t, fkey: f.key, src: f.src, custom: f.builtin ? 0 : f.id,
@@ -77,6 +78,8 @@ function colFromField(key, f) {
     str: numeric || isCycle ? 0 : 1,
     val: f.key === 'status' ? ordVal(statusOrder(key), r => r.status)
       : isCycle ? cycleRank
+      // 排序与比较跟着格子里显示的金额走：开了显示币种就是折算值，折不出来的给 null（沉底）
+      : isPrice ? r => (r.price == null ? null : fxDisplay() ? fxConv(r.price, r.currency, fxDisplay()) : r.price)
       : numeric ? r => { const v = get(r); return v == null || v === '' ? null : +v; }
       : get,
     fvals: r => {
@@ -251,7 +254,6 @@ function renderColl(key) {
       if (f.key === 'name') {
         return `<td>${hasKids ? `<button class="tgl" data-tgl type="button" title="折叠 / 展开子行">${collapsed.has(it.id) ? '▸' : '▾'}</button>` : ''}${(!depth && parent) ? `<span class="sub-parent">${esc(parent.name)} ↳ </span>` : ''}${logoOf(it) ? `<img class="slogo" src="/logos/${esc(logoOf(it))}" alt="" loading="lazy">` : ''}${nameCell(it.name)}${safeUrl(it.url) ? ` <a class="btn link" href="${esc(safeUrl(it.url))}" target="_blank" rel="noreferrer">↗</a>` : ''}<button class="rowopen" data-open type="button" title="打开详情">⤢</button>${sub ? `<div class="muted" style="font-size:.75rem">${subTel ? `<a class="tel" href="${esc(telHref(sub))}">${esc(sub)}</a>${telSuspect(sub) ? '<span class="tel-warn" title="位数偏少，可能只填了国家码">?</span>' : ''}` : esc(sub)}</div>` : ''}</td>`;
       }
-      if (f.key === 'status') return `<td>${stPill(it.status)}</td>`;
       if (f.key === 'left') return `<td class="wide">${leftBar(it)}</td>`;
       if (f.key === 'price') {
         // 币种并进了这一格：主行是金额（开了折算就是折算值），小字里挂原币与周期
@@ -305,6 +307,7 @@ function itemDialog() {
   d.className = 'sheet';
   d.innerHTML = `<form id="form-item" method="dialog">
       <h3 id="dlg-item-title">条目</h3>
+      <p id="dlg-item-note" class="fp-note" hidden></p>
       <div id="item-fields" class="fgrid"></div>
       <footer>
         <button type="button" class="btn ghost" data-close>取消</button>
@@ -370,7 +373,7 @@ function selOptions(key, f, cur) {
 // 必须吃掉回车——表单里的回车默认直接提交。
 function initMoptAdd(inp) {
   inp.addEventListener('keydown', e => {
-    if (e.key !== 'Enter') return;
+    if (!enterPressed(e)) return;
     e.preventDefault();
     const val = inp.value.trim();
     inp.value = '';
@@ -395,7 +398,7 @@ function initMoptAdd(inp) {
 // 回车只把值加进下拉并选中（词表本就从数据里长）；tr＝落进下拉前的规范化（币种大写）。
 function initSoptAdd(inp, tr = v => v) {
   inp.addEventListener('keydown', e => {
-    if (e.key !== 'Enter') return;
+    if (!enterPressed(e)) return;
     e.preventDefault(); // 不吃掉的话表单直接隐式提交
     const val = tr(inp.value.trim());
     inp.value = '';
@@ -409,7 +412,12 @@ function initSoptAdd(inp, tr = v => v) {
   });
 }
 
-function openItemDialog(key, it) {
+/**
+ * @param {object} [o]
+ * @param {string} [o.focus] 打开后聚焦的字段键
+ * @param {string} [o.note] 表单顶上的一行说明。toast 盖不过模态对话框，要对着表单说的话只能写在这里
+ */
+function openItemDialog(key, it, { focus, note } = {}) {
   const c = collOf(key);
   editingItem = { key, id: it?.id ?? null, row: it || {}, touched: new Set() };
   const d = itemDialog();
@@ -422,7 +430,10 @@ function openItemDialog(key, it) {
   }
   box.appendChild(parentRow(key, it));
   if (it) box.appendChild(logoRow(it));
+  $('#dlg-item-note').hidden = !note;
+  $('#dlg-item-note').textContent = note || '';
   d.showModal();
+  if (focus) box.querySelector(`[data-f="${focus}"]`)?.focus();
 }
 
 /* 一个字段 → 一枚表单控件（所有库的表单与自定义列共用）。**一个 label 只配一枚控件**：
@@ -665,10 +676,10 @@ function collDialog() {
   d.innerHTML = `<form id="form-coll" method="dialog">
       <h3 id="dlg-coll-title">新建库</h3>
       <div class="fgrid">
-        <label class="span2" id="coll-tpl-row"><span>模板</span>
+        <div class="field span2" id="coll-tpl-row" role="group" aria-labelledby="coll-tpl-label"><span id="coll-tpl-label">模板</span>
           <div class="chips" id="coll-tpl"></div>
           <div class="muted" id="coll-tpl-desc" style="font-size:.72rem;font-weight:500"></div>
-        </label>
+        </div>
         <label><span>库名</span><input data-c="name" required></label>
         <label><span>图标（emoji，可空）</span><input data-c="icon" maxlength="4"></label>
         <label><span>到期模型</span><select data-c="due_anchor">
@@ -682,12 +693,12 @@ function collDialog() {
         <label><span>到期动作说法</span><input data-c="verb" placeholder="续费"></label>
       </div>
       <div id="coll-order-row" class="fgrid" hidden>
-        <label class="span2"><span>标签位置（拖不了标签时从这里挪）</span>
+        <div class="field span2" role="group" aria-labelledby="coll-order-label"><span id="coll-order-label">标签位置（拖不了标签时从这里挪）</span>
           <span class="chips">
             <button type="button" class="btn ghost" id="coll-mv-l">◀ 前移</button>
             <button type="button" class="btn ghost" id="coll-mv-r">后移 ▶</button>
           </span>
-        </label>
+        </div>
       </div>
       <div id="coll-fields-box" hidden>
         <div class="fp-note">字段是这个库自己的属性：拖动调序、关掉「上表」都<b>跟着账本走、所有设备一致</b>。

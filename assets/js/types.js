@@ -1,6 +1,7 @@
 /* Kalends 前端 · types.js —— 属性内核：一种字段类型的全部行为集中在 TYPES 一张表里。
    加一种类型 = 这里加一行 + 后端 fields::FTYPES 加一项（值不是文本的补 extra_value，有格式的再补 normalize_shaped），
-   **别往分派点里塞 if**：类型的行为只在这张表里声明，分派点一律查表。 */
+   **别往分派点里塞 if**：分派点一律查表。有意的例外只有详情表单的多选 / 单选 / 状态控件与状态词表的语义。 */
+// whole：一截就读不出（日期、金额），表格自动装宽时只要有它可见就不压缩、改横滚。列表型（filter: 'list'）另给 tag：单个值怎么画（下拉项、筛选项）——cell 画的是整格，多选的整格是一串
 const TYPES = {
   text: {
     label: '文本',
@@ -16,6 +17,7 @@ const TYPES = {
     creatable: 1,
     filter: 'num',
     numeric: 1,
+    whole: 1,
     input: 'number',
     td: 'amt',
     icon: '<svg viewBox="0 0 16 16"><text x="4" y="12.6" font-size="12.5" font-weight="600" fill="currentColor">#</text></svg>',
@@ -26,6 +28,7 @@ const TYPES = {
     filter: 'list',
     conv: 1,
     cell: (v, tab, k) => tagFor(tab, k, v),
+    tag: (v, tab, k) => tagFor(tab, k, v),
     editor: ({ tab, it, td, k, save }) => pickEditor(tab, it, td, k, save),
     icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6"/><path d="M5.6 7l2.4 2.4L10.4 7"/></svg>',
   },
@@ -36,6 +39,7 @@ const TYPES = {
     conv: 1,
     group: 1,
     cell: (v, tab, k) => tagsFor(tab, k, Array.isArray(v) ? v : splitVals(v)),
+    tag: (v, tab, k) => tagFor(tab, k, v),
     editor: ({ tab, it, td, k, col, toExtra }) => multiEditor(tab, it, td, k, sel => {
       // 存储形态跟着**声明的类型**走，不跟呈现走：真多选列存数组，文本列的多选呈现拼回
       // 字符串——真列没有数组值这回事，写进去后端读不出来就当成空，那一格原值静默没了
@@ -47,6 +51,8 @@ const TYPES = {
   status: {
     label: '状态',
     filter: 'list',
+    cell: v => stPill(v),
+    tag: v => stPill(v),
     editor: ({ tab, it, td, k, save }) => pickEditor(tab, it, td, k, save),
     icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.6" opacity=".35"/><path d="M8 2.4a5.6 5.6 0 0 1 5.6 5.6"/></svg>',
   },
@@ -54,6 +60,7 @@ const TYPES = {
     label: '日期',
     creatable: 1,
     filter: 'date',
+    whole: 1,
     input: 'date',
     td: 'cdate',
     icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="3.5" width="11" height="10" rx="1.6"/><path d="M2.5 6.8h11M5.6 2v2.6M10.4 2v2.6"/></svg>',

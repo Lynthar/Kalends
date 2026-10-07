@@ -35,9 +35,9 @@ $('#t-search').addEventListener('input', e => {
     RENDER[state.tab]();
   }, 180);
 });
-// 页面或表格滚动时浮层会脱锚，直接收起（浮层内部滚动除外）
+// 浮层内部的滚动不算
 window.addEventListener('scroll', e => {
-  if (popEl && !popEl.contains(e.target)) closePop();
+  if (popEl && !popEl.contains(e.target)) followPop();
 }, true);
 // 窗口尺寸变化：无手动列宽的表要重新装进容器
 let refitTimer;
@@ -46,8 +46,7 @@ window.addEventListener('resize', () => {
   refitTimer = setTimeout(() => applyWidths(state.tab), 150);
 });
 
-$('#up-panel').classList.toggle('folded', state.upFolded);
-$('#up-toggle').setAttribute('aria-expanded', String(!state.upFolded));
+syncUpFold();
 $('#t-search').value = views[state.tab]?.q || '';
 
 async function boot() {

@@ -54,10 +54,14 @@ impl IntoResponse for ApiError {
             .0
             .downcast_ref::<ClientError>()
             .map_or(StatusCode::INTERNAL_SERVER_ERROR, |e| e.status);
-        if status == StatusCode::INTERNAL_SERVER_ERROR {
-            tracing::warn!("api error: {:#}", self.0); // 真故障要留痕，客户端传错不必刷屏
-        }
-        (status, Json(json!({ "error": self.0.to_string() }))).into_response()
+        // 真故障要留痕，客户端传错不必刷屏；回包带整条原因链，外层的「哪一步、哪个路径」与里层的真因都得看得见
+        let msg = if status == StatusCode::INTERNAL_SERVER_ERROR {
+            tracing::warn!("api error: {:#}", self.0);
+            format!("{:#}", self.0)
+        } else {
+            self.0.to_string()
+        };
+        (status, Json(json!({ "error": msg }))).into_response()
     }
 }
 
@@ -715,5 +719,18 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert_eq!(body_of(resp).await["error"], json!("需要对象"));
+    }
+
+    /// 真故障的回包带整条原因链：外层只说「哪一步、哪个路径」，权限不够还是盘满在里层，
+    /// 只回外层的话界面上看到的是一句没有原因的「建不了 /data/backups」。
+    #[tokio::test]
+    async fn a_server_error_carries_the_whole_cause_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("backups"), b"x").unwrap();
+        let app = App::for_tests(crate::db::fresh_in_memory().unwrap(), dir.path());
+        let resp = backup_run(axum::extract::State(app)).await.unwrap_err().into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let msg = body_of(resp).await["error"].as_str().unwrap().to_string();
+        assert!(msg.contains("backups") && msg.contains("os error"), "{msg}");
     }
 }
