@@ -108,21 +108,54 @@ pub struct RestoreReport {
     pub orphans: usize,
 }
 
-/// `to` 必须不存在或为空目录：恢复只装配新目录，绝不覆盖在用数据。
+/// `to` 必须不存在或为空目录：恢复只装配新目录，绝不覆盖在用数据；失败时把它还原成开工前的样子。
 /// 验证三件事：`integrity_check`（含外键）、`user_version` 不高于本二进制、logos/ 引用在位；
 /// 快照在标准 `<数据目录>/backups/` 布局里时，顺带从原数据目录把 logos/ 复制过来。
 pub fn restore(from: &Path, to: &Path) -> Result<RestoreReport> {
     if !from.is_file() {
         anyhow::bail!("快照不存在：{}", from.display());
     }
-    if let Ok(mut entries) = fs::read_dir(to) {
-        if entries.next().is_some() {
-            anyhow::bail!("目标目录非空：{}（恢复只装配全新目录，不覆盖既有数据）", to.display());
-        }
-    } else {
+    let created = !to.exists();
+    if created {
         fs::create_dir_all(to)?;
+    } else if fs::read_dir(to)?.next().is_some() {
+        anyhow::bail!("目标目录非空：{}（恢复只装配全新目录，不覆盖既有数据）", to.display());
     }
-    fs::copy(from, to.join("kalends.db"))?;
+    assemble(from, to).inspect_err(|_| {
+        // 残留的半份库会挡住重跑，也容易被当成恢复好了的目录
+        if created {
+            let _ = fs::remove_dir_all(to);
+        } else if let Ok(entries) = fs::read_dir(to) {
+            for p in entries.flatten().map(|e| e.path()) {
+                let _ = if p.is_dir() { fs::remove_dir_all(&p) } else { fs::remove_file(&p) };
+            }
+        }
+    })
+}
+
+/// `path` 旁边的 SQLite 附属文件（`-wal` / `-shm`）。
+fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+fn assemble(from: &Path, to: &Path) -> Result<RestoreReport> {
+    let db = to.join("kalends.db");
+    fs::copy(from, &db)?;
+    // 输入可能是在用库的主文件，检查点之后提交的写入只在 -wal 里：一并拷来，在副本上回放并收成
+    // 单个文件（-shm 只是索引，能从 -wal 重建）。源文件一律不动，它可能在只读的备份盘上。
+    let wal = sidecar(from, "-wal");
+    if wal.is_file() {
+        fs::copy(&wal, sidecar(&db, "-wal"))?;
+    }
+    {
+        let conn = Connection::open(&db)?;
+        let mode: String = conn.query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0))?;
+        if mode != "delete" {
+            anyhow::bail!("没能把 -wal 并进库文件（journal_mode 仍是 {mode}）");
+        }
+    }
 
     let conn = Connection::open_with_flags(
         to.join("kalends.db"),
@@ -310,6 +343,56 @@ mod tests {
             .unwrap();
         let err = restore(&newer, &root.path().join("n")).unwrap_err().to_string();
         assert!(err.contains("高于本二进制"), "{err}");
+    }
+
+    /// 从整机备份恢复时输入是在用库的主文件：检查点之后提交的写入只在旁边的 `-wal` 里，
+    /// 只拷主文件就静默丢掉它们。恢复出的库必须有这些写入、是单个自足文件，且源文件不动。
+    #[test]
+    fn restoring_a_live_database_file_keeps_what_only_its_wal_holds() {
+        let root = tempfile::tempdir().unwrap();
+        let src = root.path().join("data");
+        let conn = crate::db::open(&src).unwrap();
+        conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        conn.execute(
+            "INSERT INTO items(collection_id,name) VALUES((SELECT id FROM collections WHERE key='subs'),'OnlyInWal')",
+            [],
+        )
+        .unwrap();
+        // 连接还开着、没做检查点时整目录拷走，就是整机备份拿到的样子
+        let whole = root.path().join("whole");
+        fs::create_dir_all(&whole).unwrap();
+        for name in ["kalends.db", "kalends.db-wal"] {
+            fs::copy(src.join(name), whole.join(name)).unwrap();
+        }
+        drop(conn);
+        let wal_before = fs::read(whole.join("kalends.db-wal")).unwrap();
+        assert!(!wal_before.is_empty());
+
+        let to = root.path().join("restored");
+        restore(&whole.join("kalends.db"), &to).unwrap();
+        let restored = Connection::open(to.join("kalends.db")).unwrap();
+        assert_eq!(one::<i64>(&restored, "SELECT count(*) FROM items WHERE name='OnlyInWal'", []), 1);
+        drop(restored);
+        assert!(!to.join("kalends.db-wal").exists(), "恢复出的库应是单个自足文件");
+        assert_eq!(fs::read(whole.join("kalends.db-wal")).unwrap(), wal_before, "源文件不能被动");
+    }
+
+    /// 失败的恢复要把自己写进目标目录的东西清干净：留下半份库，重跑会被「目标目录非空」挡住，
+    /// 也容易被当成恢复好了的目录。原本就在的空目录留着，原本没有的目录一并删掉。
+    #[test]
+    fn a_failed_restore_leaves_the_target_as_it_found_it() {
+        let root = tempfile::tempdir().unwrap();
+        let garbage = root.path().join("garbage.db");
+        fs::write(&garbage, b"not a database").unwrap();
+
+        let fresh = root.path().join("fresh");
+        assert!(restore(&garbage, &fresh).is_err());
+        assert!(!fresh.exists(), "原本没有的目标目录没删掉");
+
+        let empty = root.path().join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        assert!(restore(&garbage, &empty).is_err());
+        assert_eq!(fs::read_dir(&empty).unwrap().count(), 0, "目标目录里留了残留");
     }
 
     /// 老快照可能还没有 `items` 表：缺表不等于缺文件，引用核对跳过而不是把恢复整个报错。

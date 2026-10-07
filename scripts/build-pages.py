@@ -14,6 +14,8 @@ import re
 import shutil
 import sys
 
+from outdir import claim as outdir_claim
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # manifest 的 start_url 指向站点根，在 Pages 的子路径下会装出一个打不开的 PWA
@@ -73,12 +75,10 @@ def build_demo(out):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--out', default='dist', help='输出目录，会被清空重建')
+    ap.add_argument('--out', default='dist', help='输出目录：不存在、为空或是上一轮的输出时清空重建')
     args = ap.parse_args()
 
-    out = os.path.abspath(args.out)
-    shutil.rmtree(out, ignore_errors=True)
-    os.makedirs(out)
+    out = outdir_claim(args.out, '.kalends-pages')
 
     site = os.path.join(ROOT, 'site')
     for name in ('index.html', 'landing.css'):

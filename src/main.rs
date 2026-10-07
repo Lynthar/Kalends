@@ -105,19 +105,42 @@ fn restore_cli(rest: &[String]) -> ! {
     }
 }
 
+const USAGE: &str = "用法：
+  kalends                                          起服（数据目录 KALENDS_DATA，监听 KALENDS_ADDR）
+  kalends --health                                 自检，给容器 healthcheck 用
+  kalends --version
+  kalends restore --from <快照> --to <新数据目录>";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    if std::env::args().nth(1).as_deref() == Some("restore") {
-        let rest: Vec<String> = std::env::args().skip(2).collect();
-        restore_cli(&rest);
-    }
-    if std::env::args().any(|a| a == "--health") {
-        health_probe().await;
+    // 只有不带参数才起服，其余形状认不得就退 2：起服第一步是迁移数据库
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        [] => {}
+        ["restore", ..] => restore_cli(&args[1..]),
+        ["--health"] => health_probe().await,
+        ["--version" | "-V"] => {
+            println!("kalends {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        ["--help" | "-h"] => {
+            println!("{USAGE}");
+            return Ok(());
+        }
+        _ => {
+            eprintln!("{USAGE}");
+            std::process::exit(2);
+        }
     }
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
+    // 先占端口再开库：同一份部署已在跑时，第二个进程在迁移之前就退出
+    let addr: SocketAddr = std::env::var("KALENDS_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:4180".into())
+        .parse()?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
     let data_dir = PathBuf::from(std::env::var("KALENDS_DATA").unwrap_or_else(|_| "data".into()));
     let conn = db::open(&data_dir)?;
     db::seed_defaults(&conn)?;
@@ -148,11 +171,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(app.clone())
         .layer(middleware::from_fn_with_state(app, pin_gate));
 
-    let addr: SocketAddr = std::env::var("KALENDS_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:4180".into())
-        .parse()?;
     tracing::info!("listening on http://{addr}");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown())
         .await?;

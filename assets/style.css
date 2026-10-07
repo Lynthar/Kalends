@@ -767,4 +767,6 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
 }
 
 /* 算不出到期日的条目：它们不在时间线上，得在这里点名，否则等于从界面上消失 */
-.undated { color: var(--coral); margin-top: .4rem; }
+.undated { color: var(--coral); margin: .4rem 0 0; }
+/* 有到期日、状态却不上时间线的条目：是状态语义使然，不是故障，所以不用警示色 */
+.off-timeline { margin: .4rem 0 0; }

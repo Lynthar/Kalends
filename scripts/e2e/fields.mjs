@@ -93,6 +93,8 @@ export default async function (t) {
   await evl(`document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))`);
   await sleep(150);
 
+  const ghostId = (await items('subs')).find(r => r.extra?.[ckey])?.id;
+  check('删列前有一行挂着这一列的值', ghostId != null);
   check('菜单删除自定义列', await menuClick(`#view-subs th[data-k="${ckey}"]`, '删除列'));
   await sleep(800);
   check('列已从表头移除', await evl(`!document.querySelector('#view-subs th[data-k="${ckey}"]')`) === true);
@@ -100,6 +102,26 @@ export default async function (t) {
   // 预置库的域字段也是 builtin=0，那个代理判据会把它们一并算进来
   check('字段注册表已清空',
     (await (await fetch(APP + 'api/fields')).json()).every(f => f.key !== ckey));
+  // 删列后接着改同一行的别的 extra 格（界面写入的同一条路）：本地行没重取的话，旧值会连键写回去
+  await evl(`(() => { const it = state.subs.find(r => r.id === ${ghostId}); return patchRow('subs', it, extraPatch(it, 'category', 'Video')); })()`);
+  await sleep(800);
+  const ghostAfter = (await items('subs')).find(r => r.id === ghostId);
+  check('删列后改同一行的别的格照常保存', ghostAfter.extra.category === 'Video', JSON.stringify(ghostAfter.extra));
+  check('删掉的列没有连值写回去', !(ckey in ghostAfter.extra), JSON.stringify(ghostAfter.extra));
+  // 再建一列：拿到的是新键，格子全空——键一复用，旧值就会在新列里复活
+  await evl(`document.querySelector('#view-subs th.ops .addcol').click()`);
+  await sleep(250);
+  await evl(`(() => {
+    document.querySelector('.optpop [data-name]').value = '渠道二';
+    document.querySelector('.optpop [data-go]').click();
+  })()`);
+  await sleep(700);
+  const ckey2 = await evl(`[...document.querySelectorAll('#view-subs th')].map(t => t.dataset.k).find(k => /^c\\d+$/.test(k)) || ''`);
+  check('删列后新建的列不复用旧键', /^c\d+$/.test(ckey2) && ckey2 !== ckey, `${ckey} → ${ckey2}`);
+  check('新列的格子全空',
+    await evl(`[...document.querySelectorAll('#subs-body td[data-k="${ckey2}"]')].every(td => !td.textContent.trim())`) === true);
+  check('收拾：删掉第二列', await menuClick(`#view-subs th[data-k="${ckey2}"]`, '删除列'));
+  await sleep(800);
 
 
   /* 17.22. 电话号码字段类型：号码本来就不是普通文本，写入口规范化、表格里可点拨号。 */

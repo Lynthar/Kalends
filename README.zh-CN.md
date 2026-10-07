@@ -70,9 +70,10 @@ cargo run
 KALENDS_DATA=./data KALENDS_ADDR=127.0.0.1:4180 TZ=Asia/Shanghai ./kalends
 ```
 
-另外两种模式：
+其余模式（别的参数一律退出码 2 拒绝，不碰数据目录）：
 
 ```bash
+kalends --version
 kalends --health                                    # 给容器 healthcheck 用
 kalends restore --from backups/snapshot-2026-08-25.db --to ./data-new
 ```

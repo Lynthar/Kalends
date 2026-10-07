@@ -18,10 +18,11 @@
 import argparse
 import json
 import os
-import shutil
 import sqlite3
 import sys
 import urllib.request
+
+from outdir import claim as outdir_claim
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -62,26 +63,6 @@ def load(conn, table, rows, log):
 SENTINEL = '.kalends-rehearsal'
 
 
-def claim_outdir(outdir):
-    """校验并清空 outdir。误传路径（HOME、仓库、生产数据目录……）会被整树删掉，
-    所以只清「不存在 / 空 / 带上一轮演练标记」的目录，其余一律拒绝。"""
-    out = os.path.realpath(outdir)
-    home = os.path.realpath(os.path.expanduser('~'))
-    repo = os.path.realpath(REPO)
-    for fatal in (os.path.sep, home, repo):
-        if out == fatal or fatal.startswith(out + os.path.sep):
-            sys.exit(f'不清空 {out}：那是根 / HOME / 仓库，或它们的上级')
-    if os.path.exists(out):
-        if not os.path.isdir(out):
-            sys.exit(f'{out} 不是目录')
-        if os.listdir(out) and not os.path.exists(os.path.join(out, SENTINEL)):
-            sys.exit(f'{out} 已有内容且缺 {SENTINEL} 标记（不像上一轮演练目录），拒绝清空；换个新路径')
-    shutil.rmtree(out, ignore_errors=True)
-    os.makedirs(out)
-    open(os.path.join(out, SENTINEL), 'w').close()
-    return out
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('source', help='源实例的基地址，例如 http://127.0.0.1:4180')
@@ -95,7 +76,7 @@ def main():
     if a.upto < 1 or a.upto > len(files):
         sys.exit(f'--upto 应在 1..{len(files)} 之间，实到 {a.upto}')
 
-    outdir = claim_outdir(a.outdir)
+    outdir = outdir_claim(a.outdir, SENTINEL)
     db = os.path.join(outdir, 'kalends.db')
     conn = sqlite3.connect(db)
     log(f'按仓库里的迁移文件建到第 {a.upto} 号：')

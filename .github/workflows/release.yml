@@ -7,8 +7,9 @@ on:
     tags: ['v*']
   workflow_dispatch:        # 不打 tag 也能试跑构建矩阵，产物只留在 Actions 里
 
+# 默认只读；写权限只给建 Release 的那一步，跑依赖代码与测试的 job 拿不到
 permissions:
-  contents: write           # 建 Release 要写权限，别的都不要
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,6 +32,9 @@ jobs:
       # 浏览器套件不进来——它们要 chromium，而这一档只拦二进制的接口行为变没变。
       - run: cargo build --locked
       - run: node scripts/e2e/run.mjs api
+      # 依赖带已知漏洞（RustSec 公告）就不发
+      - run: cargo install cargo-audit --locked --version 0.22.2
+      - run: cargo audit
 
   build:
     needs: gates
@@ -74,6 +78,8 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

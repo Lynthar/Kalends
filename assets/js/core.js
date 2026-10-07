@@ -193,15 +193,17 @@ function renderUpcoming() {
   const { upcoming, today } = state.overview;
   $('#today-note').textContent = `今日 ${today}`;
   $('#up-window').value = state.upWindow;
-  const items = state.upWindow === 'all'
-    ? upcoming : upcoming.filter(it => it.days_left <= +state.upWindow);
+  const inWindow = it => state.upWindow === 'all' || it.days_left <= +state.upWindow;
+  const items = upcoming.filter(inWindow);
   const ol = $('#up-list');
   ol.innerHTML = '';
   const hiddenN = upcoming.length - items.length;
   const more = $('#up-more');
   more.hidden = hiddenN <= 0;
-  // 窗口内空、窗口外还有：只说「更远期还有 N 项」——同屏既说"无账"又说"还有 N 项"读着矛盾
-  $('#up-empty').hidden = items.length > 0 || hiddenN > 0;
+  const und = state.overview.undated || [];
+  const off = (state.overview.off_timeline || []).filter(inWindow);
+  // 窗口内空、窗口外还有，或下面有点名：都别说「诸项安然」，同屏两句读着矛盾
+  $('#up-empty').hidden = items.length > 0 || hiddenN > 0 || und.length > 0 || off.length > 0;
   if (hiddenN > 0) more.textContent = `▾ 更远期还有 ${hiddenN} 项`;
   items.forEach((it, idx) => {
     const d = it.days_left;
@@ -224,12 +226,19 @@ function renderUpcoming() {
 
   // 该上时间线却算不出到期日的条目。不点名的话它们既不在这张表上、也不进日历、
   // 更不会提醒——你以为在管，其实它从界面上消失了
-  const und = state.overview.undated || [];
   const un = $('#up-undated');
   un.hidden = !und.length;
   if (und.length) {
     const names = und.map(x => `${x.name}（缺${x.missing}）`).join('、');
     un.textContent = `⚠ 另有 ${und.length} 项算不出到期日，不会提醒也不进日历：${names}`;
+  }
+  // 状态不上时间线的（新建默认的 Planned 就是）：日期填了也不在上面，得说一声为什么
+  const offEl = $('#up-off');
+  offEl.hidden = !off.length;
+  if (off.length) {
+    const when = d => d === 0 ? '今天' : `${d} 天后`;
+    const names = off.map(x => `${x.name}（${x.status} · ${when(x.days_left)}）`).join('、');
+    offEl.textContent = `◌ 另有 ${off.length} 项状态不上时间线，到期不会提醒：${names}`;
   }
 
   $('#up-panel').classList.toggle('folded', state.upFolded);

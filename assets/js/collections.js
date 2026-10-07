@@ -738,7 +738,7 @@ function fillCollFields(c) {
       if (!confirm(`删除列「${f.name || f.key}」？该列在所有行的值将被清除，不可撤销。`)) return;
       try {
         await api(`/api/fields/${f.id}`, { method: 'DELETE' });
-        await rebuildHead(c.key); // 顺带刷字段注册表，下面这次重绘读到的才是删后的字段集
+        await reloadAfterColumnDrop(c.key); // 顺带刷字段注册表，下面这次重绘读到的才是删后的字段集
         fillCollFields(c);
       } catch (err) { toast(err.message, true); }
     });

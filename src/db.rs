@@ -26,6 +26,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0018_ledger_keeps_its_own_names.sql"),
     include_str!("../migrations/0019_rating_out_of_ten.sql"),
     include_str!("../migrations/0020_drop_media.sql"),
+    include_str!("../migrations/0021_ids_are_never_reused.sql"),
 ];
 
 /// 一个跑完全部迁移的内存库，等价于"全新安装"。只给测试用。
@@ -84,6 +85,20 @@ fn pre_migration_snapshot(conn: &Connection, data_dir: &Path) -> Result<()> {
     std::fs::rename(&tmp, &snap)?;
     tracing::info!("pre-migration snapshot: {}", snap.display());
     Ok(())
+}
+
+/// 给 `table`（`items` 或 `fields`）发一个从没发出过的 id：SQLite 不带 AUTOINCREMENT 时会把删掉的
+/// 最大 id 再发出去，而字段键 `c<id>`、通知去重键、放锁期间的在途请求都拿 id 当身份。
+/// 要在插行的同一事务里调，回滚时号才跟着退回；`table` 会被拼进 SQL，只能传字面量。
+pub fn next_id(conn: &Connection, table: &str) -> rusqlite::Result<i64> {
+    conn.query_row(
+        &format!(
+            "UPDATE id_seq SET seq = max(seq, (SELECT coalesce(max(id), 0) FROM {table})) + 1
+             WHERE name = ?1 RETURNING seq"
+        ),
+        [table],
+        |r| r.get(0),
+    )
 }
 
 /// 读一项设置。**`Err`（读不出来）与 `Ok(None)`（没这个键）不许折平**：把数据库故障
@@ -249,6 +264,8 @@ mod tests {
         assert_eq!(one::<String>(&conn, "SELECT renew_from FROM collections WHERE key='subs'", []), "schedule");
         assert_eq!(one::<String>(&conn, "SELECT renew_from FROM collections WHERE key='sims'", []), "today");
         assert_eq!(one::<String>(&conn, "SELECT renew_from FROM collections WHERE key='vps'", []), "schedule");
+        // 0021：条目号越过台账与通知日志里悬空的旧 id（999）
+        assert_eq!(one::<i64>(&conn, "SELECT seq FROM id_seq WHERE name='items'", []), 999);
         // 0020：媒体表连媒体字段注册一起退场（数据先经 Ludi 搬走，fixture 里也不再有媒体行）
         assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM sqlite_master WHERE name='media_items'", []), 0);
         assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM fields WHERE tbl='media'", []), 0);
@@ -283,6 +300,11 @@ mod tests {
         assert_eq!(one::<String>(&conn, "SELECT coll_name FROM renewal_ledger WHERE kind='books'", []), "藏书");
         // 0020：媒体表退场
         assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM sqlite_master WHERE name='media_items'", []), 0);
+        // 0021：号从已删行留下的痕迹之后发——台账里的条目 999、库属性指着的 c950 与孤儿键 c900
+        assert_eq!(one::<i64>(&conn, "SELECT seq FROM id_seq WHERE name='items'", []), 999);
+        assert_eq!(one::<i64>(&conn, "SELECT seq FROM id_seq WHERE name='fields'", []), 950);
+        assert_eq!(next_id(&conn, "fields").unwrap(), 951);
+        assert_eq!(next_id(&conn, "items").unwrap(), 1000);
     }
 
     /// 0020 只在媒体清空后放行：还有媒体行就整库拒绝迁移（先经 Ludi 导入或在旧版本界面清空）。

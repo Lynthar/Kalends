@@ -186,6 +186,8 @@ async fn overview(State(app): State<App>) -> R {
         "upcoming": engine::upcoming(&conn)?,
         // 该上时间线却算不出到期日的：不点名的话它们会从界面上静默消失
         "undated": engine::undated(&conn)?,
+        // 有到期日、状态却不上时间线的（新建条目默认的 Planned 就是）：同理点名
+        "off_timeline": engine::off_timeline(&conn)?,
         "totals": engine::totals(&conn)?,
         // 该计支出却缺了金额/币种/周期里的一项，于是一分钱没进总额的：同样要点名
         "uncounted": engine::uncounted(&conn)?,
@@ -206,7 +208,7 @@ async fn fx_refresh(State(app): State<App>) -> R {
 }
 
 /// 续费台账（设置页只读列表）。名字以**写入时钉进去的快照**为准（迁移 0018）：
-/// 回查当前条目的话，条目一删账就没了名字，id 复用后旧账还会挂到新条目名下。
+/// 回查当前条目的话，条目一删账就没了名字；迁移 0021 之前 id 会被复用，老账还可能挂到新条目名下。
 /// 快照为空的老账回查一次，仍读不到就交给界面回落成编号。
 async fn ledger_list(State(app): State<App>) -> R {
     let conn = app.db.lock().unwrap();

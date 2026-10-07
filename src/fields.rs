@@ -129,15 +129,12 @@ async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
         [&tbl],
         |r| r.get(0),
     )?;
-    // 键要等 id 才拼得出，所以两条语句得绑在一起：断在中间会留下一行 key=''，
-    // 而 UNIQUE(tbl,key) 会让这张表从此再也加不了列，得进库删行才能恢复
     let tx = conn.unchecked_transaction()?;
+    let id = crate::db::next_id(&tx, "fields")?;
     tx.execute(
-        "INSERT INTO fields(tbl,key,name,ftype,options,builtin,pos) VALUES(?1,'',?2,?3,'[]',0,?4)",
-        params![tbl, name, ftype, pos],
+        "INSERT INTO fields(id,tbl,key,name,ftype,options,builtin,pos) VALUES(?1,?2,'c'||?1,?3,?4,'[]',0,?5)",
+        params![id, tbl, name, ftype, pos],
     )?;
-    let id = tx.last_insert_rowid();
-    tx.execute("UPDATE fields SET key='c'||id WHERE id=?1", [id])?;
     let row = tx.query_row(
         "SELECT id,tbl,key,name,ftype,options,builtin,pos,src,shown,config FROM fields WHERE id=?1",
         [id],
@@ -283,9 +280,14 @@ async fn delete_field(State(app): State<App>, Path(id): Path<i64>) -> R {
     };
     let (table, cond) = scope(&conn, &tbl)?;
     let t = Target { table, cond, key: key.clone() };
-    // 清值与注销列绑在一起：只清了一半的话，列没了但值还挂在各行的 extra 里
+    // 清值、撤引用与注销列绑在一起：只做了一半的话，列没了但值还挂在各行的 extra 里
     let tx = conn.unchecked_transaction()?;
     rewrite_extra(&tx, &t, |obj| obj.remove(&key).is_some())?;
+    tx.execute(
+        "UPDATE collections SET subtitle=NULLIF(subtitle,?2), subline=NULLIF(subline,?2),
+         note_field=NULLIF(note_field,?2) WHERE key=?1",
+        params![tbl, key],
+    )?;
     tx.execute("DELETE FROM fields WHERE id=?1", [id])?;
     tx.commit()?;
     Ok(Json(json!({ "ok": true })))
@@ -462,6 +464,38 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use std::sync::{Arc, Mutex};
     use tower::util::ServiceExt;
+
+    /// 删掉最新一列再建列，新列不能拿回旧键：没刷新的页面里还挂着旧列的值，键一复用，
+    /// 它们就在新列里复活并被写回库。删列时库属性里指着它的引用一并撤掉。
+    #[tokio::test]
+    async fn a_deleted_column_never_hands_its_key_to_the_next_one() {
+        let db = Arc::new(Mutex::new(crate::db::fresh_in_memory().unwrap()));
+        let call = |req: Request<Body>| {
+            let app = router().with_state(App { db: db.clone(), data_dir: std::path::PathBuf::from(".") });
+            async move {
+                let resp = app.oneshot(req).await.unwrap();
+                let status = resp.status();
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+                (status, serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null))
+            }
+        };
+        let create = |name: &str| {
+            Request::post("/api/fields")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "tbl": "subs", "name": name }).to_string()))
+                .unwrap()
+        };
+        let (_, first) = call(create("甲")).await;
+        let key = first["key"].as_str().unwrap().to_string();
+        db.lock().unwrap().execute("UPDATE collections SET note_field=?1 WHERE key='subs'", [&key]).unwrap();
+        let del = Request::delete(format!("/api/fields/{}", first["id"])).body(Body::empty()).unwrap();
+        assert_eq!(call(del).await.0, StatusCode::OK);
+        let (_, second) = call(create("乙")).await;
+        assert_ne!(second["key"].as_str().unwrap(), key);
+        let note: Option<String> =
+            crate::db::one(&db.lock().unwrap(), "SELECT note_field FROM collections WHERE key='subs'", []);
+        assert_eq!(note, None, "库属性还指着已删的列");
+    }
 
     /// 列类型建后不可改是既定行为；带 `ftype` 的更新此前被静默忽略——既不改也不说，
     /// 调用方以为改成了。要 400 说明白，不能 200。

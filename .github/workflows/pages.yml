@@ -10,6 +10,7 @@ on:
       - 'site/**'
       - 'scripts/demo-seed.py'
       - 'scripts/build-pages.py'
+      - 'scripts/outdir.py'
       - '.github/workflows/pages.yml'
       - 'src/**'          # 快照由后端产出，引擎变了就得重导
       - 'migrations/**'
@@ -19,10 +20,9 @@ on:
     - cron: '0 3 1 * *'   # 每月 1 日重建，让演示里的到期天数保持新鲜
   workflow_dispatch:
 
+# 默认只读；发布用的写权限与 OIDC 令牌只给 deploy，跑编译与脚本的 build 拿不到
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # 同时只留一次部署，排队的旧任务直接让位
 concurrency:
@@ -32,6 +32,9 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: read           # configure-pages 要读站点配置
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
@@ -52,6 +55,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}

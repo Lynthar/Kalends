@@ -15,7 +15,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 use crate::api::{bad, extra_json, extra_str, f, i, missing, s, safe_name, ApiError, R};
-use crate::{engine, App};
+use crate::{db, engine, App};
 
 const ANCHORS: &[&str] = &["next", "last"];
 
@@ -632,10 +632,10 @@ fn seed_fields(
         };
         let options = if k == "status" { status_vocab } else { "[]" };
         conn.execute(
-            "INSERT INTO fields(tbl,key,name,ftype,src,shown,pos,builtin,options)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,1,?8)
+            "INSERT INTO fields(id,tbl,key,name,ftype,src,shown,pos,builtin,options)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,1,?9)
              ON CONFLICT(tbl,key) DO NOTHING",
-            params![key, k, name, ftype, src, shown, pos, options],
+            params![db::next_id(conn, "fields")?, key, k, name, ftype, src, shown, pos, options],
         )?;
     }
     for (n, f) in tpl.map_or(&[][..], |t| t.extra).iter().enumerate() {
@@ -648,10 +648,11 @@ fn seed_fields(
                 .collect::<Vec<_>>(),
         )?;
         conn.execute(
-            "INSERT INTO fields(tbl,key,name,ftype,src,shown,pos,builtin,options,config)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,0,?8,?9)
+            "INSERT INTO fields(id,tbl,key,name,ftype,src,shown,pos,builtin,options,config)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0,?9,?10)
              ON CONFLICT(tbl,key) DO NOTHING",
             params![
+                db::next_id(conn, "fields")?,
                 key,
                 f.key,
                 f.name,
@@ -729,10 +730,10 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
         let key = cur["key"].as_str().unwrap_or_default();
         for (k, fname, ftype, src, shown, fpos) in anchor_fields(&anchor) {
             tx.execute(
-                "INSERT INTO fields(tbl,key,name,ftype,src,shown,pos,builtin,options)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,1,'[]')
+                "INSERT INTO fields(id,tbl,key,name,ftype,src,shown,pos,builtin,options)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,1,'[]')
                  ON CONFLICT(tbl,key) DO NOTHING",
-                params![key, k, fname, ftype, src, shown, fpos],
+                params![db::next_id(&tx, "fields")?, key, k, fname, ftype, src, shown, fpos],
             )?;
         }
     }
@@ -1053,8 +1054,30 @@ fn check_parent(conn: &Connection, coll: i64, id: Option<i64>, parent: Option<i6
     Ok(())
 }
 
+/// extra 只收注册为 extra 列的键，外加这一行本来就挂着的（陈年孤儿键原样往返，旧行不会因此存不了）。
+/// 别的键多半来自没刷新的页面：那一列刚被删掉，写进去就成了界面上看不见、还会进导出的孤儿值。
+fn check_extra_keys(conn: &Connection, coll: i64, b: &Value, cur: Option<&Value>) -> anyhow::Result<()> {
+    let Some(extra) = b.get("extra").and_then(Value::as_object) else { return Ok(()) };
+    let mut stmt = conn.prepare(
+        "SELECT f.key FROM fields f JOIN collections c ON c.key=f.tbl WHERE c.id=?1 AND f.src='extra'",
+    )?;
+    let known: std::collections::HashSet<String> =
+        stmt.query_map([coll], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let held = cur.and_then(|c| c.get("extra")).and_then(Value::as_object);
+    let stray: Vec<&str> = extra
+        .keys()
+        .filter(|k| !known.contains(*k) && !held.is_some_and(|h| h.contains_key(*k)))
+        .map(String::as_str)
+        .collect();
+    if stray.is_empty() {
+        return Ok(());
+    }
+    Err(bad(format!("这些列已不存在：{}——页面可能没刷新，刷新后再改", stray.join("、"))))
+}
+
 pub fn insert_item(conn: &Connection, coll: i64, b: &Value) -> anyhow::Result<i64> {
     check_item_shape(b, None)?;
+    check_extra_keys(conn, coll, b, None)?;
     check_parent(conn, coll, None, i(b, "parent_id"))?;
     let mut b = b.clone();
     normalize_shaped_fields(conn, coll, &mut b)?;
@@ -1069,21 +1092,14 @@ pub fn insert_item(conn: &Connection, coll: i64, b: &Value) -> anyhow::Result<i6
     )?;
     vals.push(rusqlite::types::Value::from(pos));
     let tx = conn.unchecked_transaction()?;
+    let id = db::next_id(&tx, "items")?;
+    vals.insert(0, rusqlite::types::Value::from(id));
     tx.execute(
         &format!(
-            "INSERT INTO items(collection_id,{WRITE_COLS},pos) VALUES({})",
+            "INSERT INTO items(id,collection_id,{WRITE_COLS},pos) VALUES({})",
             (1..=vals.len()).map(|n| format!("?{n}")).collect::<Vec<_>>().join(",")
         ),
         rusqlite::params_from_iter(vals),
-    )?;
-    let id = tx.last_insert_rowid();
-    // 新条目可能捡到复用的号（items.id 不带 AUTOINCREMENT）：旧号的通知日志会让新条目
-    // 被判成"已发过"而静默漏提醒。台账是事实记录必须留（名字已随 0018 钉进那张表），
-    // 通知日志只为去重服务，新条目一落地就清掉它那份。
-    let key: String = tx.query_row("SELECT key FROM collections WHERE id=?1", [coll], |r| r.get(0))?;
-    tx.execute(
-        "DELETE FROM notification_log WHERE kind=?1 AND item_id=?2",
-        params![key, id],
     )?;
     tx.commit()?;
     Ok(id)
@@ -1107,6 +1123,7 @@ pub fn update_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<()> 
         .map_err(|_| missing("条目不存在"))?;
     check_item_shape(b, Some(&cur))?;
     let coll = cur["collection_id"].as_i64().unwrap_or_default();
+    check_extra_keys(conn, coll, b, Some(&cur))?;
     // 规范化**只作用在这次请求带来的键上**，所以要赶在合并之前：拿合并后的整行去过校验，
     // 等于让库里一个陈年坏值（接口或导入脚本造得出来）把这一行永久锁死——
     // 改任何别的字段都会被一个自己没碰过的字段 400 掉。
@@ -1281,8 +1298,8 @@ pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value
     // 记账与推日期是一件事：只落成一半的话，账记了而到期日没动，界面照旧显示逾期，
     // 而台账已经声称这笔付过了——"台账=事实"这条承诺就断在这里
     let tx = conn.unchecked_transaction()?;
-    // 名字当场钉进台账。只记 (kind, item_id) 的话，条目一删这笔账就没了名字，而 id 被
-    // 复用之后它还会挂到新条目名下——台账是事实记录，得能自证，不该跟着当前条目变。
+    // 名字当场钉进台账。只记 (kind, item_id) 的话，条目一删这笔账就没了名字——
+    // 台账是事实记录，得能自证，不该跟着当前条目变。
     tx.execute(
         "INSERT INTO renewal_ledger(kind,item_id,renewed_at,amount,currency,note,item_name,coll_name)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -1831,32 +1848,16 @@ mod tests {
     use super::*;
     use crate::db::one;
 
-    /// 新条目可能捡到复用的 id（items.id 不带 AUTOINCREMENT）：旧号的通知日志会让新条目
-    /// 被判成「已发过」而静默漏提醒。落地即清掉该 (kind,id) 的日志，别的条目的不许波及。
+    /// 删掉 id 最大的那条再新建，新条目不能捡回旧号：通知去重键、放锁期间的在途请求都拿 id
+    /// 当身份，旧号的记录（哪怕晚到）会让新条目被判成「已发过」而静默漏提醒。
     #[test]
-    fn a_new_item_wipes_notification_history_left_by_its_recycled_id() {
+    fn deleting_the_newest_item_does_not_hand_its_id_to_the_next_one() {
         let conn = crate::db::fresh_in_memory().unwrap();
         let coll = coll(&conn, "subs");
-        let old = insert_item(&conn, coll, &serde_json::json!({ "name": "Old" })).unwrap();
+        let old = insert_item(&conn, coll, &json!({ "name": "Old" })).unwrap();
         conn.execute("DELETE FROM items WHERE id=?1", [old]).unwrap();
-        let seed = |item: i64| {
-            conn.execute(
-                "INSERT INTO notification_log(kind,item_id,channel,threshold_days,due_date,ok)
-                 VALUES('subs',?1,'telegram',7,'2026-01-01',1)",
-                [item],
-            )
-            .unwrap();
-        };
-        seed(old);
-        seed(9999);
-        let new = insert_item(&conn, coll, &serde_json::json!({ "name": "New" })).unwrap();
-        assert_eq!(new, old, "SQLite 没复用 id，测试前提没立住");
-        let count = |item: i64| -> i64 {
-            conn.query_row("SELECT count(*) FROM notification_log WHERE item_id=?1", [item], |r| r.get(0))
-                .unwrap()
-        };
-        assert_eq!(count(new), 0, "复用 id 的旧日志必须清干净");
-        assert_eq!(count(9999), 1, "别的条目的日志不能被波及");
+        let new = insert_item(&conn, coll, &json!({ "name": "New" })).unwrap();
+        assert!(new > old, "{old} → {new}");
     }
 
     /// 日期与币种：界面挡得住（原生 date 控件、币种下拉），接口与导入脚本挡不住，
@@ -1930,7 +1931,7 @@ mod tests {
         let id = insert_item(
             &conn,
             coll,
-            &json!({ "name": "类型校验", "price": 12.5, "currency": "USD", "extra": { "a": "甲" } }),
+            &json!({ "name": "类型校验", "price": 12.5, "currency": "USD", "extra": { "category": "甲" } }),
         )
         .unwrap();
         for bad_body in [
@@ -1958,6 +1959,23 @@ mod tests {
             })
             .unwrap();
         assert_eq!((price, extra), (None, None));
+    }
+
+    /// extra 只收注册过的列键：没刷新的页面会把刚删掉的那列连键带值写回来，成了界面看不见的孤儿值。
+    /// 这一行本来就挂着的键原样往返——不能让一条陈年孤儿键把整行锁死。
+    #[test]
+    fn extra_takes_registered_keys_and_the_ones_the_row_already_holds() {
+        let conn = crate::db::fresh_in_memory().unwrap();
+        let coll = coll(&conn, "subs");
+        let err = insert_item(&conn, coll, &json!({ "name": "新", "extra": { "c999": "x" } })).unwrap_err();
+        assert!(err.to_string().contains("c999"), "{err}");
+        let id = insert_item(&conn, coll, &json!({ "name": "旧行", "extra": { "category": "AI" } })).unwrap();
+        conn.execute(r#"UPDATE items SET extra='{"category":"AI","c7":"陈年"}' WHERE id=?1"#, [id]).unwrap();
+        update_item(&conn, id, &json!({ "extra": { "category": "Tools", "c7": "陈年" } })).unwrap();
+        let more = json!({ "extra": { "category": "Tools", "c7": "陈年", "c8": "新孤儿" } });
+        assert!(update_item(&conn, id, &more).is_err());
+        let extra: String = crate::db::one(&conn, "SELECT extra FROM items WHERE id=?1", [id]);
+        assert_eq!(serde_json::from_str::<Value>(&extra).unwrap(), json!({ "category": "Tools", "c7": "陈年" }));
     }
 
     /// logo 不是通用可写列：文件名由服务端生成、删条目按行内名字删文件——放开它

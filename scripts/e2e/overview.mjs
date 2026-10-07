@@ -111,6 +111,51 @@ export default async function (t) {
     await evl(`document.querySelector('#up-undated').hidden`) === true);
 
 
+  /* 17.25. 点名不能被折叠藏住：折叠状态记在本机、下次开页还是折着的，折起来就看不见的点名
+     等于没有。状态不上时间线（新建默认的 Planned）而有到期日的条目，同样要点名。 */
+  await patch(`/api/items/${undRow.id}`, { next_renewal: '' });
+  const planned = await mk('subs', { name: '计划中的订阅', next_renewal: day(20) }); // 不带 status＝新建默认
+  await evl(`loadAll()`);
+  await sleep(900);
+  await evl(`if (!state.upFolded) toggleUpFold()`);
+  await sleep(700);
+  // 用命中测试判「看得见」：折叠容器里的元素 hidden 仍是 false、盒子也有高度，只是被裁掉了
+  const seenNotes = await evl(`(() => {
+    const seen = sel => {
+      const el = document.querySelector(sel);
+      if (el.hidden) return '';
+      el.scrollIntoView({ block: 'center' });
+      const r = el.getBoundingClientRect();
+      return el.contains(document.elementFromPoint(r.left + Math.min(20, r.width / 2), r.top + r.height / 2))
+        ? el.textContent : '';
+    };
+    return { und: seen('#up-undated'), off: seen('#up-off') };
+  })()`);
+  check('折叠后仍看得见「算不出到期日」的点名', seenNotes.und.includes(undRow.name), JSON.stringify(seenNotes));
+  check('有到期日的 Planned 条目被点名，并说出它的状态',
+    seenNotes.off.includes('计划中的订阅') && seenNotes.off.includes('Planned'), JSON.stringify(seenNotes));
+  await shot('11b-folded-notes');
+  await evl(`toggleUpFold()`);
+  await sleep(700);
+  // 时间线空着而下面有点名时，不能同屏再说「诸项安然」
+  const calm = await evl(`(() => {
+    const save = state.overview.upcoming;
+    state.overview.upcoming = [];
+    renderUpcoming();
+    const shown = !document.querySelector('#up-empty').hidden;
+    state.overview.upcoming = save;
+    renderUpcoming();
+    return shown;
+  })()`);
+  check('有点名时不显示「诸项安然」', calm === false);
+  await patch(`/api/items/${undRow.id}`, undRow);
+  await raw(`/api/items/${planned.id}`, 'DELETE');
+  await evl(`loadAll()`);
+  await sleep(900);
+  check('改回之后两条点名都消失',
+    await evl(`document.querySelector('#up-undated').hidden && document.querySelector('#up-off').hidden`) === true);
+
+
   // 这一段拿一条 USD 行做「存的仍是原币」的对照
   const fx_curRow = (await items('subs')).find(r => r.currency === 'USD');
   /* 17.21. 统一币种显示：折算只在呈现层，原币一律不动。 */

@@ -352,6 +352,34 @@ pub fn undated(conn: &Connection) -> Result<Vec<Value>> {
     Ok(out)
 }
 
+/// 状态不上时间线（如 Planned）、却有一个还没过的到期日的条目，按到期日升序：时间线按语义
+/// 跳过它们，界面得点名，否则表尾「＋ 新建」出来、填了日期的条目在首页上无影无踪。
+/// 过了期的不点名，多半是早已结束的。
+pub fn off_timeline(conn: &Connection) -> Result<Vec<Value>> {
+    let t = today();
+    let sems = sem_map(conn)?;
+    let mut items: Vec<(NaiveDate, Value)> = Vec::new();
+    for r in rows(conn)? {
+        if sem_of(&sems, &r.key, &r.status).timeline {
+            continue;
+        }
+        let Some(due) = r.due().filter(|d| *d >= t) else { continue };
+        items.push((
+            due,
+            json!({
+                "kind": r.key,
+                "id": r.id,
+                "name": r.title(),
+                "status": r.status,
+                "due": due.to_string(),
+                "days_left": (due - t).num_days(),
+            }),
+        ));
+    }
+    items.sort_by_key(|(d, _)| *d);
+    Ok(items.into_iter().map(|(_, v)| v).collect())
+}
+
 /// 合并到期时间线：所有库里状态语义为"上时间线"的条目，按到期日升序。
 pub fn upcoming(conn: &Connection) -> Result<Vec<Value>> {
     let t = today();
@@ -802,6 +830,23 @@ mod tests {
         assert_eq!(list[0]["missing"], json!("下次续费日"));
         assert_eq!(list[1]["missing"], json!("周期"));
         assert_eq!(list[1]["kind"], json!("sims"));
+    }
+
+    /// 状态不上时间线、到期日还没过的条目要被点名（按到期日排）；上时间线的、没日期的、
+    /// 已过期的都不算。
+    #[test]
+    fn off_timeline_names_items_with_a_coming_due_date_that_the_timeline_skips() {
+        let conn = seeded();
+        let on = |days: u64| (today() + chrono::Days::new(days)).to_string();
+        add(&conn, "subs", &json!({ "name": "计划中", "status": "Planned", "next_renewal": on(20) }));
+        add(&conn, "subs", &json!({ "name": "今天", "status": "Deferred", "next_renewal": on(0) }));
+        add(&conn, "subs", &json!({ "name": "已结束", "status": "Ended", "next_renewal": "2020-01-01" }));
+        add(&conn, "subs", &json!({ "name": "无日期", "status": "Planned" }));
+        add(&conn, "subs", &json!({ "name": "在订", "status": "Active", "next_renewal": on(5) }));
+        let list = off_timeline(&conn).unwrap();
+        assert_eq!(names(&list), ["今天", "计划中"]);
+        assert_eq!(list[1]["status"], json!("Planned"));
+        assert_eq!(list[1]["days_left"], json!(20));
     }
 
     /// 支出：只累加金额与币种同时在场、周期可折算的计支出条目，分币种给月 / 年两个数

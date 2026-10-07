@@ -108,6 +108,13 @@ async function rebuildHead(tab) {
   renderColl(tab);
 }
 
+// 删列之后行也得重取：服务端在同一事务里清掉了各行的值，本地行留着旧值的话，
+// 下一次编辑会把它连同已删的键写回去（服务端以「这些列已不存在」拒掉）
+async function reloadAfterColumnDrop(tab) {
+  await rebuildHead(tab);
+  await loadAll();
+}
+
 
 
 const filterActive = f => Array.isArray(f)

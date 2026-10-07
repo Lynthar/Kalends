@@ -107,8 +107,8 @@ export default async function (t) {
 
   /* 17.31. 本轮修的几处，各补一条落在缺陷真会发作的那一刻的断言。 */
 
-  // ① 台账要能自证。items.id 没带 AUTOINCREMENT，删掉最后一条再新建就会捡回同一个号，
-  //    而台账从前是按 (kind, item_id) 回查当前条目名的——旧账于是改口叫了新条目的名字。
+  // ① 台账要能自证：条目删了，那笔账仍要说得出是谁；删掉最后一条再新建，新条目也不能
+  //    捡回旧号——按 (kind, item_id) 回查名字的老账会改口叫新条目的名字。
   const nx_coll = (await (await fetch(APP + 'api/collections')).json()).find(c => c.key === 'subs');
   const nx_item = await mk('subs', {
     name: '台账身份', status: 'Active', cycle: 'monthly', next_renewal: day(5), price: 9, currency: 'USD',
@@ -123,7 +123,7 @@ export default async function (t) {
   await fetch(`${APP}api/items/${nx_item.id}`, { method: 'DELETE' });
   check('条目删掉之后，那笔账仍然说得出是谁', (await nx_ledger())[0]?.item_name === '台账身份');
   const nx_new = await mk('subs', { name: '后来的条目', status: 'Active' });
-  check('新条目确实捡到了同一个 id（这正是问题的前提）', nx_new.id === nx_item.id, `${nx_item.id} → ${nx_new.id}`);
+  check('新条目不捡回删掉的那个 id', nx_new.id !== nx_item.id, `${nx_item.id} → ${nx_new.id}`);
   check('旧账没有跟着改口叫新条目的名字', (await nx_ledger())[0]?.item_name === '台账身份');
 
   // ② 同一秒里传第二张图标：文件名带的是秒级时间戳，新旧同名，
@@ -163,12 +163,12 @@ export default async function (t) {
      「出现即写入」的协议下那是一次静默清空——价格传成字符串，响应 200，价格却成 NULL。
      logo/cover 另有归属防线：文件名由服务端生成、删条目按行内名字删文件，
      放开通用写入就能把 A 的文件名写进 B、删 B 连 A 的图一起删。 */
-  const tv_item = await mk('subs', { name: '类型契约', status: 'Active', price: 12.5, currency: 'USD', extra: { note: '甲' } });
+  const tv_item = await mk('subs', { name: '类型契约', status: 'Active', price: 12.5, currency: 'USD', extra: { category: '甲' } });
   check('PATCH price 传字符串 → 400', (await raw(`/api/items/${tv_item.id}`, 'PATCH', { price: '不是数字' })).status === 400);
   check('PATCH extra 传数组 → 400', (await raw(`/api/items/${tv_item.id}`, 'PATCH', { extra: ['不是对象'] })).status === 400);
   check('PATCH name 传数字 → 400', (await raw(`/api/items/${tv_item.id}`, 'PATCH', { name: 123 })).status === 400);
   const tv_after = (await (await fetch(APP + 'api/collections/subs/items')).json()).find(x => x.id === tv_item.id);
-  check('被拒的请求一字未动', tv_after.price === 12.5 && tv_after.extra?.note === '甲' && tv_after.name === '类型契约',
+  check('被拒的请求一字未动', tv_after.price === 12.5 && tv_after.extra?.category === '甲' && tv_after.name === '类型契约',
     JSON.stringify([tv_after.price, tv_after.extra, tv_after.name]));
   check('PATCH 带非空 logo → 400', (await raw(`/api/items/${tv_item.id}`, 'PATCH', { logo: 'item-1-1.png' })).status === 400);
   check('整行回读的 logo:null 不挡道', (await raw(`/api/items/${tv_item.id}`, 'PATCH', { logo: null, notes: '行' })).ok);

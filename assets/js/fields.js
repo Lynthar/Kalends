@@ -356,7 +356,7 @@ function openHeadMenu(tab, th) {
     items.push({ ic: '✎', t: '重命名列', act: () => openRenameColPop(tab, k, th), keepPop: true });
     items.push({ ic: '✕', t: '删除列', act: async () => {
       if (!confirm(`删除列「${th.dataset.label}」？该列在所有行的值将被清除，不可撤销。`)) return;
-      if (await fieldCall(`/api/fields/${fid}`, 'DELETE', {})) await rebuildHead(tab);
+      if (await fieldCall(`/api/fields/${fid}`, 'DELETE', {})) await reloadAfterColumnDrop(tab);
     } });
   }
   popEl = document.createElement('div');

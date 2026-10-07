@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection};
 use serde_json::Value;
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::{db, engine, settings, Db};
 
@@ -185,7 +185,15 @@ pub async fn send_telegram(cfg: &TelegramCfg, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// 一次 SMTP 会话的总截止。lettre 异步传输的 timeout 只管 TCP 连接，连上之后对端不说话就一直等，
+/// 而调度器是顺序 await 的：卡住一封，其后所有渠道的提醒一起停。
+const SMTP_BUDGET: std::time::Duration = std::time::Duration::from_mins(1);
+
 pub async fn send_email(cfg: &EmailCfg, subject: &str, body: &str) -> Result<()> {
+    send_email_within(cfg, subject, body, SMTP_BUDGET).await
+}
+
+async fn send_email_within(cfg: &EmailCfg, subject: &str, body: &str, budget: std::time::Duration) -> Result<()> {
     use lettre::message::header::ContentType;
     use lettre::message::Mailbox;
     use lettre::transport::smtp::authentication::Credentials;
@@ -211,8 +219,10 @@ pub async fn send_email(cfg: &EmailCfg, subject: &str, body: &str) -> Result<()>
             .credentials(Credentials::new(cfg.username.clone(), cfg.password.clone()))
             .build()
     };
-    transport.send(msg).await?;
-    Ok(())
+    match tokio::time::timeout(budget, transport.send(msg)).await {
+        Ok(sent) => sent.map(drop).map_err(Into::into),
+        Err(_) => Err(anyhow!("邮件服务器连上了，但在时限内没有走完一次会话")),
+    }
 }
 
 /// 单条到期项的通知文案。
@@ -297,7 +307,9 @@ type LogKey = (String, Option<i64>, String, Option<i64>, Channel);
 /// 挡着所有 HTTP 请求的单连接锁里；载入也让决策成为纯函数。
 #[derive(Default)]
 struct SentLog {
-    items: HashSet<(String, i64, String, i64, Channel)>,
+    /// 逐项提醒只记每个 (kind, id, due, 渠道) 发过的最紧一档：阈值会改，按档精确去重的话
+    /// 每加进一个更宽的值，已提醒过的条目（含逾期项）就会按它再发一遍。
+    items: HashMap<(String, i64, String, Channel), i64>,
     digests: HashSet<(String, Channel)>,
     holds: HashSet<LogKey>,
 }
@@ -330,9 +342,7 @@ impl SentLog {
                 ("digest", _, _) => {
                     out.digests.insert((due, ch));
                 }
-                (_, Some(id), Some(t)) => {
-                    out.items.insert((kind, id, due, t, ch));
-                }
+                (_, Some(id), Some(t)) => out.record_item(kind, id, due, t, ch),
                 _ => {}
             }
         }
@@ -366,9 +376,16 @@ impl SentLog {
         Ok(out)
     }
 
-    fn has_item(&self, kind: &str, id: i64, due: &str, threshold: i64, ch: Channel) -> bool {
+    fn record_item(&mut self, kind: String, id: i64, due: String, threshold: i64, ch: Channel) {
+        let tightest = self.items.entry((kind, id, due, ch)).or_insert(threshold);
+        *tightest = (*tightest).min(threshold);
+    }
+
+    /// 这一档还没被已发的提醒覆盖：只有比已发最紧档更紧的才算。
+    fn owes(&self, kind: &str, id: i64, due: &str, threshold: i64, ch: Channel) -> bool {
         self.items
-            .contains(&(kind.to_string(), id, due.to_string(), threshold, ch))
+            .get(&(kind.to_string(), id, due.to_string(), ch))
+            .is_none_or(|tightest| threshold < *tightest)
     }
 
     fn has_digest(&self, day: &str, ch: Channel) -> bool {
@@ -424,7 +441,7 @@ struct TickInput<'a> {
 
 /// 决定这一轮要发什么。三条反直觉语义都在这里、各有单测钉着：① muted 不发逐项提醒
 /// 但**仍进摘要**（定案：摘要＝时间线全景，别"顺手补齐"）；② 补发折叠成一条（只发
-/// 最紧迫档，其余记 covered）；③ 逾期项只提醒一次（due 不变去重键就不变，此后靠摘要）。
+/// 最紧迫档，其余记 covered）；③ 逾期项只提醒一次（同一 due 下只有比已发最紧档更紧的档才算新提醒）。
 fn plan(inp: &TickInput<'_>) -> Vec<Pending> {
     let mut out: Vec<Pending> = Vec::new();
     for &ch in inp.channels {
@@ -441,7 +458,7 @@ fn plan(inp: &TickInput<'_>) -> Vec<Pending> {
                 .iter()
                 .copied()
                 .filter(|t| days <= *t)
-                .filter(|t| !inp.sent.has_item(&kind, id, &due, *t, ch))
+                .filter(|t| inp.sent.owes(&kind, id, &due, *t, ch))
                 .collect();
             if qualifying.is_empty() {
                 continue;
@@ -645,7 +662,7 @@ mod tests {
     /// 把「已经发过/已折叠」记进去。`covered` 行落库时同样是 `ok=1`，所以两者不分。
     fn mark(log: &mut SentLog, id: i64, due: &str, thresholds: &[i64], ch: Channel) {
         for t in thresholds {
-            log.items.insert(("subs".into(), id, due.into(), *t, ch));
+            log.record_item("subs".into(), id, due.into(), *t, ch);
         }
     }
 
@@ -683,6 +700,55 @@ mod tests {
         let mut sent = SentLog::default();
         mark(&mut sent, 1, "2026-08-10", &TH, Channel::Telegram);
         assert!(plan_at("08:00", "2026-08-16", &[up(1, -6, "2026-08-10")], &sent, TG).is_empty());
+    }
+
+    fn plan_with(thresholds: &[i64], today: &str, ups: &[Value], sent: &SentLog) -> Vec<Pending> {
+        plan(&TickInput {
+            now_hhmm: "08:00",
+            today,
+            digest_time: "09:00",
+            thresholds,
+            window: 14,
+            channels: TG,
+            ups,
+            sent,
+        })
+    }
+
+    /// 阈值改了、加进一个比已发档更宽的值：同一个 due 下发过的提醒不能再按新档发一遍。
+    /// 逾期项尤其如此——每加一档，所有逾期项各重发一次。
+    #[test]
+    fn a_looser_threshold_added_later_does_not_repeat_a_reminder() {
+        let mut sent = SentLog::default();
+        mark(&mut sent, 1, "2026-08-10", &TH, Channel::Telegram);
+        mark(&mut sent, 2, "2026-08-18", &[3, 7, 14], Channel::Telegram);
+        let ups = [up(1, -5, "2026-08-10"), up(2, 3, "2026-08-18")];
+        for th in [&[30, 14, 7, 3, 1, 0][..], &[14, 7, 5, 3, 2, 1, 0]] {
+            let p = plan_with(th, "2026-08-15", &ups, &sent);
+            assert!(p.is_empty(), "阈值 {th:?} 下重发了：{:?}", p.iter().map(|x| (x.item_id, x.threshold)).collect::<Vec<_>>());
+        }
+    }
+
+    /// 反过来，比已发最紧档更紧的新档是一次正当的新提醒：剩 3 天、只发过 7 档时加进 3 档，要发。
+    #[test]
+    fn a_tighter_threshold_added_later_is_a_new_reminder() {
+        let mut sent = SentLog::default();
+        mark(&mut sent, 1, "2026-08-18", &[7, 14], Channel::Telegram);
+        let p = plan_with(&[14, 7, 3], "2026-08-15", &[up(1, 3, "2026-08-18")], &sent);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].threshold, Some(3));
+    }
+
+    /// 只发过提前提醒、随后停机越过了到期日：恢复后欠的到期档要补一条（折叠成一条），
+    /// 不能因为「这个 due 下发过」就整条跳过。
+    #[test]
+    fn downtime_past_the_due_date_still_owes_the_due_day_reminder() {
+        let mut sent = SentLog::default();
+        mark(&mut sent, 1, "2026-08-10", &[7, 14], Channel::Telegram);
+        let p = plan_at("08:00", "2026-08-15", &[up(1, -5, "2026-08-10")], &sent, TG);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].threshold, Some(0));
+        assert_eq!(p[0].covered, vec![1, 3]);
     }
 
     #[test]
@@ -948,6 +1014,59 @@ mod tests {
         assert_eq!(count("SELECT count(*) FROM notification_log"), 2);
         assert_eq!(count("SELECT count(*) FROM notification_log WHERE ok=0"), 1);
         assert_eq!(count("SELECT count(*) FROM notification_log WHERE ok=1"), 1);
+    }
+
+    /// 对端接受连接却一言不发（不给问候）时，发送要在时限内以失败收场，不能一直等下去。
+    #[tokio::test]
+    async fn an_smtp_peer_that_never_speaks_fails_within_the_budget() {
+        // 只监听不 accept：内核照样完成握手，对端永远不会写出问候
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let cfg = EmailCfg {
+            host: "127.0.0.1".into(),
+            port: listener.local_addr().unwrap().port(),
+            starttls: true,
+            username: String::new(),
+            password: String::new(),
+            from: "a@example.com".into(),
+            to: "b@example.com".into(),
+        };
+        let budget = std::time::Duration::from_millis(300);
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(5), send_email_within(&cfg, "s", "b", budget)).await;
+        let err = sent.expect("5 秒还没返回：会话没有总截止").unwrap_err();
+        assert!(err.to_string().contains("时限"), "{err}");
+    }
+
+    /// 旧条目的提醒还在路上时它被删了、同库新建了一条同 due 的：旧请求晚到落下的日志
+    /// 不能让新条目被判成「已发过」——新条目照常要去发。
+    #[tokio::test]
+    async fn a_late_log_row_for_a_deleted_item_does_not_silence_its_successor() {
+        let conn = crate::db::fresh_in_memory().unwrap();
+        // 代理指向一个刚释放的回环端口：发送必败且不出网，落下的失败行就是「试过了」的证据
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES('notify.telegram',?1)",
+            [format!(r#"{{"enabled":true,"bot_token":"t","chat_id":"1","proxy":"http://127.0.0.1:{port}"}}"#)],
+        )
+        .unwrap();
+        let coll = crate::db::collection_id(&conn, "subs");
+        let due = (engine::today() + chrono::Days::new(3)).to_string();
+        let item = |name: &str| json!({ "name": name, "status": "Active", "cycle": "monthly", "next_renewal": due });
+        let old = crate::collections::insert_item(&conn, coll, &item("旧")).unwrap();
+        conn.execute("DELETE FROM items WHERE id=?1", [old]).unwrap();
+        let new = crate::collections::insert_item(&conn, coll, &item("新")).unwrap();
+        conn.execute(
+            "INSERT INTO notification_log(kind,item_id,channel,threshold_days,due_date,ok)
+             VALUES('subs',?1,'telegram',3,?2,1)",
+            params![old, due],
+        )
+        .unwrap();
+        let db: crate::Db = std::sync::Arc::new(std::sync::Mutex::new(conn));
+        tick(&db).await.unwrap();
+        let conn = db.lock().unwrap();
+        let tried: i64 = conn
+            .query_row("SELECT count(*) FROM notification_log WHERE item_id=?1 AND ok=0", [new], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tried, 1, "新条目没去发（旧 id {old}，新 id {new}）");
     }
 
     /// 渠道坏着时连跑三轮只能落一条失败行：第一次失败后进入退避，后两轮不再试。

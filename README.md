@@ -84,9 +84,10 @@ first — cargo has problems on SMB.
 KALENDS_DATA=./data KALENDS_ADDR=127.0.0.1:4180 TZ=Asia/Shanghai ./kalends
 ```
 
-Two other modes:
+Other modes (any other argument is refused with exit code 2, without touching the data directory):
 
 ```bash
+kalends --version
 kalends --health                                    # for a container healthcheck
 kalends restore --from backups/snapshot-2026-08-25.db --to ./data-new
 ```
