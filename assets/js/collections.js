@@ -11,8 +11,8 @@ const fieldsOf = key => state.fields
 // **表头与行必须读同一份字段集**——兜底只写在其中一处就会表头少一列、行多一格，整表错位。
 const NAME_FIELD = { key: 'name', name: '名称', ftype: 'text', src: 'col', shown: true };
 function shownFields(key) {
-  const fs = fieldsOf(key).filter(f => f.shown || f.key === 'name');
-  return fs.some(f => f.key === 'name') ? fs : [NAME_FIELD, ...fs];
+  const fs = fieldsOf(key).filter(f => f.shown || f.key === entryKey(key));
+  return fs.some(f => f.key === entryKey(key)) ? fs : [NAME_FIELD, ...fs];
 }
 
 // 状态语义：以库的状态词表标记为准，读不到就回落到内置六值的既有含义（与后端 status_sem 同源）
@@ -192,6 +192,9 @@ function syncColls() {
   });
   // 当前标签指向一个不存在的库（删空之后又建了一个）：落到第一个，否则新表建好却是隐藏的
   if (colls().length && !keys.has(state.tab)) switchTab(colls()[0].key);
+  // 一个库都不剩时 ⚙ 没有可设置的对象，点了也没反应：藏起来，换一句引导
+  $('#coll-settings').hidden = !colls().length;
+  $('#coll-none').hidden = colls().length > 0;
   saveViews();
 }
 
@@ -237,6 +240,7 @@ function renderColl(key) {
   setEmpty(`#${key}-empty`, rows.length, all.length);
   const fields = shownFields(key); // 名称格的兜底在 shownFields 里，表头读的是同一份
   const cycleShown = fields.some(f => f.key === 'cycle');
+  const entry = entryKey(key);
   const logoOf = r => r.logo || (r.parent_id && byId[r.parent_id]?.logo) || '';
 
   const emit = (it, depth) => {
@@ -251,8 +255,8 @@ function renderColl(key) {
     if (depth) tr.classList.add('subrow');
     const tds = fields.map(f => {
       const v = fieldVal(f, it);
-      if (f.key === 'name') {
-        return `<td>${hasKids ? `<button class="tgl" data-tgl type="button" title="折叠 / 展开子行">${collapsed.has(it.id) ? '▸' : '▾'}</button>` : ''}${(!depth && parent) ? `<span class="sub-parent">${esc(parent.name)} ↳ </span>` : ''}${logoOf(it) ? `<img class="slogo" src="/logos/${esc(logoOf(it))}" alt="" loading="lazy">` : ''}${nameCell(it.name)}${safeUrl(it.url) ? ` <a class="btn link" href="${esc(safeUrl(it.url))}" target="_blank" rel="noreferrer">↗</a>` : ''}<button class="rowopen" data-open type="button" title="打开详情">⤢</button>${sub ? `<div class="muted" style="font-size:.75rem">${subTel ? `<a class="tel" href="${esc(telHref(sub))}">${esc(sub)}</a>${telSuspect(sub) ? '<span class="tel-warn" title="位数偏少，可能只填了国家码">?</span>' : ''}` : esc(sub)}</div>` : ''}</td>`;
+      if (f.key === entry) {
+        return `<td>${hasKids ? `<button class="tgl" data-tgl type="button" title="折叠 / 展开子行">${collapsed.has(it.id) ? '▸' : '▾'}</button>` : ''}${(!depth && parent) ? `<span class="sub-parent">${esc(parent.name)} ↳ </span>` : ''}${logoOf(it) ? `<img class="slogo" src="/logos/${esc(logoOf(it))}" alt="" loading="lazy">` : ''}${nameCell(it.name)}${safeUrl(it.url) ? ` <a class="btn link" href="${esc(safeUrl(it.url))}" target="_blank" rel="noreferrer">↗</a>` : ''}<button class="rowopen" data-open type="button" title="打开详情">⤢</button>${sub ? `<div class="muted" style="font-size:.75rem">${subTel ? TYPES.tel.cell(sub) : esc(sub)}</div>` : ''}</td>`;
       }
       if (f.key === 'left') return `<td class="wide">${leftBar(it)}</td>`;
       if (f.key === 'price') {
@@ -304,6 +308,7 @@ function itemDialog() {
   if (d) return d;
   d = document.createElement('dialog');
   d.id = 'dlg-item';
+  d.setAttribute('aria-labelledby', 'dlg-item-title');
   d.className = 'sheet';
   d.innerHTML = `<form id="form-item" method="dialog">
       <h3 id="dlg-item-title">条目</h3>
@@ -415,7 +420,8 @@ function initSoptAdd(inp, tr = v => v) {
 /**
  * @param {object} [o]
  * @param {string} [o.focus] 打开后聚焦的字段键
- * @param {string} [o.note] 表单顶上的一行说明。toast 盖不过模态对话框，要对着表单说的话只能写在这里
+ * @param {string} [o.note] 表单顶上的一行说明，表单开着就一直在。开框前发的 toast 压在框下面、
+ *   几秒就消失，要用户照着填完表单的话写在这里
  */
 function openItemDialog(key, it, { focus, note } = {}) {
   const c = collOf(key);
@@ -672,7 +678,9 @@ function collDialog() {
   if (d) return d;
   d = document.createElement('dialog');
   d.id = 'dlg-coll';
+  d.setAttribute('aria-labelledby', 'dlg-coll-title');
   d.className = 'sheet';
+  // 图标框的 maxlength 按 UTF-16 码元计：一个 ZWJ 组合 emoji（如一家四口）就占 11 个
   d.innerHTML = `<form id="form-coll" method="dialog">
       <h3 id="dlg-coll-title">新建库</h3>
       <div class="fgrid">
@@ -681,7 +689,7 @@ function collDialog() {
           <div class="muted" id="coll-tpl-desc" style="font-size:.72rem;font-weight:500"></div>
         </div>
         <label><span>库名</span><input data-c="name" required></label>
-        <label><span>图标（emoji，可空）</span><input data-c="icon" maxlength="4"></label>
+        <label><span>图标（emoji，可空）</span><input data-c="icon" maxlength="16"></label>
         <label><span>到期模型</span><select data-c="due_anchor">
           <option value="last">上次续费 + 周期</option>
           <option value="next">直接记下次到期日</option>
@@ -769,7 +777,7 @@ function fillCollFields(c) {
     row.className = 'opt-row';
     row.draggable = true; // ↑↓ 是拖不了的场合（触摸屏）的同功能替代
     // 名称列不给关：它是行的唯一入口，且关掉会让表头与行的字段集对不上
-    const locked = f.key === 'name';
+    const locked = f.key === entryKey(c.key);
     row.innerHTML = `<span class="fp-v">${esc(f.name || f.key)}</span>
       <button type="button" class="btn link" data-up title="上移">↑</button>
       <button type="button" class="btn link" data-dn title="下移">↓</button>

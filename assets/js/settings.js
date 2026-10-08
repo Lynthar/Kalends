@@ -1,14 +1,15 @@
 /* Kalends 前端 · settings.js —— 设置页：通知、汇率、ICS、台账、备份、PIN。
    加载方式与作用域约定见 core.js 头注。 */
 
-// 币种折算栏的候选＝汇率表里有的 ∪ 数据里用过的（后者可能没报价，仍列出并如实标注）
+// 币种折算栏的候选＝汇率表里有的 ∪ 数据里用过的（后者可能没报价，仍列出并如实标注）∪ 现值：
+// 现值不在候选里时下拉会落到「不折算」，随便保存一次别的设置就把它清掉了
 function syncFxPanel() {
   const fx = state.fx || { rates: {}, live: [] };
-  const used = new Set();
+  const cur = fxCode(state.settings['fx.display']);
+  const used = new Set(cur ? [cur] : []);
   for (const c of colls()) for (const r of state[c.key] || []) if (r.currency) used.add(fxCode(r.currency));
   const codes = [...new Set([...Object.keys(fx.rates || {}), ...used])].sort();
   const sel = $('#fx-display');
-  const cur = fxCode(state.settings['fx.display']);
   sel.innerHTML = '<option value="">不折算（分币种显示）</option>'
     + codes.map(c => `<option value="${esc(c)}"${c === cur ? ' selected' : ''}>${esc(c)}${fx.rates[c] ? '' : '（无汇率）'}</option>`).join('');
   $('#fx-status').textContent = !fx.baseline_period
@@ -40,7 +41,8 @@ function openSettings() {
   const f = $('#form-settings').elements;
   f.pin.value = st['auth.pin'] || '';
   f.meta_proxy.value = st['meta.proxy'] || '';
-  f.thresholds.placeholder = JSON.parse(D['notify.thresholds']).join(',');
+  // 占位串只能是举例：写成默认列表的样子，就和标签上的「留空＝只发每日摘要」打架
+  f.thresholds.placeholder = `如 ${JSON.parse(D['notify.thresholds']).join(',')}`;
   const broken = [];
   try {
     const th = JSON.parse(st['notify.thresholds'] || '[]');
@@ -71,9 +73,12 @@ function openSettings() {
   // settingsBody() 就用这些空值把凭据覆盖掉。停掉保存并说出来，别让它悄悄发生
   f.tg_enabled.closest('fieldset').disabled = broken.includes('Telegram 配置');
   f.em_enabled.closest('fieldset').disabled = broken.includes('邮件配置');
-  // 阈值同理：表单显示成空、读侧却在按默认值发，一保存就写成 []，逐项提醒静默关掉
+  // 阈值同理：表单显示成空、读侧却在按默认值发，一保存就写成 []，逐项提醒静默关掉。
+  // 原因写在框顶、框开着就一直在：toast 几秒就没了，停用的保存键却还停着
   $('#form-settings').querySelector('button[type=submit]').disabled = broken.length > 0;
-  if (broken.length) toast(`存着的${broken.join('、')}读不出来，先别保存：保存会用表单里的空值盖掉它`, true);
+  $('#settings-note').hidden = !broken.length;
+  $('#settings-note').textContent = broken.length
+    ? `存着的${broken.join('、')}读不出来，保存已停用：保存会用表单里的空值盖掉它` : '';
   $('#dlg-settings').showModal();
   loadLedger();
   loadNotifyLog(); // 不挡对话框，读回来再填
@@ -126,7 +131,8 @@ async function loadNotifyLog() {
       const div = document.createElement('div');
       div.className = 'lg-row';
       const what = r.kind === 'digest' ? '每日摘要' : esc(r.item_name || `#${r.item_id}`);
-      const when = r.threshold_days == null ? '' : (r.threshold_days === 0 ? '当天' : `提前${r.threshold_days}天`);
+      const when = r.threshold_days == null ? '' : r.threshold_days > 0 ? `提前${r.threshold_days}天`
+        : r.due_date < localDay(r.sent_at) ? '逾期' : '当天'; // 0 档也管逾期项，逾期只提醒一次
       const status = r.ok ? '<span class="lg-a">已发</span>' : '<span class="lg-a lg-bad">失败</span>';
       // 失败原因另起一行写出来：只放在悬停提示里的话，触屏与键盘都读不到，而排查第一步就靠它
       const why = r.ok || !r.error ? '' : `<small class="lg-why">${esc(r.error)}</small>`;
@@ -142,11 +148,17 @@ async function loadNotifyLog() {
 }
 
 // sent_at 是 SQLite 的 UTC datetime；按本地时区显示，解析不动就原样给
+const sentDate = s => new Date(String(s).replace(' ', 'T') + 'Z');
+const pad2 = n => String(n).padStart(2, '0');
 function localTime(s) {
-  const d = new Date(String(s).replace(' ', 'T') + 'Z');
+  const d = sentDate(s);
   if (Number.isNaN(d.getTime())) return s;
-  const p = n => String(n).padStart(2, '0');
-  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+// 发送那天的本地日期（YYYY-MM-DD），与 due_date 同一种写法；解析不动给空串
+function localDay(s) {
+  const d = sentDate(s);
+  return Number.isNaN(d.getTime()) ? '' : `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
 
 function settingsBody() {

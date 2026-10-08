@@ -1,6 +1,6 @@
 // 行：选区与批量删除、手动排序（pos）、真拖放、键盘挪行、拖手菜单。
 export default async function (t) {
-  const { APP, sleep, post, raw, items, check, evl, shot, menuClick } = t;
+  const { APP, sleep, post, raw, items, check, evl, shot, menuClick, waitFor } = t;
   /* 17.16. 多选与批量删除：行末那颗「删」已经撤了，选区 + 批量条是唯一的删除出口。 */
   check('行末不再有「删」按钮',
     await evl(`!!document.querySelector('#subs-body tr td.ops [data-del]')`) === false);
@@ -9,6 +9,18 @@ export default async function (t) {
   await sleep(250);
   check('勾一行就浮出批量条', await evl(`document.querySelector('#bulkbar').hidden`) === false);
   check('批量条报出选中数', (await evl(`document.querySelector('#bulk-n').textContent`)).includes('1'));
+  // 批量条与 toast 都贴底居中，toast 层级更高：不让开就把「删除」「取消」整个盖住
+  await evl(`toast('探针')`);
+  // 入场动画带 transform，播完再量；fill-mode both 的动画播完仍在 getAnimations() 里，要认 finished
+  await waitFor(`document.querySelector('#toast').getAnimations().every(a => a.playState === 'finished')`);
+  const stack = await evl(`(() => {
+    const t = document.querySelector('#toast'), a = t.getBoundingClientRect();
+    const b = document.querySelector('#bulkbar').getBoundingClientRect();
+    const out = { shown: !t.hidden, toastBottom: a.bottom, barTop: b.top };
+    clearTimeout(t._h); t.hidden = true;
+    return out;
+  })()`);
+  check('批量条开着时 toast 让到它上面', stack.shown && stack.toastBottom <= stack.barTop, JSON.stringify(stack));
   check('选中的行有高亮', await evl(`!!document.querySelector('#subs-body tr.selrow')`) === true);
   check('勾选后复选框常驻（表上挂 .selecting）',
     await evl(`!!document.querySelector('#view-subs table.selecting')`) === true);

@@ -139,6 +139,9 @@ export function findChrome() {
 }
 
 export async function startBrowser(shell) {
+  // 调试端口上已有浏览器在应答，新起的就绑不上，后面开标签、清存储全落到那个浏览器里
+  const cdpTaken = await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`).then(() => true, () => false);
+  if (cdpTaken) throw new Error(`127.0.0.1:${CDP_PORT} 已有调试端口在应答；关掉它或换 KALENDS_E2E_CDP_PORT`);
   mkdirSync(OUT, { recursive: true });
   rmSync(join(OUT, 'profile'), { recursive: true, force: true });
   const chrome = spawn(shell, [
@@ -228,6 +231,20 @@ export const helpers = (evl, sleepFn = sleep) => ({
   },
   // 页面里排着的写入连同它们的刷新都落定
   settle: () => evl('writesSettled()'),
+  // toast 正中那一点打中的是谁，等到打中 toast 或超时：'toast' 才算用户看得见，被模态对话框
+  // 压着时打中的是 dialog。要等是因为关框后 toast 搬回 body 靠 close 事件，headless 里它来得晚
+  toastOnTop: async (ms = 2000) => {
+    const probe = () => evl(`(() => {
+      const t = document.querySelector('#toast');
+      if (t.hidden) return 'hidden';
+      const r = t.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return t.contains(hit) ? 'toast' : String(hit?.tagName).toLowerCase();
+    })()`);
+    let hit;
+    for (const end = Date.now() + ms; (hit = await probe()) !== 'toast' && Date.now() < end;) await sleepFn(40);
+    return hit;
+  },
   // 点表头 → 菜单 → 点条目
   menuClick: async (thSel, itemText) => {
     await evl(`document.querySelector('${thSel}').click()`);

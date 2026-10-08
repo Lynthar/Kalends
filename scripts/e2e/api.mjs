@@ -1,7 +1,7 @@
 // 接口契约：不开浏览器就能验的写入口规则、错误码、密钥处理。CI 里只要二进制就能跑。
 export const browser = false;
 export default async function (t) {
-  const { APP, sleep, post, put, patch, raw, mk, items, fields, check, day } = t;
+  const { APP, sleep, post, put, patch, raw, mk, items, fields, check, skip, day } = t;
   /* 12j. 子行只有两层：三层的孙行在表格里既不属顶层也不会被渲染，会静默消失，所以写入口就拦住 */
   const gp = await post('/api/collections/subs/items', { name: '祖行', status: 'Active', extra: {} });
   const pr = await post('/api/collections/subs/items', { name: '父行', status: 'Active', parent_id: gp.id, extra: {} });
@@ -133,11 +133,15 @@ export default async function (t) {
   await sleep(1050 - (Date.now() % 1000)); // 从一秒的开头起跑，保证两次落在同一秒里
   const nx_u1 = await nx_up(nx_png(8));
   const nx_u2 = await nx_up(nx_png(24));
-  check('两次上传确实同名（同一秒）', nx_u1.logo === nx_u2.logo, `${nx_u1.logo} / ${nx_u2.logo}`);
-  const nx_logoResp = await fetch(`${APP}logos/${nx_u2.logo}`);
-  check('同秒重传之后图标还在，且是后传的那张',
-    nx_logoResp.status === 200 && (await nx_logoResp.arrayBuffer()).byteLength === 32,
-    `HTTP ${nx_logoResp.status}`);
+  // 同名是前提不是被测行为：慢机上两次上传跨了秒就测不到覆盖，记 SKIP 而不是 FAIL
+  if (nx_u1.logo !== nx_u2.logo) {
+    skip('同秒重传之后图标还在，且是后传的那张', `两次上传跨了秒、文件名不同（${nx_u1.logo} / ${nx_u2.logo}）`);
+  } else {
+    const nx_logoResp = await fetch(`${APP}logos/${nx_u2.logo}`);
+    check('同秒重传之后图标还在，且是后传的那张',
+      nx_logoResp.status === 200 && (await nx_logoResp.arrayBuffer()).byteLength === 32,
+      `HTTP ${nx_logoResp.status}`);
+  }
 
 
   /* 17.33. 写入口的日期与币种校验；库设置只留齿轮。 */

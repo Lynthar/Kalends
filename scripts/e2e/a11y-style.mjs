@@ -13,6 +13,11 @@ const NOTE_CONTRAST = `(() => {${CONTRAST}
   const ink = rgbOf(getComputedStyle(document.querySelector('#up-undated')).color);
   return ['--bg', '--surface', '--surface-2'].map(b => +ratio(ink, token(b)).toFixed(2));
 })()`;
+// 设置框顶的坏配置原因是红色小字，框底是 --surface：是 --coral-ink 且过 4.5
+const SETTINGS_NOTE = `(() => {${CONTRAST}
+  const ink = rgbOf(getComputedStyle(document.querySelector('#settings-note')).color);
+  return { red: ink.join() === token('--coral-ink').join(), ratio: +ratio(ink, token('--surface')).toFixed(2) };
+})()`;
 
 export default async function (t) {
   const { sleep, fields, check, skip, send, evl, shot } = t;
@@ -32,6 +37,8 @@ export default async function (t) {
   check('深色 toast 白字在两种底的渐变两端都过 4.5', toastRatios.every(r => r >= 4.5), JSON.stringify(toastRatios));
   const darkNote = await evl(NOTE_CONTRAST);
   check('深色点名行在三种底上都过 4.5', darkNote.every(r => r >= 4.5), JSON.stringify(darkNote));
+  const darkSetNote = await evl(SETTINGS_NOTE);
+  check('深色设置框的坏配置原因是红字且过 4.5', darkSetNote.red && darkSetNote.ratio >= 4.5, JSON.stringify(darkSetNote));
 
 
   await send('Emulation.setEmulatedMedia', { features: [] }); // 下面的对比度算的是浅色
@@ -95,6 +102,14 @@ export default async function (t) {
     `!document.querySelector('[role="tab"], [role="tablist"]')`) === true);
   check('搜索框有可访问名（placeholder 一输入就没了，不能当名字）', await evl(
     `!!document.querySelector('#t-search').getAttribute('aria-label')`) === true);
+  // ⚙ 的内容只有一个符号；地址框没有 label；对话框不指向标题，读屏进框只会念「对话框」
+  const unnamed = await evl(`(() => {
+    itemDialog(); collDialog();
+    const named = el => !!el?.getAttribute('aria-label')?.trim()
+      || !!document.getElementById(el?.getAttribute('aria-labelledby') || '')?.textContent.trim();
+    return ['#coll-settings', '#ics-url', '#dlg-settings', '#dlg-item', '#dlg-coll'].filter(s => !named(document.querySelector(s)));
+  })()`);
+  check('⚙、日历地址框与三个对话框都有可访问名', unnamed.length === 0, JSON.stringify(unnamed));
 
   // 复合控件：一个 label 只配一枚控件，多选那种一串控件的用 group + aria-labelledby
   await evl(`openItemDialog('vps', state.vps[0])`);
@@ -128,6 +143,8 @@ export default async function (t) {
   })()`) === true);
   const lightNote = await evl(NOTE_CONTRAST);
   check('浅色点名行在三种底上都过 4.5', lightNote.every(r => r >= 4.5), JSON.stringify(lightNote));
+  const lightSetNote = await evl(SETTINGS_NOTE);
+  check('浅色设置框的坏配置原因是红字且过 4.5', lightSetNote.red && lightSetNote.ratio >= 4.5, JSON.stringify(lightSetNote));
 
   /* 样式契约：深浅色下的原生控件、减弱动态、折叠区的键盘焦点、吸附格底色、窄屏居中、触屏命中区 */
   check('页面声明了 color-scheme，原生控件跟着深浅色走', await evl(
@@ -174,6 +191,15 @@ export default async function (t) {
     return { mid: r.left + r.width / 2, w: r.width, vw: innerWidth }; })()`);
   check('窄屏长 toast 居中且用得上大半个视口', Math.abs(tst.mid - tst.vw / 2) <= 1 && tst.w > tst.vw * 0.7, JSON.stringify(tst));
   await evl(`clearAllSel()`);
+  // 设置框里日历地址很长，旁边的「复制」不能被挤成两行
+  await evl(`openSettings()`);
+  const copyLines = await evl(`(() => {
+    const rg = document.createRange();
+    rg.selectNodeContents(document.querySelector('#btn-copy-ics'));
+    return rg.getClientRects().length;
+  })()`);
+  check('窄屏设置框里「复制」不折行', copyLines === 1, copyLines);
+  await evl(`document.querySelector('#dlg-settings').close()`);
 
   // 触屏没有悬停：行首复选框与 ⤢ 是删除与完整表单的唯一入口，得常显且命中区 ≥ 24 px（WCAG 2.5.8）
   await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });

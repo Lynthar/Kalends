@@ -18,7 +18,8 @@ const state = {
 // 各表视图偏好（列排序 / 列筛选 / 表内搜索 / 列类型），存本浏览器
 const VIEWS_KEY = 'kalends.views.v1';
 const views = { subs: {}, sims: {}, vps: {} };
-try { Object.assign(views, JSON.parse(stored(VIEWS_KEY) || '{}')); } catch {}
+try { Object.assign(views, JSON.parse(stored(VIEWS_KEY) || '{}')); }
+catch (e) { console.warn('本机视图偏好解析不出来，各表按默认视图显示：', e); }
 for (const t of ['subs', 'sims', 'vps']) views[t] = viewShape(views[t]);
 
 /* 一个库的视图偏好，形状不对的项回默认：它来自 localStorage，可能是旧代码、别的设备或手改
@@ -55,8 +56,18 @@ const CYCLE_LABEL = {
 // 选项的 value 恒为存储键（monthly），显示的才是 CYCLE_LABEL 的文案（Monthly）。
 const CYCLE_ORDER = ['', 'monthly', 'annual', 'biennial', 'triennial', 'quarterly', 'semiannual', 'weekly', 'days', 'lifetime'];
 
+// 模态对话框在 top layer、框外一律 inert：toast 留在 body 就被压在下面，读屏也听不见。
+// 所以有框开着时住进框里，框关上时回 body——不回的话「先 toast 再关框」的成功提示跟着框一起藏掉
+function homeToast() {
+  const t = $('#toast'), home = document.querySelector('dialog:modal') || document.body;
+  if (t.parentNode !== home) home.append(t);
+  return t;
+}
+document.addEventListener('close', homeToast, true); // close 不冒泡，只能在捕获阶段接
+
 function toast(msg, err) {
-  const t = $('#toast');
+  // 挪位要在露出与写文本之前：带着内容插进来的 live region 不播报
+  const t = homeToast();
   t.classList.toggle('err', !!err);
   // 先露出来再写文本：hidden 的元素不在无障碍树里，趁藏着改内容 live region 就没人听见
   t.hidden = false;
@@ -284,6 +295,8 @@ function renderAll() {
 /* ── 即将到期 ── */
 // 到期时间线里的 kind 是库键；库名与到期动作说法都由后端随 overview 给下来
 const collName = key => (state.overview?.collections || []).find(c => c.key === key)?.name || key;
+// 入场动画只在开页那一轮播：每次写入后的刷新都整列重新浮起，看着像整页重载
+let upIntro = true;
 function renderUpcoming() {
   const { upcoming, today } = state.overview;
   $('#today-note').textContent = `今日 ${today}`;
@@ -292,6 +305,8 @@ function renderUpcoming() {
   const items = upcoming.filter(inWindow);
   const ol = $('#up-list');
   ol.innerHTML = '';
+  ol.classList.toggle('intro', upIntro);
+  upIntro = false;
   const hiddenN = upcoming.length - items.length;
   const more = $('#up-more');
   more.hidden = hiddenN <= 0;
@@ -309,13 +324,13 @@ function renderUpcoming() {
     const meta = [collName(it.kind), it.cycle, it.action, it.muted ? '不提醒' : ''].filter(Boolean).join(' · ');
     const li = document.createElement('li');
     li.className = cls + (it.muted ? ' quiet' : '');
-    li.style.setProperty('--i', idx);
+    li.style.setProperty('--i', Math.min(idx, 12)); // 错峰封顶：长列表末尾不必干等一秒多
     li.innerHTML = `
       <span class="days">${daysTxt}</span>
       <span class="due">${esc(it.due)}</span>
       <span class="what"><div class="nm">${esc(it.name)}</div><div class="meta">${esc(meta)}</div></span>
       <span class="amt">${amtHtml(it.currency, it.price)}</span>
-      <button class="btn mini ghost" data-renew="${it.kind}:${it.id}" type="button">已${esc(it.verb || '续费')}</button>`;
+      <button class="btn mini ghost" data-renew="${esc(it.kind)}:${it.id}" type="button">已${esc(it.verb || '续费')}</button>`;
     ol.appendChild(li);
   });
   ol.querySelectorAll('[data-renew]').forEach(b => b.onclick = () => doRenew(b.dataset.renew, b));
@@ -376,12 +391,20 @@ function toggleUpFold() {
 }
 
 async function setUpWindow(v) {
+  const was = [state.upWindow, state.settings['ui.upcoming_days']];
   state.upWindow = v;
   state.settings['ui.upcoming_days'] = v;
   renderUpcoming();
   try {
     await api('/api/settings', { method: 'PUT', body: JSON.stringify({ 'ui.upcoming_days': v }) });
-  } catch (err) { toast(err.message, true); }
+  } catch (err) {
+    // 存不上就退回原档，否则界面停在一个刷新后就会消失的档位上；期间又换过档的不动
+    if (state.upWindow === v) {
+      [state.upWindow, state.settings['ui.upcoming_days']] = was;
+      renderUpcoming();
+    }
+    toast(err.message, true);
+  }
 }
 
 $('#up-toggle').onclick = toggleUpFold;
@@ -389,6 +412,8 @@ $('#up-title').onclick = toggleUpFold;
 $('#up-window').onchange = e => setUpWindow(e.target.value);
 $('#up-more').onclick = () => setUpWindow('all');
 
+// 续费后后端给不出到期日：多半是没有周期或买断，但存量里周期写坏、日期越界的也走到这里
+const NO_NEXT_DUE = '算不出下一个到期日（没有周期、买断，或周期与日期有误）';
 async function doRenew(key, btn) {
   const [kind, id] = key.split(':');
   // 表格里的行未必落在到期窗口内，所以先从本库找，找不到再回退到到期时间线
@@ -411,13 +436,13 @@ async function doRenew(key, btn) {
     // 报出下次到期是哪天（renew_from='today' 会把账单日拽走，说出来才看得见）；日期由
     // 后端算，前端不自己算。算不出到期日时后端仍把上次续费日记成今天——旧日期被覆盖要说出来
     done: r => r?.due ? `已记账，下次到期 ${r.due}`
-      : r?.last_renewed ? `已记账，上次${verb}日记作 ${r.last_renewed}；没有周期（或是买断），算不出下一个到期日`
-      : '已记一笔；没有周期，算不出下一个到期日',
+      : r?.last_renewed ? `已记账，上次${verb}日记作 ${r.last_renewed}；${NO_NEXT_DUE}`
+      : `已记一笔；${NO_NEXT_DUE}`,
   });
   if (btn?.isConnected) { btn.disabled = false; btn.textContent = was; }
   // 直接记下次到期日、又没有周期的（证件）推不动日期：记完账就开表单让人当场填新的到期日
   const fresh = r && !r.due && 'next_renewal' in r && state[kind]?.find(x => x.id === +id);
-  if (fresh) openItemDialog(kind, fresh, { focus: 'next_renewal', note: `已记一笔${verb}；没有周期，算不出下一个到期日——在这里填上新的到期日再保存` });
+  if (fresh) openItemDialog(kind, fresh, { focus: 'next_renewal', note: `已记一笔${verb}；${NO_NEXT_DUE}——在这里填上新的到期日再保存` });
 }
 
 /* ── 支出 ── */

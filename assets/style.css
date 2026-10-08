@@ -156,9 +156,9 @@ main { max-width: 1400px; margin: 0 auto; padding: .6rem 1.4rem 3rem; }
   display: grid; align-items: center; gap: .9rem;
   grid-template-columns: 4.6rem 6.2rem 1fr auto auto;
   padding: .55rem .55rem; border-radius: 12px;
-  animation: rise .45s var(--spring) calc(var(--i, 0) * 45ms) both;
   transition: background .2s, transform .3s var(--spring);
 }
+.ledger.intro li { animation: rise .45s var(--spring) calc(var(--i, 0) * 45ms) both; }
 .ledger li:hover { background: var(--surface-2); transform: translateX(3px); }
 .ledger .days {
   font-size: 1.45rem; font-weight: 800; text-align: right; line-height: 1;
@@ -168,15 +168,16 @@ main { max-width: 1400px; margin: 0 auto; padding: .6rem 1.4rem 3rem; }
   font-size: .62rem; font-weight: 600; color: var(--ink-2);
   display: block; letter-spacing: .12em; margin-top: .15rem;
 }
-.ledger li.d-over .days { color: var(--coral); animation: rise .45s var(--spring) calc(var(--i, 0) * 45ms) both, urgent 2.4s ease-in-out infinite; }
+.ledger li.d-over .days { color: var(--coral); animation: urgent 2.4s ease-in-out infinite; }
 .ledger li.d-soon .days { color: var(--coral); }
 .ledger li.d-week .days { color: var(--honey); }
 .ledger li.d-far  .days { color: var(--ink-2); }
 @keyframes urgent { 50% { text-shadow: 0 0 14px rgba(232, 84, 58, .65); } }
-/* 状态语义说不发提醒的条目（Ending＝到期不续）：留在时间线上，但不摆出紧迫的脸色 */
-.ledger li.quiet { opacity: .62; }
+/* 状态语义说不发提醒的条目（Ending＝到期不续）：留在时间线上，但不摆出紧迫的脸色。
+   淡化落在子元素上：li 自己的 opacity 归入场动画管，fill-mode both 会把它定在 1 */
+.ledger li.quiet > * { opacity: .62; }
 .ledger li.quiet.d-over .days, .ledger li.quiet.d-soon .days, .ledger li.quiet.d-week .days { color: var(--ink-2); }
-.ledger li.quiet.d-over .days { animation: rise .45s var(--spring) calc(var(--i, 0) * 45ms) both; }
+.ledger li.quiet.d-over .days { animation: none; }
 .ledger .due { color: var(--ink-2); font-variant-numeric: tabular-nums; font-size: .85rem; }
 .ledger .what .nm { font-weight: 600; }
 .ledger .what .meta { color: var(--ink-2); font-size: .78rem; }
@@ -653,6 +654,8 @@ dialog h3 {
   margin: 0 0 1rem; font-size: 1.05rem; font-weight: 700; letter-spacing: .08em;
   border-bottom: 1px solid var(--line); padding-bottom: .55rem;
 }
+/* 设置框顶的坏配置原因：保存因此停用，得和普通说明区分开 */
+#settings-note { color: var(--coral-ink); }
 .fgrid { display: grid; grid-template-columns: 1fr 1fr; gap: .7rem .9rem; }
 .fgrid label, .fgrid .field { display: flex; flex-direction: column; gap: .27rem; font-size: .76rem; font-weight: 600; color: var(--ink-2); letter-spacing: .03em; }
 .fgrid .span2 { grid-column: span 2; }
@@ -701,6 +704,7 @@ dialog h3 {
 .chanset { border: 1px solid var(--line); border-radius: 12px; padding: .7rem .8rem .8rem; margin-top: 1rem; }
 .chanset .btn { margin-top: .7rem; }
 .ics-row { display: flex; gap: .5rem; }
+.ics-row .btn { flex: none; white-space: nowrap; } /* 长地址会把「复制」挤成两行 */
 .dlg-foot { display: flex; justify-content: flex-end; gap: .6rem; margin-top: 1.25rem; }
 /* 条目/库浮层的按钮行：不加就紧贴最后一个字段（星级那种矮控件下尤其挤） */
 dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
@@ -732,6 +736,8 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
   box-shadow: 0 10px 26px -8px rgba(13, 176, 159, .6);
   z-index: 50; animation: toast-in .4s var(--spring) both;
 }
+/* 批量条开着时让到它上面：两者都贴底居中，toast 层级更高，会把批量条的按钮整个盖住 */
+#bulkbar:not([hidden]) ~ #toast { bottom: 6rem; }
 #toast.err {
   background: var(--toast-err-bg);
   box-shadow: 0 10px 26px -8px rgba(232, 84, 58, .55);

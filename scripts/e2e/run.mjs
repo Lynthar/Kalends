@@ -4,7 +4,8 @@
 // 每个套件都在自己的一次性实例上跑（临时数据目录、重新播种、新标签页、清空本机存储），
 // 所以套件之间没有顺序依赖，也不用互相收拾。api 套件不开浏览器。
 // 环境变量：KALENDS_E2E_BIN（默认 $CARGO_TARGET_DIR 或 target/ 下的 kalends）、
-// KALENDS_E2E_CHROME（默认 Playwright 缓存里的 headless shell）、KALENDS_E2E_OUT、KALENDS_E2E_PORT。
+// KALENDS_E2E_CHROME（默认 Playwright 缓存里的 headless shell）、KALENDS_E2E_OUT、KALENDS_E2E_PORT、
+// KALENDS_E2E_CDP_PORT（浏览器调试端口，默认 9333）。
 import {
   APP, OUT, calendar, check, failureCount, fields, findBinary, findChrome, helpers, items, mk,
   openPage, patch, post, put, raw, seed, skip, sleep, sqlOn, startBrowser, startServer, stopServer,

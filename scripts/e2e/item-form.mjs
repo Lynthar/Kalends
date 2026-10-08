@@ -1,6 +1,6 @@
 // 详情表单：整行往返与幂等保存、自定义天数拦截、图标上传与清除、父条目下拉、开放词表的现场新增。
 export default async function (t) {
-  const { APP, sleep, patch, raw, items, fields, check, send, evl, shot } = t;
+  const { APP, sleep, patch, raw, items, fields, check, send, evl, shot, toastOnTop } = t;
   /* 12d. 订阅 logo：上传 → 名称格渲染（子行回退父 logo）→ 整行 PUT 保留 → 清除 */
   const PNG1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
   const subsNow = await (await fetch(APP + 'api/collections/subs/items')).json();
@@ -97,6 +97,8 @@ export default async function (t) {
   check('拦下时给的是错误提示', await evl(
     `(() => { const t = document.querySelector('#toast'); return !t.hidden && t.classList.contains('err') && t.textContent; })()`
   ) === '自定义周期要填天数');
+  const hit = await toastOnTop();
+  check('拦下的原因没被表单盖住', hit === 'toast', hit);
   check('拦下时没有落库', (await fetch(`${APP}api/collections/subs/items`).then(r => r.json()))
     .find(r => r.id === daysRow.id)?.cycle === daysRow.cycle);
   await evl(`document.querySelector('#dlg-item').close()`);

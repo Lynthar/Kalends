@@ -1,6 +1,7 @@
 // 台账与设置页：续费记账可见、通知记录空态、坏渠道配置停保存、阈值与默认值来自服务端声明。
 export default async function (t) {
-  const { APP, sleep, put, items, check, send, evl, shot, settle, waitFor, dialogs } = t;
+  const { APP, sleep, put, items, check, day, send, evl, shot, settle, waitFor, toastOnTop, dialogs } = t;
+  const toastSeen = async label => { const hit = await toastOnTop(); check(label, hit === 'toast', hit); };
   /* 17.6. 「已续费」记的那笔账要能被看到：写台账这条路 e2e 从没走过，
      而台账在界面上一直没有入口——点完按钮，账进了库就再也见不到。 */
   const ledgerTarget = (await (await fetch(APP + 'api/collections/subs/items')).json())
@@ -52,14 +53,17 @@ export default async function (t) {
   await sleep(500);
   check('坏配置时保存键停用', await evl(`document.querySelector('#form-settings button[type=submit]').disabled`) === true);
   check('坏配置时那一栏也停用', await evl(`document.querySelector('#form-settings [name=tg_enabled]').closest('fieldset').disabled`) === true);
-  check('坏配置时说出了原因', await evl(`document.querySelector('#toast').textContent.includes('读不出来')`) === true);
+  // 原因写在框顶、框开着就一直在：toast 几秒就消失，停用的保存键却一直停着
+  check('坏配置时框里写着原因', await evl(`(() => {
+    const n = document.querySelector('#settings-note');
+    return !!n && !n.hidden && n.getBoundingClientRect().height > 0 && n.textContent.includes('读不出来');
+  })()`) === true, await evl(`document.querySelector('#settings-note')?.textContent`));
   await evl(`document.querySelector('#dlg-settings').close()`);
   await evl(`(() => { state.settings['notify.telegram'] = window._tgStash; openSettings(); })()`);
   await sleep(500);
-  check('配置读得回来时保存键恢复', await evl(`document.querySelector('#form-settings button[type=submit]').disabled`) === false);
+  check('配置读得回来时保存键恢复、原因撤掉', await evl(`document.querySelector('#form-settings button[type=submit]').disabled === false
+    && document.querySelector('#settings-note')?.hidden === true`) === true);
   await evl(`document.querySelector('#dlg-settings').close()`);
-  // 上面那条错误提示是本段期望的产物（err 态挂 4.2 秒），收掉它别飘进后面的断言
-  await evl(`(() => { const t = document.querySelector('#toast'); clearTimeout(t._h); t.hidden = true; t.classList.remove('err'); })()`);
   await sleep(250);
 
 
@@ -84,7 +88,7 @@ export default async function (t) {
   check('占位串来自服务端声明', await evl(`(() => {
     const f = document.querySelector('#form-settings').elements;
     return f.thresholds.placeholder + ' | ' + f.em_port.placeholder;
-  })()`) === `${JSON.parse(dfDecl['notify.thresholds']).join(',')} | ${JSON.parse(dfDecl['notify.email']).port}`);
+  })()`) === `如 ${JSON.parse(dfDecl['notify.thresholds']).join(',')} | ${JSON.parse(dfDecl['notify.email']).port}`);
   const dfCleared = await evl(`(() => {
     const f = document.querySelector('#form-settings').elements;
     const was = [f.digest_time.value, f.window_days.value, f.em_port.value];
@@ -123,6 +127,15 @@ export default async function (t) {
     const t = document.querySelector('#toast');
     return !t.hidden && t.classList.contains('err') && t.textContent.includes('请求失败');
   })()`), await evl(`document.querySelector('#toast').textContent`));
+  // 成败都只走 toast：设置框开着时被它压在下面，「发送测试」就成了点了没反应
+  await toastSeen('发送测试的失败原因没被设置框盖住');
+  await evl(`(() => {
+    const t = document.querySelector('#toast'); clearTimeout(t._h); t.hidden = true; t.classList.remove('err');
+    document.querySelector('#btn-backup').click();
+  })()`);
+  check('立即备份报了成功', await waitFor(`document.querySelector('#toast').textContent.startsWith('已备份')`),
+    await evl(`document.querySelector('#toast').textContent`));
+  await toastSeen('备份成功的提示没被设置框盖住');
   await evl(`document.querySelector('#dlg-settings').close()`);
   const tgAfter = JSON.parse((await (await fetch(APP + 'api/settings')).json())['notify.telegram']);
   check('点了测试再取消，库里的渠道配置一字未动', tgAfter.enabled === false && tgAfter.chat_id === '1',
@@ -130,6 +143,15 @@ export default async function (t) {
   await put('/api/settings', { 'notify.telegram': JSON.stringify({ enabled: false, bot_token: '', chat_id: '', proxy: '' }) });
   await evl(`(() => { const t = document.querySelector('#toast'); clearTimeout(t._h); t.hidden = true; t.classList.remove('err'); })()`);
   await evl(`loadAll()`);
+
+  // 保存、删库、条目表单都是先 toast 再关框：toast 若还留在框里，就跟着框一起藏掉
+  await evl(`openSettings()`);
+  await evl(`document.querySelector('#form-settings button[type=submit]').click()`);
+  await settle();
+  check('保存成功后关框并报已保存', await evl(`!document.querySelector('#dlg-settings').open
+    && document.querySelector('#toast').textContent === '设置已保存'`) === true,
+    await evl(`document.querySelector('#toast').textContent`));
+  await toastSeen('关框后的提示仍看得见');
 
 
   // PIN 原样交给后端判：前端先剥符号的话，`12-34` 存成 `1234`（照原样输入反而进不去），
@@ -155,18 +177,37 @@ export default async function (t) {
   await evl(`(() => { window._thStash = state.settings['notify.thresholds']; state.settings['notify.thresholds'] = 'oops'; openSettings(); })()`);
   await sleep(400);
   check('阈值读不出时停用保存并说明', await evl(`document.querySelector('#form-settings button[type=submit]').disabled
-    && document.querySelector('#toast').textContent.includes('提醒阈值')`) === true, await evl(`document.querySelector('#toast').textContent`));
+    && !!document.querySelector('#settings-note')?.textContent.includes('提醒阈值')`) === true,
+    await evl(`document.querySelector('#settings-note')?.textContent`));
   await evl(`document.querySelector('#dlg-settings').close(); state.settings['notify.thresholds'] = window._thStash`);
-  await evl(`(() => { const t = document.querySelector('#toast'); clearTimeout(t._h); t.hidden = true; t.classList.remove('err'); })()`);
+
+  /* 存着的显示币种既没报价、数据里也没用过时，下拉落到「不折算」——随便保存一次别的设置就把它清掉 */
+  await put('/api/settings', { 'fx.display': 'ZZZ' });
+  await evl(`loadAll()`);
+  await evl(`openSettings()`);
+  check('显示币种不在候选里时照样留在下拉里，保存不会清掉它', await evl(
+    `document.querySelector('#fx-display').value + ' | ' + settingsBody()['fx.display']`) === 'ZZZ | ZZZ',
+    await evl(`document.querySelector('#fx-display').value`));
+  await evl(`document.querySelector('#dlg-settings').close()`);
+  await put('/api/settings', { 'fx.display': '' });
+  await evl(`loadAll()`);
 
   /* 发送记录的失败原因写在那一行里：只放在悬停提示里的话，触屏与键盘都读不到 */
   t.sql(`INSERT INTO notification_log(kind,item_id,channel,threshold_days,due_date,ok,error) VALUES('digest',NULL,'telegram',NULL,'2026-01-01',0,'连不上 api.telegram.org')`);
+  // 0 档同时管「到期当天」与「已经逾期」：逾期项的那条标成「当天」就是在说假话
+  const logRow = (row, due) => t.sql(`INSERT INTO notification_log(kind,item_id,channel,threshold_days,due_date,ok) VALUES('subs',?,'telegram',0,?,1)`, [row.id, due]);
+  logRow(ledgerTarget, day(-5));
+  logRow(other, day(0));
   await evl(`openSettings()`);
   await waitFor(`!!document.querySelector('#notify-log .lg-row')`);
   check('发送记录的失败原因直接写在行里', await evl(`(() => {
     const why = document.querySelector('#notify-log .lg-why');
     return !!why && why.textContent.includes('api.telegram.org') && why.getBoundingClientRect().height > 0;
   })()`) === true);
+  const whenOf = name => evl(`[...document.querySelectorAll('#notify-log .lg-n')]
+    .find(n => n.firstChild?.textContent === ${JSON.stringify(name)})?.querySelector('small')?.textContent`);
+  check('逾期项的提醒在发送记录里标「逾期」', await whenOf(ledgerTarget.name) === 'telegram · 逾期', await whenOf(ledgerTarget.name));
+  check('到期当天的提醒仍标「当天」', await whenOf(other.name) === 'telegram · 当天', await whenOf(other.name));
 
   /* 经 http:// 访问局域网地址时没有 navigator.clipboard：退到 execCommand，再不行就说「已选中，请手动复制」 */
   await evl(`(() => {

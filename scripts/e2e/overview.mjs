@@ -6,6 +6,10 @@ export default async function (t) {
   const expShown = ov.upcoming.filter(u => u.days_left <= 30).length;
   const expHidden = ov.upcoming.length - expShown;
   check('默认窗口 30 天', await evl(`document.querySelector('#up-window').value`) === '30');
+  check('开页那一轮到期栏播入场动画', await evl(`(() => {
+    const li = document.querySelector('#up-list li');
+    return !!li && getComputedStyle(li).animationName === 'rise';
+  })()`) === true);
   check(`窗口内 ${expShown} 项`, await evl(`document.querySelectorAll('#up-list li').length`) === expShown);
   check('更远期提示', (await evl(`document.querySelector('#up-more').textContent`)).includes(`还有 ${expHidden} 项`));
   check('主宽度 1400', await evl(`getComputedStyle(document.querySelector('main')).maxWidth`) === '1400px');
@@ -31,6 +35,35 @@ export default async function (t) {
   check('90 天窗口 7 项', await evl(`document.querySelectorAll('#up-list li').length`) === 7);
   const st1 = await (await fetch(APP + 'api/settings')).json();
   check('设置写服务端', st1['ui.upcoming_days'] === '90');
+  // 每次写入后的刷新都整列重新浮起，看着像整页重载：入场只在开页那一轮
+  check('之后的刷新不再重放入场动画', await evl(`(() => {
+    const li = document.querySelector('#up-list li');
+    return !!li && getComputedStyle(li).animationName === 'none';
+  })()`) === true);
+  // 错峰延迟按序号累加，长列表末尾要干等一秒多：封顶。造 20 项、按开页那一轮渲染，量最后一项
+  const lastDelay = await evl(`(() => {
+    const real = state.overview;
+    state.overview = { ...real, upcoming: Array.from({ length: 20 }, (_, i) => ({ ...real.upcoming[0], id: 90000 + i, days_left: 1 })) };
+    upIntro = true;
+    renderUpcoming();
+    const d = parseFloat(getComputedStyle(document.querySelector('#up-list li:last-child')).animationDelay);
+    state.overview = real;
+    renderUpcoming();
+    return d;
+  })()`);
+  check('入场错峰封顶，第 20 项不晚于 0.6 秒起步', lastDelay <= 0.6, lastDelay);
+  // 存不上时退回原档：界面停在新档、刷新后却回到旧档，用户会以为改成功了
+  const rolled = await evl(`(async () => {
+    const real = api, before = state.upWindow;
+    api = () => Promise.reject(new Error('注入：存不上'));
+    try { await setUpWindow(before === '7' ? '14' : '7'); } finally { api = real; }
+    const t = document.querySelector('#toast');
+    const out = [before, state.upWindow, document.querySelector('#up-window').value, t.classList.contains('err')];
+    clearTimeout(t._h); t.hidden = true; t.classList.remove('err');
+    return out;
+  })()`);
+  check('窗口存不上时退回原档并报错', rolled[1] === rolled[0] && rolled[2] === rolled[0] && rolled[3] === true,
+    JSON.stringify(rolled));
 
 
   /* 16. hidden 属性回归（全局 [hidden]{display:none!important} 不能被 display 规则盖掉，
@@ -73,20 +106,24 @@ export default async function (t) {
   await evl(`setUpWindow('all')`); // HostB（Ending）到期在 61 天后，默认 30 天窗口看不到
   await evl(`if (state.upFolded) toggleUpFold()`); // 上一段把到期栏折起来了，展开才看得见也才截得到
   await sleep(700);
+  // 量的是渲染出来的透明度（行 × 子元素），只看 class 的话淡化被动画盖掉也照样绿；等入场动画走完再量
+  await waitFor(`document.getAnimations().every(a => a.effect.getComputedTiming().iterations === Infinity || a.playState !== 'running')`);
   const quiet = await evl(`(() => {
     const li = [...document.querySelectorAll('#up-list li')];
     const b = li.find(x => x.textContent.includes('HostB'));
     const n = li.find(x => x.textContent.includes('Netflix'));
+    const fade = x => x ? +getComputedStyle(x).opacity * +getComputedStyle(x.querySelector('.what')).opacity : -1;
     return {
+      bFade: fade(b), nFade: fade(n),
       bQuiet: !!b?.classList.contains('quiet'),
       bMeta: b?.querySelector('.meta')?.textContent || '',
       bDays: b ? getComputedStyle(b.querySelector('.days')).color : '',
       nQuiet: !!n?.classList.contains('quiet'),
     };
   })()`);
-  check('不提醒的条目在到期栏里淡下去', quiet.bQuiet === true, JSON.stringify(quiet));
+  check('不提醒的条目在到期栏里淡下去', quiet.bQuiet === true && quiet.bFade > 0 && quiet.bFade < 0.7, JSON.stringify(quiet));
   check('并且在小字里注明不提醒', quiet.bMeta.includes('不提醒'), quiet.bMeta);
-  check('照常提醒的条目不受影响', quiet.nQuiet === false, JSON.stringify(quiet));
+  check('照常提醒的条目不受影响', quiet.nQuiet === false && quiet.nFade === 1, JSON.stringify(quiet));
   await shot('11-quiet-item');
 
 

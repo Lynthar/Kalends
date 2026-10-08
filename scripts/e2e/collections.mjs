@@ -188,7 +188,7 @@ export default async function (t) {
     await evl(`document.querySelector('#${DK}-body tr td[data-k="doc_type"]').textContent.includes('护照')`) === true);
   check('模板域字段在表头菜单里可编辑选项', await evl(`optionsEditable('${DK}','doc_type')`) === true);
   // 没有周期就推不动到期日：只记一笔账，提示不能谎报"周期已推进"；当场开表单停在到期日那栏，
-  // 原因写在表单里（toast 盖不过模态对话框）
+  // 原因写在表单里（续费的 toast 发在开框之前，压在表单下面，几秒就消失）
   await evl(`window.confirm = () => true`);
   await evl(`document.querySelector('#${DK}-body tr [data-renew]').click()`);
   await waitFor(`!!document.querySelector('#dlg-item')?.open`);
@@ -825,6 +825,9 @@ export default async function (t) {
   check('删到一个库不剩也不崩', emptied.ok, emptied.v);
   await sleep(700);
   check('标签行空了', await evl(`document.querySelectorAll('.tab[data-tab]').length`) === 0);
+  // 没有库时 ⚙ 没有可设置的对象，点了没反应：收起来，换一句建库的引导
+  check('零库时 ⚙ 收起、换成一句建库引导', await evl(`document.querySelector('#coll-settings').hidden
+    && document.querySelector('#coll-none')?.hidden === false`) === true);
   const typed = await evlSafe(`(() => {
     const s = document.querySelector('#t-search');
     s.value = 'x';
@@ -841,6 +844,13 @@ export default async function (t) {
   await sleep(800);
   check('重建的库直接就是当前表', await evl(
     `state.tab === '${revived.key}' && !document.querySelector('.tablewrap[data-tab="${revived.key}"]').hidden`) === true);
+  check('有库之后 ⚙ 回来、引导撤掉', await evl(`!document.querySelector('#coll-settings').hidden
+    && document.querySelector('#coll-none')?.hidden === true`) === true);
+  // 图标框按 UTF-16 码元限长：一个 ZWJ 组合 emoji 就占 11 个
+  check('图标框录得进 ZWJ 组合 emoji', await evl(`(() => {
+    collDialog();
+    return '👨‍👩‍👧‍👦'.length <= document.querySelector('#dlg-coll [data-c=icon]').maxLength;
+  })()`) === true);
   await shot('10-after-wipe');
 
 

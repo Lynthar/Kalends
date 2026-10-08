@@ -49,7 +49,7 @@
       <select id="up-window" class="mini-select tiny" title="显示窗口" aria-label="到期显示窗口">
         <option value="7">7 天内</option>
         <option value="14">14 天内</option>
-        <option value="30" selected>30 天内</option>
+        <option value="30">30 天内</option>
         <option value="60">60 天内</option>
         <option value="90">90 天内</option>
         <option value="180">半年内</option>
@@ -85,13 +85,14 @@
         <button class="tab on" data-tab="subs" type="button">订阅</button>
         <button class="tab" data-tab="sims" type="button">SIM 卡</button>
         <button class="tab" data-tab="vps" type="button">VPS</button>
-        <button id="coll-settings" class="tab tab-add" type="button" title="当前库的设置：改名 / 图标 / 到期模型 / 字段顺序">⚙</button>
+        <button id="coll-settings" class="tab tab-add" type="button" aria-label="库设置" title="当前库的设置：改名 / 图标 / 到期模型 / 字段顺序">⚙</button>
       </div>
       <div class="tab-actions">
         <input id="t-search" class="searchbox slim" placeholder="搜索本表…" aria-label="在当前库里搜索">
         <button id="coll-add" class="btn primary" type="button" title="建一个新库">＋ 新增库</button>
       </div>
     </div>
+    <p id="coll-none" class="empty" hidden>还没有库——点「＋ 新增库」建第一个</p>
     <div id="view-pills" class="vpills" hidden></div>
     <div id="view-subs" class="tablewrap" data-tab="subs">
       <table class="grid">
@@ -122,9 +123,10 @@
 
 
 
-<dialog id="dlg-settings">
+<dialog id="dlg-settings" aria-labelledby="dlg-settings-title">
   <form id="form-settings" method="dialog">
-    <h3>设置</h3>
+    <h3 id="dlg-settings-title">设置</h3>
+    <p id="settings-note" class="fp-note" hidden></p>
     <div class="fgrid">
       <label>提醒阈值（提前天数，留空＝只发每日摘要）<input name="thresholds"></label>
       <label>摘要发送时间<input name="digest_time" type="time"></label>
@@ -136,9 +138,9 @@
         <label>统一显示币种
           <select name="fx_display" id="fx-display"><option value="">不折算（分币种显示）</option></select>
         </label>
-        <label class="span2 note-label">
+        <div class="span2 field">
           <span id="fx-status" class="note"></span>
-        </label>
+        </div>
       </div>
       <button type="button" class="btn ghost" id="fx-refresh">拉取实时汇率</button>
     </fieldset>
@@ -167,7 +169,7 @@
     <fieldset class="chanset">
       <legend>日历订阅（ICS）</legend>
       <div class="ics-row">
-        <input id="ics-url" readonly>
+        <input id="ics-url" readonly aria-label="日历订阅地址">
         <button type="button" class="btn ghost" id="btn-copy-ics">复制</button>
       </div>
       <p class="note">在手机/电脑日历中「订阅日历」粘贴此地址，续费与保号事件自动同步。</p>
