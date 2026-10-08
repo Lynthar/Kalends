@@ -28,7 +28,7 @@ subtle = { version = "2", default-features = false }
 panic = "abort"
 
 [dev-dependencies]
-# 只为中间件的 oneshot 测试（PIN 门接线）；tower 本就是 axum 的底座，不引入新家族
+# 路由级测试拿 oneshot 直接打 Router；tower 本就是 axum 的底座，不引入新家族
 tower = { version = "0.5", features = ["util"] }
 # 只给测试造一次性数据目录（迁移前快照与 restore 都要真实文件路径）
 tempfile = "3"

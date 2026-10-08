@@ -10,6 +10,7 @@ mod notify;
 mod settings;
 
 use std::{
+    io::IsTerminal,
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -28,6 +29,9 @@ use tracing_subscriber::EnvFilter;
 
 pub type Db = Arc<Mutex<rusqlite::Connection>>;
 
+/// 没设 `KALENDS_ADDR` 时起服监听、`--health` 去连的地址。
+const DEFAULT_ADDR: &str = "127.0.0.1:4180";
+
 #[derive(Clone)]
 pub struct App {
     pub db: Db,
@@ -45,7 +49,7 @@ impl App {
 /// `kalends --health`：容器 HEALTHCHECK 自检（镜像里没有 curl / wget，为一件事装包
 /// 不值当）。只认 200：任一业务表读不出时 `/api/health` 回 503，它不过 PIN 门。
 async fn health_probe() -> ! {
-    let addr = std::env::var("KALENDS_ADDR").unwrap_or_else(|_| "127.0.0.1:4180".into());
+    let addr = std::env::var("KALENDS_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.into());
     // 0.0.0.0 是监听地址不是可连地址（容器里恒是它）
     let target = addr.replace("0.0.0.0:", "127.0.0.1:").replace("[::]:", "[::1]:");
     // 连的是本机，环境代理变量不能把它绕走；超时赶在 HEALTHCHECK 的 --timeout=5s 之前，好留下自己的报错
@@ -90,7 +94,11 @@ fn restore_cli(rest: &[String]) -> ! {
             };
             println!("已恢复 {to}/kalends.db：integrity_check ok，user_version {}（{staleness}）", r.user_version);
             match &r.assets_from {
-                Some(src) => println!("已从 {} 复制 logos/ 共 {} 个文件", src.display(), r.assets_copied),
+                Some(src) => {
+                    // `--from backups/x.db` 这种相对写法推出来的原数据目录是空路径，即当前目录
+                    let src = if src.as_os_str().is_empty() { std::path::Path::new(".") } else { src.as_path() };
+                    println!("已从 {} 复制 logos/ 共 {} 个文件", src.display(), r.assets_copied);
+                }
                 None => println!("快照不在标准 backups/ 布局里，未能定位原数据目录：请手动复制 logos/"),
             }
             if r.missing.is_empty() {
@@ -137,13 +145,15 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(2);
         }
     }
+    // 颜色只给终端：`docker logs` 与重定向到文件时转义序列就是满屏乱码
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_ansi(std::io::stdout().is_terminal())
         .init();
 
     // 先占端口再开库：同一份部署已在跑时，第二个进程在迁移之前就退出
     let addr: SocketAddr = std::env::var("KALENDS_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:4180".into())
+        .unwrap_or_else(|_| DEFAULT_ADDR.into())
         .parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let data_dir = PathBuf::from(std::env::var("KALENDS_DATA").unwrap_or_else(|_| "data".into()));

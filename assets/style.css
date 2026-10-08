@@ -439,7 +439,7 @@ th.drop-after { box-shadow: inset -3px 0 0 var(--aqua); }
 .tag {
   display: inline-block; font-size: .8rem; font-weight: 500; line-height: 1.5;
   padding: .03rem .42rem; border-radius: 4px; white-space: nowrap;
-  margin: .05rem .25rem .05rem 0; max-width: 100%;
+  margin: .05rem .25rem .05rem 0; max-width: min(100%, 16rem);
   overflow: hidden; text-overflow: ellipsis; vertical-align: bottom;
 }
 :root {
@@ -498,16 +498,18 @@ th.drop-after { box-shadow: inset -3px 0 0 var(--aqua); }
 .fp-item { display: flex; padding: .16rem 0; cursor: pointer; }
 .fp-item .fp-v { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fp-item i { font-style: normal; color: var(--ink-2); font-size: .72rem; font-variant-numeric: tabular-nums; }
-/* 操作符型筛选（文本/数字/日期）：操作符下拉 + 值输入 */
-.fp-form { display: flex; gap: .4rem; padding: .2rem 0 .1rem; }
-.fp-form .fp-op { flex: none; font-size: .8rem; padding: .24rem .4rem; }
-.fp-form .fp-q {
-  flex: 1; min-width: 0; font: inherit; font-size: .85rem; font-weight: 500; color: var(--ink);
+/* 浮层里的输入框（筛选值、就地编辑、新选项、改名）同一造型，不论包在哪种容器里 */
+.fp-q {
+  font: inherit; font-size: .85rem; font-weight: 500; color: var(--ink);
   background: var(--surface); border: 1.5px solid var(--line); border-radius: 10px;
   padding: .24rem .55rem; transition: border-color .2s, box-shadow .25s;
 }
-.fp-form .fp-q:focus { outline: none; border-color: var(--aqua); box-shadow: 0 0 0 3px var(--ring); }
-.fp-form .fp-q:disabled { opacity: .4; }
+.fp-q:focus { outline: none; border-color: var(--aqua); box-shadow: 0 0 0 3px var(--ring); }
+.fp-q:disabled { opacity: .4; }
+/* 操作符型筛选（文本/数字/日期）：操作符下拉 + 值输入 */
+.fp-form { display: flex; gap: .4rem; padding: .2rem 0 .1rem; }
+.fp-form .fp-op { flex: none; font-size: .8rem; padding: .24rem .4rem; }
+.fp-form .fp-q { flex: 1; min-width: 0; }
 /* 就地编辑浮层 / 选项管理 / 新建列 */
 .cellpop, .optpop { min-width: 13rem; }
 .cellpop .mi {

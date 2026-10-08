@@ -79,11 +79,11 @@ KALENDS_DATA=./data KALENDS_ADDR=127.0.0.1:4180 TZ=Asia/Shanghai ./kalends
 ```bash
 kalends --version
 kalends --health                                    # 给容器 healthcheck 用
-kalends restore --from backups/snapshot-2026-08-25.db --to ./data-new
+kalends restore --from /path/to/data/backups/snapshot-2026-08-25.db --to /path/to/data-restored
 ```
 
 日常用法：在手机上「添加到主屏幕」，用起来跟应用一样；在设置页填好 Telegram 或 SMTP
-之后给自己发一条测试通知；设一个 ICS token，然后从日历应用订阅 `/calendar.ics?token=…`。
+之后给自己发一条测试通知；在设置页复制日历订阅地址，到日历应用里订阅它。
 
 ## 配置
 
@@ -96,7 +96,7 @@ kalends restore --from backups/snapshot-2026-08-25.db --to ./data-new
 | `TZ` | 无 | **一定要设。** 容器默认 UTC，「今天」会错位 |
 | `RUST_LOG` | `info` | |
 
-设置页里的：可选的 PIN、ICS token、共用的出网代理、显示币种、Telegram 与 SMTP 凭据、
+设置页里的：可选的 PIN、日历订阅地址、共用的出网代理、显示币种、Telegram 与 SMTP 凭据、
 提醒阈值、摘要时间。
 
 出网的 HTTP 请求也认进程环境里的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 与 `NO_PROXY`，
@@ -110,9 +110,9 @@ SMTP 一律直连。
 - **不是给公网用的。** 应该走 Tailscale 或 VPN，而不是开一个公网端口再加一个 PIN。
 - **数据库必须放在本地盘。** SQLite 在 SMB 或 NFS 上的锁不可靠，不要把唯一一份数据放
   在上面。
-- **界面只有中文。** 没有 i18n 层，所以界面、以及 `restore` 和 `--health` 的命令行输出
-  也都是中文。
-- **搜索是普通的 `LIKE`。** 几百条数据感觉不到差别；没有全文索引，也还没有虚拟滚动。
+- **界面只有中文。** 没有 i18n 层，所以界面和 `restore` 的输出都是中文。
+- **数据一次全部加载。** 搜索是在浏览器里对名称、备注和自定义列做子串匹配，所有条目一次画完，
+  没有分页也没有虚拟滚动。个人账本感觉不到；上万条就会慢下来。
 
 ## 文档
 

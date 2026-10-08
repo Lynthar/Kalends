@@ -1,9 +1,20 @@
 // 表格的本机视图层：渲染基础、子行树、排序、筛选、搜索、隐藏列、类型覆写、列宽与列序、窄窗与窄屏、schema 与 view 两层的结算。
 export default async function (t) {
-  const { APP, sleep, put, mk, fields, check, skip, send, evl, shot, menuClick, dragW, thWidthSum, tableW, waitFor } = t;
+  const { APP, sleep, put, patch, mk, fields, check, skip, send, evl, shot, menuClick, dragW, thWidthSum, tableW, waitFor } = t;
   /* 4. Notion 式视觉基础 + 状态收进列 */
   check('订阅表彩色标签', await evl(`document.querySelectorAll('#subs-body .tag').length`) > 0);
   check('标签 4px 圆角', await evl(`getComputedStyle(document.querySelector('#subs-body .tag')).borderRadius`) === '4px');
+  // 不带空格的超长选项值：标签封顶 16rem、出省略号，不能把整列撑到上千像素
+  const longCat = 'X'.repeat(160);
+  const nfRow = (await (await fetch(APP + 'api/collections/subs/items')).json()).find(r => r.name === 'Netflix');
+  await patch(`/api/items/${nfRow.id}`, { extra: { ...nfRow.extra, category: longCat } });
+  await evl('loadAll()');
+  const longTag = `[...document.querySelectorAll('#subs-body .tag')].find(x => x.textContent === '${longCat}')`;
+  check('超长选项值的标签封顶', await waitFor(`(() => { const g = ${longTag};
+    return !!g && g.getBoundingClientRect().width <= 16 * parseFloat(getComputedStyle(document.documentElement).fontSize) + 1; })()`),
+  String(await evl(`${longTag}?.getBoundingClientRect().width`)));
+  await patch(`/api/items/${nfRow.id}`, { extra: nfRow.extra });
+  await evl('loadAll()');
   check('表头属性图标', await evl(`document.querySelectorAll('#view-subs th .ticon').length`) >= 6);
   check('纵向格线存在', await evl(`getComputedStyle(document.querySelector('#subs-body tr td')).borderRightWidth`) === '1px');
   check('表头常规字重', await evl(`getComputedStyle(document.querySelector('#view-subs th')).fontWeight`) === '500');

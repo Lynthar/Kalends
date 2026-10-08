@@ -133,10 +133,11 @@ cargo run</pre>
       public port and a PIN.</li>
     <li><b>The database has to be on local disk.</b> SQLite locking over SMB or NFS isn't
       reliable enough to trust with your only copy.</li>
-    <li><b>The interface is Chinese only.</b> There's no i18n layer, so the UI and the CLI
-      output are all in Chinese.</li>
-    <li><b>Search is a plain <code>LIKE</code>.</b> Fine for hundreds of rows; there's no
-      full-text index and no virtual scrolling yet.</li>
+    <li><b>The interface is Chinese only.</b> There's no i18n layer, so the UI and the
+      output of <code>restore</code> are in Chinese.</li>
+    <li><b>Everything loads up front.</b> Search is a substring match in the browser, and
+      every entry is drawn at once, with no pagination or virtual scrolling. A personal
+      ledger won't notice; tens of thousands of entries will.</li>
   </ul>
 </section>
 

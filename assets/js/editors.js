@@ -58,8 +58,9 @@ function inputsEditor(tab, it, td, fieldsDef, save) {
   for (const [f, label, type] of fieldsDef) {
     const wrap = document.createElement('label');
     wrap.className = 'cp-field';
-    const val = f in it ? it[f] : (it.extra || {})[td.dataset.k];
-    wrap.innerHTML = `${labelled ? esc(label) : ''}<input class="fp-q" type="${type}" ${type === 'number' ? 'step="any"' : ''} data-f="${esc(f)}">`;
+    const val = inExtra(COLS[tab][f]) ? (it.extra || {})[f] : it[f];
+    // 不标字时列名挪进 aria-label：label 里没有文字，读屏只念得出「编辑框」
+    wrap.innerHTML = `${labelled ? esc(label) : ''}<input class="fp-q" type="${type}" ${type === 'number' ? 'step="any"' : ''} data-f="${esc(f)}"${labelled ? '' : ` aria-label="${esc(label)}"`}>`;
     wrap.querySelector('input').value = val ?? '';
     box.appendChild(wrap);
   }
@@ -89,9 +90,9 @@ function inputsEditor(tab, it, td, fieldsDef, save) {
 function pickEditor(tab, it, td, k, save) {
   const col = COLS[tab][k];
   const t = colType(tab, k);
-  const fixed = t === 'status' || (col.ord && !col.custom && !optionsEditable(tab, k)); // 语义词表：只挑不建
+  const fixed = t === 'status'; // 语义词表：只挑不建
   const values = col.ord && fixed ? col.ord : effectiveOptions(tab, k);
-  const cur = String((k in it ? it[k] : (it.extra || {})[k]) ?? '');
+  const cur = String((inExtra(col) ? (it.extra || {})[k] : it[k]) ?? '');
   const box = cellPopShell(td, colLabel(tab, k));
   for (const x of values) {
     const b = document.createElement('button');
@@ -112,7 +113,7 @@ function pickEditor(tab, it, td, k, save) {
     }
     const addRow = document.createElement('div');
     addRow.className = 'opt-add';
-    addRow.innerHTML = '<input class="fp-q" placeholder="新选项，回车选用">';
+    addRow.innerHTML = '<input class="fp-q" placeholder="新选项，回车选用" aria-label="新选项">';
     const inp = addRow.querySelector('input');
     inp.addEventListener('keydown', async e => {
       if (!enterPressed(e)) return;
@@ -148,7 +149,7 @@ function multiEditor(tab, it, td, k, save) {
   box.addEventListener('change', commit);
   const addRow = document.createElement('div');
   addRow.className = 'opt-add';
-  addRow.innerHTML = '<input class="fp-q" placeholder="新选项，回车加入">';
+  addRow.innerHTML = '<input class="fp-q" placeholder="新选项，回车加入" aria-label="新选项">';
   const inp = addRow.querySelector('input');
   inp.addEventListener('keydown', async e => {
     if (!enterPressed(e)) return;
@@ -180,12 +181,14 @@ function cycleEditor(tab, it, td) {
   const syncDays = () => { days.hidden = sel.value !== 'days'; };
   sel.addEventListener('change', syncDays);
   syncDays();
-  box.querySelector('.cp-foot button').onclick = () => {
+  const commit = () => {
     if (badNumber(box)) return;
     // 天数清空写 null（键缺席＝保持原值，见 patchRow）
     const patch = { cycle: sel.value, cycle_days: days.value === '' ? null : +days.value };
     patchRow(tab, it, patch, { written: closerOf() });
   };
+  box.querySelector('.cp-foot button').onclick = commit;
+  days.addEventListener('keydown', e => { if (enterPressed(e)) commit(); });
   placePop(box, td);
 }
 

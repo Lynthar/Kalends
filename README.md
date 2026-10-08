@@ -93,12 +93,12 @@ Other modes (any other argument is refused with exit code 2, without touching th
 ```bash
 kalends --version
 kalends --health                                    # for a container healthcheck
-kalends restore --from backups/snapshot-2026-08-25.db --to ./data-new
+kalends restore --from /path/to/data/backups/snapshot-2026-08-25.db --to /path/to/data-restored
 ```
 
 Day to day: add it to your phone's home screen and it behaves like an app; fill
-in Telegram or SMTP under settings and send yourself a test notification; set an
-ICS token and subscribe to `/calendar.ics?token=…` from your calendar.
+in Telegram or SMTP under settings and send yourself a test notification; copy the
+calendar link from the settings page and subscribe to it from your calendar app.
 
 ## Configuration
 
@@ -111,7 +111,7 @@ Four environment variables, and everything else lives in the settings page.
 | `TZ` | — | **Set this.** Containers default to UTC and "today" ends up wrong |
 | `RUST_LOG` | `info` | |
 
-In the settings page: an optional PIN, the ICS token, a shared outbound proxy,
+In the settings page: an optional PIN, the calendar link, a shared outbound proxy,
 a display currency, Telegram and SMTP credentials, reminder thresholds and the
 digest time.
 
@@ -130,10 +130,12 @@ requests. SMTP always connects directly.
   than a public port and a PIN.
 - **The database has to be on local disk.** SQLite locking over SMB or NFS isn't
   reliable; don't put your only copy of the data there.
-- **The interface is Chinese only.** There's no i18n layer, so the UI, and the
-  CLI output from `restore` and `--health`, are all in Chinese.
-- **Search is a plain `LIKE`.** Fine for hundreds of rows; there's no full-text
-  index and no virtual scrolling yet.
+- **The interface is Chinese only.** There's no i18n layer, so the UI and the
+  output of `restore` are in Chinese.
+- **Everything loads up front.** Search is a substring match in the browser over
+  names, notes and custom columns, and every entry is drawn at once, with no
+  pagination or virtual scrolling. A personal ledger won't notice; tens of
+  thousands of entries will.
 
 ## Documentation
 

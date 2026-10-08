@@ -72,7 +72,7 @@ pub fn known_version() -> i64 {
 fn pre_migration_snapshot(conn: &Connection, data_dir: &Path) -> Result<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     // 全新安装不用备、版本过高交给 migrate() 报它那条更明白的错
-    if current == 0 || current >= MIGRATIONS.len() as i64 {
+    if current == 0 || current >= known_version() {
         return Ok(());
     }
     let backups = data_dir.join("backups");
@@ -80,11 +80,10 @@ fn pre_migration_snapshot(conn: &Connection, data_dir: &Path) -> Result<()> {
     let snap = backups.join(format!("pre-migration-v{current}.db"));
     let tmp = snap.with_extension("db.tmp");
     // 同名残留是上次失败重试的陈货：VACUUM INTO 不覆盖既有文件，先清掉；
-    // 正式名等 tmp 写完才动，任何一步失败都不赔上一份已有的好快照
+    // 正式名只由 tmp 写完后的 rename 原子覆盖，先删它的话 rename 失败就赔上一份已有的好快照
     let _ = std::fs::remove_file(&tmp);
     conn.execute("VACUUM INTO ?1", [tmp.to_string_lossy().as_ref()])
         .with_context(|| format!("迁移前快照：写不了 {}", tmp.display()))?;
-    let _ = std::fs::remove_file(&snap);
     std::fs::rename(&tmp, &snap).with_context(|| format!("迁移前快照：改名成 {} 失败", snap.display()))?;
     tracing::info!("pre-migration snapshot: {}", snap.display());
     Ok(())
@@ -155,7 +154,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     // 版本比这个二进制认识的还高＝这份数据是更新的 Kalends 写的（多半是回滚了部署）。
     // 照常启动的话旧代码会按旧结构读写新结构的库：列没了当成空、新列一律写不进去，
     // 而界面上一切正常。宁可起不来也别让它静默写坏账本。
-    let known = MIGRATIONS.len() as i64;
+    let known = known_version();
     if current > known {
         return Err(anyhow::anyhow!(
             "数据库版本 {current} 高于本二进制支持的 {known}：这份数据是更新版本的 Kalends 写的，\
@@ -400,12 +399,12 @@ mod tests {
     #[test]
     fn a_database_from_a_newer_build_refuses_to_start() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.pragma_update(None, "user_version", MIGRATIONS.len() as i64 + 1)
+        conn.pragma_update(None, "user_version", known_version() + 1)
             .unwrap();
         let err = migrate(&conn).unwrap_err().to_string();
         assert!(err.contains("高于本二进制支持的"), "{err}");
         // 版本正好等于已知迁移数＝跑满了的正常库，不能误伤
-        conn.pragma_update(None, "user_version", MIGRATIONS.len() as i64)
+        conn.pragma_update(None, "user_version", known_version())
             .unwrap();
         assert!(migrate(&conn).is_ok());
     }

@@ -11,7 +11,7 @@ chown -R 10001:10001 /path/to/appdata/kalends   # 容器内以非 root（uid 100
 mkdir -p /path/to/compose/kalends
 cp deploy/compose.yaml /path/to/compose/kalends/
 cd /path/to/compose/kalends && docker compose up -d
-curl -sf http://127.0.0.1:4180/api/health
+curl -sf --retry 5 --retry-connrefused http://127.0.0.1:4180/api/health   # 刚起的几秒连不上属正常，自动重试
 ```
 
 `compose.yaml` 里按需修改数据卷路径与时区；容器默认只绑 `127.0.0.1:4180`，由你的反向代理对局域网提供访问。**镜像没有发布到任何镜像仓库**——`image: kalends:local` 指的就是上面那条 `docker build` 在本机产出的镜像，不先 build 的话 `compose up` 会去拉一个不存在的镜像。
@@ -45,7 +45,7 @@ cargo build --release
 KALENDS_DATA=/path/to/data ./target/release/kalends
 ```
 
-环境变量：`KALENDS_ADDR`（默认 `127.0.0.1:4180`）、`KALENDS_DATA`（默认 `./data`）。
+环境变量共四个：`KALENDS_ADDR`、`KALENDS_DATA`、`TZ`、`RUST_LOG`，默认值与说明见 [README 的配置表](../README.zh-CN.md#配置)。
 
 ## 恢复 / Restore
 
@@ -75,7 +75,7 @@ docker run --rm \
 ## 升级与回滚 / Upgrade & Rollback
 
 - **升级**：重新 `docker build` + `docker compose up -d`。应用在跑数据库迁移**之前**会自动往 `backups/` 落一份 `pre-migration-v<N>.db`；落不下去（如磁盘满）会拒绝启动，先腾空间再试。
-- **回滚**：数据库结构没动过的升级直接换回旧镜像即可。**跑过迁移的升级不能带库回滚**——旧二进制遇到更新的数据库会拒绝启动（这是保护，不是故障）。此时用迁移前快照恢复：`kalends restore --from backups/pre-migration-v<N>.db --to <新目录>`，把数据卷指向新目录后再起旧镜像。
+- **回滚**：数据库结构没动过的升级直接换回旧镜像即可。**跑过迁移的升级不能带库回滚**——旧二进制遇到更新的数据库会拒绝启动（这是保护，不是故障）。此时用迁移前快照恢复：`kalends restore --from /path/to/data/backups/pre-migration-v<N>.db --to /path/to/data-restored`（Docker 部署照上面「恢复」一节的 `docker run` 写法），把数据卷指向新目录后再起旧镜像。
 
 ## 通知排查 / Notifications Troubleshooting
 

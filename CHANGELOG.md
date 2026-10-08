@@ -32,7 +32,7 @@ Release notes are taken from this file verbatim — each `## vX.Y.Z` section bec
 
 There is now a [live demo](https://lynthar.github.io/Kalends/demo/) — read-only, synthetic data — if you want a look before installing.
 
-**Fixed**: a failed settings read no longer passes for "not set". The notifier warns instead of silently skipping a run, exchange-rate and logo fetches refuse to go out when the proxy setting cannot be read, deleting an entry rolls back instead of orphaning its logo, and the settings form will not save over a channel config it could not read. A `days` cycle must carry a day count.
+**Fixed**: a failed settings read no longer passes for "not set". The notifier warns instead of silently skipping a run, exchange-rate and logo fetches refuse to go out when the proxy setting cannot be read, deleting an entry fails instead of orphaning its logo when the logo name can't be read, and the settings form will not save over a channel config it could not read. A `days` cycle must carry a day count.
 
 **Removed**: `KALENDS_MODULES`, `/config.js` and the TMDB key setting. Outbound traffic is down to exchange rates, favicons and your notification channels.
 

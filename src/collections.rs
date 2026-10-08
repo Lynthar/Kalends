@@ -697,10 +697,11 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
     if !RENEW_FROMS.contains(&renew_from.as_str()) {
         return Err(bad(format!("未知的续费起算方式：{renew_from}")).into());
     }
-    let name = pick("name").unwrap_or_else(|| cur["name"].as_str().unwrap().into());
-    if name.is_empty() {
+    // 带了 name 键却是空串或 null 要拒：当缺席处理会静默留着原名并回 200，建库同样输入回 400
+    if b.get("name").is_some() && pick("name").is_none() {
         return Err(bad("库名不能为空").into());
     }
+    let name = pick("name").unwrap_or_else(|| cur["name"].as_str().unwrap().into());
     let take = |k: &str| -> Option<String> {
         if b.get(k).is_some() {
             pick(k)
@@ -1598,8 +1599,9 @@ fn bare_host(host: &str) -> &str {
     }
 }
 
-/// 字面形状这一关：明显的本机名与字面内网地址直接拒。**这只是第一道**——光看字面
-/// 拦不住"公共域名解析到 127.0.0.1"（localtest.me），发请求前还要过 `resolve_public`。
+/// 字面形状这一关：明显的本机名与字面内网地址直接拒（不带点的主机、含裸 IPv6 字面量，在 `url_host`
+/// 就取不出主机名，到不了这里）。光看字面拦不住"公共域名解析到 127.0.0.1"（localtest.me），
+/// 发请求前还要过 `resolve_public`。
 fn public_host_ok(host: &str) -> bool {
     // 主机名不分大小写，先统一再比后缀——否则 FOO.LOCAL 字面关直接放过
     let bare = bare_host(host).to_ascii_lowercase();
@@ -1896,7 +1898,9 @@ async fn logo_file(State(app): State<App>, Path(name): Path<String>) -> Result<R
         Some("svg") => "image/svg+xml",
         Some("gif") => "image/gif",
         Some("ico") => "image/x-icon",
-        _ => "image/jpeg",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        // 写入口只落上面这几种后缀；别的文件不是图标，不替它猜类型
+        _ => return Ok(StatusCode::NOT_FOUND.into_response()),
     };
     let mut resp = (
         [
@@ -2966,7 +2970,14 @@ mod tests {
         };
         assert_eq!(date_fields(&r).await, ["last_renewed"]);
         let path = format!("/api/collections/{id}");
-        for bad_body in [json!({ "due_anchor": "weird" }), json!({ "renew_from": "x" })] {
+        // 空名与建库同判：当缺席处理会静默留着原名、回 200
+        for bad_body in [
+            json!({ "due_anchor": "weird" }),
+            json!({ "renew_from": "x" }),
+            json!({ "name": "" }),
+            json!({ "name": "  " }),
+            json!({ "name": null }),
+        ] {
             assert_eq!(call(&r, "PUT", &path, Some(bad_body.clone())).await.0, StatusCode::BAD_REQUEST, "{bad_body}");
         }
         assert_eq!(call(&r, "PUT", &path, Some(json!({ "due_anchor": "next" }))).await.0, StatusCode::OK);
@@ -3051,6 +3062,8 @@ mod tests {
             ("d.gif", b"GIF8"),
             ("e.ico", b"\0\0\x01\0"),
             ("f.jpg", b"\xFF\xD8\xFF"),
+            ("g.jpeg", b"\xFF\xD8\xFF"),
+            ("h.txt", b"not an icon"),
         ] {
             std::fs::write(logos.join(name), bytes).unwrap();
         }
@@ -3072,6 +3085,7 @@ mod tests {
             ("d.gif", "image/gif"),
             ("e.ico", "image/x-icon"),
             ("f.jpg", "image/jpeg"),
+            ("g.jpeg", "image/jpeg"),
         ] {
             let resp = get(format!("/logos/{name}")).await;
             assert_eq!(resp.status(), StatusCode::OK, "{name}");
@@ -3085,7 +3099,8 @@ mod tests {
                 assert_eq!(csp, None, "{name}");
             }
         }
-        for miss in ["/logos/nope.png", "/logos/..%2Fkalends.db", "/logos/%E5%9B%BE.png"] {
+        // 写入口不会落出别的后缀；真有这样的文件也不替它猜成 jpeg
+        for miss in ["/logos/nope.png", "/logos/..%2Fkalends.db", "/logos/%E5%9B%BE.png", "/logos/h.txt"] {
             assert_eq!(get(miss.to_string()).await.status(), StatusCode::NOT_FOUND, "{miss}");
         }
     }

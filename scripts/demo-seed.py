@@ -234,7 +234,6 @@ def main():
     base = f'http://127.0.0.1:{port}'
     with tempfile.TemporaryDirectory(prefix='kalends-demo-') as data_dir:
         env = {**os.environ, 'KALENDS_DATA': data_dir, 'KALENDS_ADDR': f'127.0.0.1:{port}'}
-        env.pop('KALENDS_PIN', None)
         proc = subprocess.Popen([os.path.abspath(args.bin)], env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:

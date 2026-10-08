@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use chrono::{Days, Local, Months, NaiveDate};
+use chrono::{Datelike, Days, Local, Months, NaiveDate};
 use rusqlite::{types::ValueRef, Connection};
 use serde_json::{json, Value};
 
@@ -13,12 +13,14 @@ pub fn today() -> NaiveDate {
 pub const CYCLES: &[&str] =
     &["weekly", "monthly", "quarterly", "semiannual", "annual", "biennial", "triennial", "days", "lifetime"];
 
-/// 从某个到期日按周期前进 n 期；lifetime 或未知周期返回 None。
+/// 从某个到期日按周期前进 n 期；lifetime、未知周期或结果年份超过 9999 返回 None。
 /// **跨多期必须一次算第 n 期，不能循环调用 `advance` n 次**：月加法钳到月末后
 /// 锚点即丢（1/31 迭代六次得 7/28，正解 7/31）。
 pub fn advance_n(date: NaiveDate, cycle: &str, cycle_days: Option<i64>, n: u32) -> Option<NaiveDate> {
-    let months = |m: u32| date.checked_add_months(Months::new(m * n));
-    let days = |d: u64| date.checked_add_days(Days::new(d * u64::from(n)));
+    // 写入口只收四位年份；推过 9999 存下来是 `+10000-01-15`，ICS 也随之写出 9 位的 DTSTART
+    let four_digit = |d: NaiveDate| (d.year() <= 9999).then_some(d);
+    let months = |m: u32| date.checked_add_months(Months::new(m * n)).and_then(four_digit);
+    let days = |d: u64| date.checked_add_days(Days::new(d * u64::from(n))).and_then(four_digit);
     match cycle {
         "weekly" => days(7),
         "monthly" => months(1),
@@ -56,8 +58,8 @@ pub fn due_from(
     advance(last_renewed.and_then(day)?, cycle, cycle_days)
 }
 
-/// 找不出结果就放弃，别把线程转死。周付从 1970 年推到现在也才 ~2900 期，
-/// 越过这个数说明周期或日期本身有问题，返回 None＝不动日期，是安全的失败。
+/// 找不出结果就放弃，别把线程转死。周付从 1970 年推到现在也才 ~2900 期，越过这个数说明
+/// 周期或日期本身有问题：`next` 锚点返回 None＝不动日期；`last` + `schedule` 按「没有日程」回落成今天。
 const MAX_PERIODS: u32 = 10_000;
 
 /// 续费动作把锚点日期改写成哪一天；None＝推不动，调用方不改日期。
@@ -136,7 +138,8 @@ pub fn cycle_label(cycle: &str, cycle_days: Option<i64>) -> String {
         "biennial" => "Biennial".into(),
         "triennial" => "Triennial".into(),
         "lifetime" => "Lifetime".into(),
-        "days" => format!("Every {} days", cycle_days.unwrap_or(0)),
+        // 缺天数写「?」：写成 0 是在编一个不存在的周期（前端 `cycleText` 同一写法）
+        "days" => cycle_days.map_or_else(|| "Every ? days".into(), |n| format!("Every {n} days")),
         other => other.into(),
     }
 }
@@ -499,7 +502,8 @@ pub fn totals(conn: &Connection) -> Result<Vec<Value>> {
         if !sem_of(&sems, &r.key, &r.status).spend {
             continue;
         }
-        let (Some(price), Some(currency)) = (r.price, r.currency.clone()) else {
+        // 空币种与没填同判（`missing_for_spend` 点名它），不另成一个 "" 桶
+        let (Some(price), Some(currency)) = (r.price, r.currency.clone().filter(|c| !c.is_empty())) else {
             continue;
         };
         if let Some(f) = monthly_factor(r.cycle.as_deref().unwrap_or(""), r.cycle_days) {
@@ -746,8 +750,23 @@ mod tests {
     fn cycle_label_is_english_with_day_count() {
         assert_eq!(cycle_label("semiannual", None), "Semiannual");
         assert_eq!(cycle_label("days", Some(181)), "Every 181 days");
+        // 缺天数如实写「?」，不编一个 0 天的周期；前端 cycleText 同一写法
+        assert_eq!(cycle_label("days", None), "Every ? days");
         // 存储键不认识时原样回显，别把它吞成空字符串
         assert_eq!(cycle_label("weird", None), "weird");
+    }
+
+    /// 推算结果只到 9999 年：写入口只收四位年份，推过去存成 `+10000-01-15`，ICS 写出 9 位日期。
+    /// `next` 锚点因此推不动；`last` + `schedule` 按「没有日程」回落成今天。
+    #[test]
+    fn dates_are_never_pushed_past_year_9999() {
+        assert_eq!(advance(d("9999-11-15"), "monthly", None), Some(d("9999-12-15")));
+        assert_eq!(advance(d("9999-12-15"), "monthly", None), None);
+        assert_eq!(advance(d("9999-12-30"), "days", Some(5)), None);
+        let today = d("2026-01-01");
+        assert_eq!(renew_to("next", "schedule", "monthly", None, Some(d("9999-12-15")), None, today), None);
+        assert_eq!(renew_to("last", "schedule", "monthly", None, None, Some(d("9999-12-15")), today), Some(today));
+        assert_eq!(due_from("last", "monthly", None, None, Some("9999-12-15")), None);
     }
 
     /// 补推逾期条目必须一次性推 n 期。逐次调用 `advance` 会在月末被钳一次之后
@@ -972,6 +991,18 @@ mod tests {
         assert_eq!(names(&un), ["无币", "无周期"]);
         assert_eq!(un[0]["missing"], json!("币种"));
         assert_eq!(un[1]["missing"], json!("周期"));
+    }
+
+    /// 存量里的空串币种与没填同判：不另成一个 "" 桶，而是和「无币」一样被点名。
+    #[test]
+    fn an_empty_currency_counts_as_missing_not_as_its_own_bucket() {
+        let conn = seeded();
+        add(&conn, "subs", &json!({ "name": "空币", "status": "Active", "price": 5, "currency": "USD", "cycle": "monthly" }));
+        conn.execute("UPDATE items SET currency='' WHERE name='空币'", []).unwrap();
+        assert_eq!(totals(&conn).unwrap(), Vec::<Value>::new());
+        let un = uncounted(&conn).unwrap();
+        assert_eq!(names(&un), ["空币"]);
+        assert_eq!(un[0]["missing"], json!("币种"));
     }
 
     /// 到期日只有一份实现，到期时间线与库列表都走它。

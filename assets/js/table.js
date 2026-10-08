@@ -9,7 +9,8 @@ const CYCLE_RANK = { weekly: 7, monthly: 30, quarterly: 91, semiannual: 182, ann
 // 周期列按周期长短排序：文案的字母序（Annual < Custom < Monthly）对读者没有意义
 const cycleRank = it => it.cycle === 'days' ? (it.cycle_days ?? null) : (CYCLE_RANK[it.cycle] ?? null);
 const dayDiff = (a, b) => Math.round((a - b) / 864e5);
-const cycleText = it => it.cycle === 'days' ? `Every ${it.cycle_days ?? '?'} days` : (CYCLE_LABEL[it.cycle] || '');
+// 不认识的存储键原样显示，别吞成空白（与后端 `engine::cycle_label` 同一写法）
+const cycleText = it => it.cycle === 'days' ? `Every ${it.cycle_days ?? '?'} days` : (CYCLE_LABEL[it.cycle] || it.cycle || '');
 
 // Notion 式彩色标签：值哈希定色，同值全站同色
 function tagHash(s) {
@@ -645,7 +646,11 @@ function bindRowGutter(tab, tr, g) {
     openRowMenu(tab, id, grip);
   };
   // 行默认拖不动：整行可拖会把「选中一段文字」变成拖行，按住手柄才开
-  grip.onmousedown = () => { tr.draggable = true; };
+  // 只按不拖时 dragend 不会来：松开就复原，否则这一行留在可拖态，选字又变成拖行
+  grip.onmousedown = () => {
+    tr.draggable = true;
+    document.addEventListener('mouseup', () => { tr.draggable = false; }, { once: true });
+  };
   reorderDnD(tr, {
     group: 'row:' + tab,
     axis: 'y',

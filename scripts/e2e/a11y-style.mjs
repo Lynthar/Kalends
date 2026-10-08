@@ -20,7 +20,7 @@ const SETTINGS_NOTE = `(() => {${CONTRAST}
 })()`;
 
 export default async function (t) {
-  const { sleep, fields, check, skip, send, evl, shot } = t;
+  const { sleep, fields, check, skip, send, evl, shot, waitFor } = t;
   /* 17. 深色 */
   await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] });
   await sleep(400);
@@ -136,6 +136,29 @@ export default async function (t) {
     `!document.querySelector('#item-fields label label')`) === true);
   await evl(`document.querySelector('#dlg-item').close()`);
   await sleep(200);
+
+  // 就地编辑器里的输入框：单输入框的 label 里没有文字，「新选项」框只有 placeholder——都得另给名字；
+  // 造型与筛选框同一套，不论包在哪种容器里
+  const popInput = async (tab, k, sel) => {
+    await evl(`switchTab('${tab}')`);
+    await evl(`tbodyOf('${tab}').querySelector('tr:not(.subrow) td[data-k="${k}"]').click()`);
+    await waitFor(`!!document.querySelector('.cellpop ${sel}')`);
+    const r = await evl(`(() => {
+      const i = document.querySelector('.cellpop ${sel}');
+      return { name: i?.getAttribute('aria-label') || '', radius: i ? getComputedStyle(i).borderTopLeftRadius : '' };
+    })()`);
+    await evl('closePop()');
+    return r;
+  };
+  const noteIn = await popInput('subs', 'notes', 'input[data-f="notes"]');
+  check('单输入框以列名为可访问名', noteIn.name !== '' && noteIn.name === await evl(`colLabel('subs', 'notes')`), noteIn.name);
+  const selAdd = await popInput('subs', 'category', '.opt-add input');
+  check('单选的「新选项」框有可访问名', selAdd.name !== '');
+  const multiAdd = await popInput('sims', 'forms', '.opt-add input');
+  check('多选的「新选项」框有可访问名', multiAdd.name !== '');
+  check('浮层里不在 .fp-form 中的输入框也有统一造型', [noteIn, selAdd, multiAdd].every(x => x.radius === '10px'),
+    JSON.stringify([noteIn.radius, selAdd.radius, multiAdd.radius]));
+  await evl(`switchTab('subs')`);
 
   // 对比度：算给机器看，比目检稳。小字要 4.5，最差那一档是 --surface-2 当底（表头底/行悬停底）
   check('浅色 --ink-2 在三种底上都过 WCAG AA 的 4.5', await evl(`(() => {${CONTRAST}

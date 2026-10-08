@@ -124,6 +124,12 @@ export default async function (t) {
   await sleep(800);
   check('反向拖回原位', JSON.stringify(await evl(`[...document.querySelectorAll('#subs-body tr:not(.subrow)')].map(t => +t.dataset.id)`))
     === JSON.stringify(rowDragIds));
+  // 只按下手柄不拖：dragend 不会来，松开就得退回不可拖，否则这一行里选字又变成拖行
+  const pressed = `document.querySelector('#subs-body tr[data-id="${rowDragIds[0]}"]')`;
+  await evl(`${pressed}.querySelector('[data-grip]').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))`);
+  check('按住手柄时行可拖', await evl(`${pressed}.draggable`) === true);
+  await evl(`${pressed}.querySelector('[data-grip]').dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))`);
+  check('只按不拖，松开后行退回不可拖', await evl(`${pressed}.draggable`) === false);
 
 
   /* 17.18. 键盘挪行：手柄不进 Tab 序（一行一个停靠点已经够多），改用复选框上的 Alt+↑/↓。 */

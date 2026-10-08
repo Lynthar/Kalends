@@ -1,6 +1,6 @@
 // 库：自建库、建库模板、库设置（库序、字段序与上表、状态语义）、哪些列删得掉、移列与调宽、续费起算、换到期模型、删光也不崩（放最后）。
 export default async function (t) {
-  const { APP, sleep, post, put, patch, raw, mk, items, fields, check, today, day, send, evl, shot, consoleMsgs, menuClick, thWidthSum, tableW, evlSafe, settle, waitFor } = t;
+  const { APP, sleep, post, put, patch, raw, mk, items, fields, check, today, day, send, evl, shot, consoleMsgs, menuClick, thWidthSum, tableW, evlSafe, settle, waitFor, sql } = t;
   /* 12g. 自建库：新建 → 默认字段集 → 表头/行由字段生成 → 语义驱动的续费按钮 → 删库 */
   const nc = await post('/api/collections', { name: '域名', icon: '🌐', due_anchor: 'next' });
   check('新建库返回库键', /^k\d+$/.test(nc.key || ''), JSON.stringify(nc));
@@ -667,6 +667,31 @@ export default async function (t) {
   check('拦下时不落库', cycAfter.cycle === cycBefore.cycle && cycAfter.cycle_days === cycBefore.cycle_days,
     `${cycBefore.cycle}/${cycBefore.cycle_days} → ${cycAfter.cycle}/${cycAfter.cycle_days}`);
   await evl(`closePop()`);
+
+  // 天数框里按回车就保存，与其余就地编辑器一致
+  const cycCell = `document.querySelector('#subs-body tr[data-id="${cycRowId}"] td[data-k="cycle"]')`;
+  await evl(`${cycCell}.click()`);
+  check('周期编辑器再开', await waitFor(`!!document.querySelector('.cellpop [data-days]')`));
+  await evl(`(() => {
+    const sel = document.querySelector('.cellpop [data-cycle]');
+    sel.value = 'days';
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    const d = document.querySelector('.cellpop [data-days]');
+    d.value = '45';
+    d.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    return true;
+  })()`);
+  await settle();
+  const cycEnter = (await items('subs')).find(r => r.id === cycRowId);
+  check('天数框按回车即保存', cycEnter.cycle === 'days' && cycEnter.cycle_days === 45, `${cycEnter.cycle}/${cycEnter.cycle_days}`);
+  check('回车保存后编辑器关上', await waitFor(`!document.querySelector('.cellpop')`));
+  // 档位外的存量周期：周期格照原样显示，不吞成空白（写入口已拒收，只能直接写库造）
+  sql('UPDATE items SET cycle=?, cycle_days=NULL WHERE id=?', ['fortnightly', cycRowId]);
+  await evl('loadAll()');
+  check('档位外的存量周期在表格里原样显示', await waitFor(`${cycCell}?.textContent.trim() === 'fortnightly'`),
+    await evl(`${cycCell}?.textContent`));
+  sql('UPDATE items SET cycle=?, cycle_days=? WHERE id=?', [cycBefore.cycle, cycBefore.cycle_days, cycRowId]);
+  await evl('loadAll()');
 
 
   /* 17.27. 「续费起算」是独立的轴：保号窗口从实际充值当天重算（today），
