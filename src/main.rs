@@ -211,6 +211,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(fields::router())
         .merge(api::renewals_router())
         .with_state(app.clone())
+        .layer(middleware::from_fn(api::json_rejections))
         .layer(middleware::from_fn_with_state(app, pin_gate));
 
     tracing::info!("listening on http://{addr}");

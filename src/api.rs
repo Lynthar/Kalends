@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use axum::{
-    extract::{Query, State},
+    extract::{Query, Request, State},
     http::{header, StatusCode},
+    middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, post},
     Extension, Json, Router,
@@ -66,6 +67,28 @@ impl IntoResponse for ApiError {
 }
 
 pub type R = Result<Json<Value>, ApiError>;
+
+/// 提取器自己的拒绝（坏 JSON、415、路径参数不是数）axum 回的是 `text/plain`，`/api` 下别的 4xx
+/// 都是 `{"error": …}`：把前者改包成同一形状，调用方只认一种。挂在整个路由外层。
+pub async fn json_rejections(req: Request, next: Next) -> Response {
+    let api = req.uri().path().starts_with("/api");
+    let resp = next.run(req).await;
+    let plain = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/plain"));
+    if !api || !plain || !resp.status().is_client_error() {
+        return resp;
+    }
+    let status = resp.status();
+    // 拒绝文案就一句话；读不出或超长时退回状态码的标准说法
+    let msg = match axum::body::to_bytes(resp.into_body(), 4096).await {
+        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+        Err(_) => status.canonical_reason().unwrap_or_default().to_string(),
+    };
+    (status, Json(json!({ "error": msg }))).into_response()
+}
 
 pub fn core_router() -> Router<App> {
     Router::new()
@@ -719,6 +742,25 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert_eq!(body_of(resp).await["error"], json!("需要对象"));
+    }
+
+    /// 提取器的拒绝（坏 JSON、路径参数不是数）同样回 `{"error": …}`：从前是 axum 的纯文本，
+    /// 前端只能报「HTTP 400」。`/api` 以外不动——`/calendar.ics` 的 401 给日历客户端看，照旧是文本。
+    #[tokio::test]
+    async fn extractor_rejections_under_api_carry_an_error_field() {
+        let app = App::for_tests(crate::db::fresh_in_memory().unwrap(), std::path::Path::new("."));
+        let router = core_router()
+            .merge(renewals_router())
+            .merge(crate::fields::router())
+            .with_state(app)
+            .layer(axum::middleware::from_fn(json_rejections));
+        for (method, path, body) in [("PUT", "/api/settings", None), ("PUT", "/api/fields/abc", Some(json!({ "name": "x" })))] {
+            let (status, got) = crate::call(&router, method, path, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert!(got["error"].as_str().is_some_and(|e| !e.is_empty()), "{path}: {got}");
+        }
+        let (status, got) = crate::call(&router, "GET", "/calendar.ics?token=x", None).await;
+        assert_eq!((status, got), (StatusCode::UNAUTHORIZED, Value::Null));
     }
 
     /// 真故障的回包带整条原因链：外层只说「哪一步、哪个路径」，权限不够还是盘满在里层，

@@ -14,7 +14,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 kalends \
-    && useradd --system --uid 10001 --gid 10001 --shell /usr/sbin/nologin kalends \
+    && useradd --uid 10001 --gid 10001 --shell /usr/sbin/nologin kalends \
     && mkdir -p /data && chown kalends:kalends /data
 COPY --from=build /usr/local/bin/kalends /usr/local/bin/kalends
 ENV KALENDS_ADDR=0.0.0.0:4180 KALENDS_DATA=/data

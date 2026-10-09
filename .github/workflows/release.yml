@@ -14,11 +14,13 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+# 升级都是显式动作：action 钉 commit SHA、行尾注明版本（tag 被挪到别的提交也换不掉这里跑的代码），
+# runner 钉 ubuntu-24.04（ubuntu-latest 换代时工具链与产物的依赖跟着变）
 jobs:
   gates:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # tag 与 Cargo.toml 对不上就停：发出去的二进制会把自己报成另一个版本
       - name: Tag matches Cargo.toml version
         if: startsWith(github.ref, 'refs/tags/v')
@@ -26,7 +28,7 @@ jobs:
           crate="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           tag="${GITHUB_REF_NAME#v}"
           test "$crate" = "$tag" || { echo "Cargo.toml $crate != tag $tag"; exit 1; }
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
       # 接口契约套件：只要二进制和 runner 自带的 node（脚本零依赖、不开浏览器）。
       # 浏览器套件不进来——它们要 chromium，而这一档只拦二进制的接口行为变没变。
@@ -38,7 +40,7 @@ jobs:
 
   build:
     needs: gates
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         target:
@@ -46,7 +48,7 @@ jobs:
           - aarch64-unknown-linux-gnu
           - x86_64-unknown-linux-musl
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # rusqlite 是 bundled（编译 SQLite 的 C 代码），ring 同样要 C 编译器。
       # libc6-dev-arm64-cross 必须显式装：--no-install-recommends 会把它丢掉，
       # 于是交叉 gcc 没有目标 libc 头、退回宿主 /usr/include，ring 编译时报缺
@@ -63,13 +65,20 @@ jobs:
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
           CC_x86_64_unknown_linux_musl: musl-gcc
         run: cargo build --release --locked --target ${{ matrix.target }}
+      # gnu 产物写明要求 glibc ≥ 2.34（README、用户指南）：依赖或工具链把下限抬高了就停，别发出去才知道
+      - name: glibc floor
+        if: endsWith(matrix.target, '-gnu')
+        run: |
+          need="$(readelf -V target/${{ matrix.target }}/release/kalends | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+          echo "needs $need"
+          test "$(printf '%s\nGLIBC_2.34\n' "$need" | sort -V | tail -1)" = GLIBC_2.34 || { echo "超过写明的 glibc 2.34 下限"; exit 1; }
       - name: Package
         run: |
           name="kalends-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/kalends" LICENSE README.md "dist/$name/"
           tar -C dist -czf "$name.tar.gz" "$name"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.target }}
           path: '*.tar.gz'
@@ -77,12 +86,12 @@ jobs:
   publish:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with: { merge-multiple: true, path: dist }
       - name: Checksums
         run: cd dist && sha256sum *.tar.gz > SHA256SUMS

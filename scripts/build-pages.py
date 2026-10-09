@@ -29,10 +29,11 @@ INJECT_AFTER_CORE = '''<script src="demo-data.js"></script>
 
 
 def drop_lines(html):
+    # 断言的必须是实际删掉的那一处：拿另一个串判「在不在」的话，行尾多个空格就判过了却没删
     for line in DROP_LINES:
-        if line not in html:
-            sys.exit(f'assets/index.html 里没有要删的 {line!r}——改写规则过期了')
-        html = html.replace(line + '\n', '')
+        html, n = re.subn(r'^[ \t]*' + re.escape(line) + r'[ \t]*\n', '', html, flags=re.M)
+        if n != 1:
+            sys.exit(f'assets/index.html 里要删的 {line!r} 命中 {n} 处，不是独占一行的 1 处——改写规则过期了')
     return html
 
 
@@ -49,7 +50,10 @@ def inject(html):
     if core not in html:
         sys.exit(f'找不到 {core}，插不进 shim')
     html = html.replace(core, core + '\n' + INJECT_AFTER_CORE)
-    return html.replace('</head>', '<link rel="stylesheet" href="demo-shim.css">\n</head>')
+    html, n = re.subn('</head>', '<link rel="stylesheet" href="demo-shim.css">\n</head>', html)
+    if n != 1:
+        sys.exit(f'assets/index.html 里 </head> 有 {n} 处，插不进演示样式')
+    return html
 
 
 def build_demo(out):

@@ -5,6 +5,8 @@ fn esc(s: &str) -> String {
     // \r 先归一成 \n：接口写进来的文本可能带 \r\n，孤立的 CR 会把内容行掰成两行
     s.replace("\r\n", "\n")
         .replace('\r', "\n")
+        // TEXT 里不许有别的控制字符（RFC 5545 §3.3.11，只放过 HTAB），严格的解析器会把整份当坏文件
+        .replace(|c: char| c.is_ascii_control() && !matches!(c, '\n' | '\t'), " ")
         .replace('\\', "\\\\")
         .replace(';', "\\;")
         .replace(',', "\\,")
@@ -103,6 +105,8 @@ mod tests {
         // \r 也不能漏：孤立的 CR 会把内容行掰成两行，解析器眼里就是坏文件
         assert_eq!(esc("a\r\nb"), "a\\nb");
         assert_eq!(esc("a\rb"), "a\\nb");
+        // 别的 C0 与 DEL 换成空格，制表符留着
+        assert_eq!(esc("a\u{1}b\u{7f}c\td"), "a b c\td");
     }
 
     /// UID 是事件的持久身份：跟着到期日走的话，每次续费在导入方眼里都是新事件，

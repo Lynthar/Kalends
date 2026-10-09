@@ -7,8 +7,8 @@
     # 1. 重建一份停在迁移 7 的副本（假设要演练迁移 8）
     python3 scripts/rehearse-migration.py http://<host>:<port> /tmp/rehearse --upto 7
 
-    # 2. 用新二进制跑迁移
-    KALENDS_DATA=/tmp/rehearse KALENDS_ADDR=127.0.0.1:4199 ./kalends
+    # 2. 用新二进制跑迁移；TZ 要与源实例一致，不然下一步对拍的「今日」与剩余天数会假红
+    TZ=<源实例的时区> KALENDS_DATA=/tmp/rehearse KALENDS_ADDR=127.0.0.1:4199 ./kalends
 
     # 3. 与原实例对拍（迁移不该改变任何对外可见的数据）
     python3 scripts/api-diff.py http://<host>:<port> http://127.0.0.1:4199

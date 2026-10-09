@@ -52,7 +52,7 @@ def averages(payload):
 
 
 def rewrite(rates, days):
-    src = FX_RS.read_text()
+    src = FX_RS.read_text(encoding="utf-8")
     period = f"{days[0]} – {days[-1]}"
     body = "\n".join(f'    ("{c}", {v}),' for c, v in rates.items())
     new_table = f"pub const BASELINE: &[(&str, f64)] = &[\n{body}\n];"
@@ -70,7 +70,7 @@ def rewrite(rates, days):
     )
     if n1 != 1 or n2 != 1:
         sys.exit(f"src/fx.rs 里没找到该替换的那两段（period={n1} table={n2}），请检查文件结构")
-    FX_RS.write_text(src)
+    FX_RS.write_text(src, encoding="utf-8")
     print(f"已写入 {len(rates)} 个币种，区间 {period}（{len(days)} 个交易日）")
     print("接着跑一次 cargo test：内置表的排序与正数不变式有单测守着")
 

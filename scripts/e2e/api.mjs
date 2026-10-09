@@ -37,6 +37,19 @@ export default async function (t) {
   check('删不可删的列 → 404', await codeOf(`/api/fields/${nameF.id}`, 'DELETE') === 404);
   check('错误体仍带可读 error 字段',
     typeof (await (await raw('/api/items/999999', 'PATCH', { name: 'x' })).json()).error === 'string');
+  // 提取器的拒绝从前是 axum 的纯文本，前端只能报「HTTP 400」
+  const rejected = async (path, init) => {
+    const r = await fetch(APP + path.slice(1), init);
+    return `${r.status} ${r.headers.get('content-type')} ${typeof (await r.json().catch(() => ({}))).error}`;
+  };
+  for (const [what, path, init] of [
+    ['坏 JSON', '/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{' }],
+    ['不带 Content-Type', '/api/settings', { method: 'PUT', body: '{}' }],
+    ['路径参数不是数', '/api/fields/abc', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{"name":"x"}' }],
+  ]) {
+    const got = await rejected(path, init);
+    check(`提取器拒绝（${what}）同样回 JSON 的 error`, /^4\d\d application\/json string$/.test(got), got);
+  }
 
   for (const x of [pr.id, gp.id]) await fetch(`${APP}api/items/${x}`, { method: 'DELETE' });
 

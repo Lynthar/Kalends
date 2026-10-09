@@ -10,41 +10,41 @@ use std::collections::BTreeMap;
 use crate::db;
 
 /// 内置平均汇率的取样区间，界面上要说清楚这份数字是什么时候的。
-pub const BASELINE_PERIOD: &str = "2026-07-08 – 2026-08-06";
+pub const BASELINE_PERIOD: &str = "2026-09-09 – 2026-10-08";
 
 /// 1 USD = N 单位，取 `BASELINE_PERIOD` 区间内各交易日的均值。
 /// 由 `scripts/update-fx-baseline.py` 重新生成——别手改，改了下次发版会被覆盖。
 pub const BASELINE: &[(&str, f64)] = &[
-    ("AUD", 1.4314),
-    ("BRL", 5.1011),
-    ("CAD", 1.408),
-    ("CHF", 0.8113),
-    ("CNY", 6.7687),
-    ("CZK", 21.1603),
-    ("DKK", 6.5348),
-    ("EUR", 0.8742),
-    ("GBP", 0.7464),
-    ("HKD", 7.841),
-    ("HUF", 315.7968),
-    ("IDR", 18006.1364),
-    ("ILS", 3.0378),
-    ("INR", 95.8627),
-    ("ISK", 124.9059),
-    ("JPY", 161.7032),
-    ("KRW", 1468.5132),
-    ("MXN", 17.4311),
-    ("MYR", 4.0852),
-    ("NOK", 9.6377),
-    ("NZD", 1.7197),
-    ("PHP", 61.4879),
-    ("PLN", 3.7779),
-    ("RON", 4.5808),
-    ("SEK", 9.6421),
-    ("SGD", 1.2894),
-    ("THB", 33.5082),
-    ("TRY", 47.2464),
+    ("AUD", 1.4168),
+    ("BRL", 5.1269),
+    ("CAD", 1.4074),
+    ("CHF", 0.8249),
+    ("CNY", 6.7058),
+    ("CZK", 21.3577),
+    ("DKK", 6.5526),
+    ("EUR", 0.8766),
+    ("GBP", 0.7499),
+    ("HKD", 7.845),
+    ("HUF", 320.2764),
+    ("IDR", 17808.7273),
+    ("ILS", 3.0459),
+    ("INR", 95.955),
+    ("ISK", 121.1809),
+    ("JPY", 156.7255),
+    ("KRW", 1355.6868),
+    ("MXN", 17.555),
+    ("MYR", 4.0814),
+    ("NOK", 9.4641),
+    ("NZD", 1.7556),
+    ("PHP", 62.6824),
+    ("PLN", 3.8215),
+    ("RON", 4.6338),
+    ("SEK", 9.8756),
+    ("SGD", 1.2756),
+    ("THB", 33.3832),
+    ("TRY", 48.8683),
     ("USD", 1.0),
-    ("ZAR", 16.4938),
+    ("ZAR", 16.3695),
 ];
 
 /// 生效中的汇率表：内置表打底，实时值盖上面；`live` 单独记，界面要能说清哪些币种
@@ -76,6 +76,7 @@ pub fn rates(conn: &Connection) -> rusqlite::Result<Rates> {
         }
     }
     live.sort();
+    live.dedup();
     Ok(Rates { map, live })
 }
 
@@ -203,6 +204,9 @@ mod tests {
         assert_eq!(r.map.get("TWD"), Some(&31.2), "内置表没有的币种也要收下");
         assert_eq!(r.map.get("EUR"), baseline().get("EUR"), "没拉到的币种回落内置值");
         assert_eq!(r.live, vec!["CNY".to_string(), "TWD".to_string()]);
+        // 同一币种大小写两写，「已拉到实时值」的清单里只算一次
+        put(&c, "fx.rates", r#"{"cny": 7.5, "CNY": 7.5}"#);
+        assert_eq!(rates(&c).unwrap().live, vec!["CNY".to_string()]);
     }
 
     #[test]

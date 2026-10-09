@@ -16,6 +16,8 @@ on:
       - 'migrations/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+  # 公开仓库 60 天没有活动，GitHub 会停掉这条定时（停之前发邮件），停了要到 Actions 页手动启用；
+  # 不做保活。快照是静态的，页里的天数不会漂，横幅也写着生成日期，旧了只是日期显得早
   schedule:
     - cron: '0 3 1 * *'   # 每月 1 日重建，让演示里的到期天数保持新鲜
   workflow_dispatch:
@@ -29,15 +31,17 @@ concurrency:
   group: pages
   cancel-in-progress: true
 
+# 升级都是显式动作：action 钉 commit SHA、行尾注明版本（tag 被挪到别的提交也换不掉这里跑的代码），
+# runner 钉 ubuntu-24.04（ubuntu-latest 换代时工具链与产物的依赖跟着变）
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       pages: read           # configure-pages 要读站点配置
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -48,13 +52,14 @@ jobs:
       - name: Seed and export the demo snapshot
         run: python3 scripts/demo-seed.py --bin target/release/kalends --out site/demo-data.js
       - run: python3 scripts/build-pages.py --out dist
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with: { path: dist }
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        # .nojekyll 是点文件，v4 起默认不打包
+        with: { path: dist, include-hidden-files: true }
 
   deploy:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pages: write
       id-token: write
@@ -63,4 +68,4 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
