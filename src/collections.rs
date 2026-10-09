@@ -1926,6 +1926,7 @@ async fn logo_file(State(app): State<App>, Path(name): Path<String>) -> Result<R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::call;
     use crate::db::one;
 
     /// 删掉 id 最大的那条再新建，新条目不能捡回旧号：通知去重键、放锁期间的在途请求都拿 id
@@ -2840,20 +2841,6 @@ mod tests {
         assert_eq!(out["last_renewed"], json!(today.to_string()));
         assert_eq!(out["due"], json!((today + chrono::Days::new(30)).to_string()));
         assert!(renew_item(&conn, 9999, &json!({})).is_err());
-    }
-
-    async fn call(router: &Router, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
-        use tower::util::ServiceExt;
-        let req = axum::http::Request::builder()
-            .method(method)
-            .uri(path)
-            .header("content-type", "application/json")
-            .body(axum::body::Body::from(body.map_or_else(String::new, |b| b.to_string())))
-            .unwrap();
-        let resp = router.clone().oneshot(req).await.unwrap();
-        let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
     }
 
     /// 库路由 + 字段路由共用一个库，好在建库 / 改库之后回读字段注册表。

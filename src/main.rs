@@ -46,6 +46,22 @@ impl App {
     }
 }
 
+/// 对路由发一次 JSON 请求，回状态码与响应体（体不是 JSON 时回 `Null`）。只给测试用。
+#[cfg(test)]
+async fn call(router: &Router, method: &str, path: &str, body: Option<serde_json::Value>) -> (StatusCode, serde_json::Value) {
+    use tower::util::ServiceExt;
+    let req = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.map_or_else(String::new, |b| b.to_string())))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+}
+
 /// `kalends --health`：容器 HEALTHCHECK 自检（镜像里没有 curl / wget，为一件事装包
 /// 不值当）。只认 200：任一业务表读不出时 `/api/health` 回 503，它不过 PIN 门。
 async fn health_probe() -> ! {

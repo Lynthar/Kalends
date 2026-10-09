@@ -160,6 +160,23 @@ export default async function (t) {
     JSON.stringify([noteIn.radius, selAdd.radius, multiAdd.radius]));
   await evl(`switchTab('subs')`);
 
+  // 字段浮层（加状态值、新建列、改列名、选项的新增与改名）同样只有 placeholder 或什么都没有
+  const fieldPopNames = await evl(`(() => {
+    const th = k => document.querySelector('#view-subs th[data-k="' + k + '"]');
+    const names = () => [...popEl.querySelectorAll('input, select')].map(i => i.getAttribute('aria-label') || '');
+    const out = [];
+    openAddStatusPop('subs', 'status', th('status')); out.push(...names());
+    openNewColPop('subs', th('name')); out.push(...names());
+    openRenameColPop('subs', 'account', th('name')); out.push(...names());
+    openOptionsPop('subs', 'category', th('category'));
+    popEl.querySelector('[data-rn]').click(); out.push(...names());
+    popEl.dataset.cancelled = '1';
+    closePop();
+    return out;
+  })()`);
+  check('字段浮层的输入框与类型下拉都有可访问名', fieldPopNames.length === 6 && fieldPopNames.every(Boolean),
+    JSON.stringify(fieldPopNames));
+
   // 对比度：算给机器看，比目检稳。小字要 4.5，最差那一档是 --surface-2 当底（表头底/行悬停底）
   check('浅色 --ink-2 在三种底上都过 WCAG AA 的 4.5', await evl(`(() => {${CONTRAST}
     return ['--bg', '--surface', '--surface-2'].every(b => ratio(token('--ink-2'), token(b)) >= 4.5);

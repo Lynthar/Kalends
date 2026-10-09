@@ -18,15 +18,22 @@ function effectiveOptions(tab, k) {
   return out;
 }
 
-async function fieldCall(path, method, body) {
+/* 写失败与「写成了、界面没刷新」分开报（同 core.js write）：后者报成失败，用户会再做一遍。
+   refresh 是写成之后的界面收尾，said 是成功时的提示。 */
+async function fieldCall(path, method, body, { refresh = refreshFields, said = '' } = {}) {
   try {
     await api(path, { method, body: JSON.stringify(body) });
-    await refreshFields();
-    return true;
   } catch (err) {
     toast(err.message, true);
-    return false;
+    return;
   }
+  try {
+    await refresh();
+  } catch (err) {
+    toast(`${said || '已生效'}，但界面没刷新（${err.message}）：别重复操作，稍后刷新页面再看`, true);
+    return;
+  }
+  if (said) toast(said);
 }
 
 const putOpts = (tab, k, opts) => fieldCall('/api/fields/options', 'PUT', { tbl: tab, key: k, options: opts });
@@ -45,7 +52,7 @@ function openAddStatusPop(tab, k, anchor) {
   popEl.className = 'filterpop optpop';
   popEl.innerHTML = `<div class="fp-head"><b>新增状态值</b></div>
     <div class="fp-note">词表只能加，不能改名或删除——状态是条目的真列，改它要连行数据一起迁移</div>
-    <div class="opt-add"><input class="fp-q" placeholder="新状态，回车加入"></div>`;
+    <div class="opt-add"><input class="fp-q" placeholder="新状态，回车加入" aria-label="新状态值"></div>`;
   const inp = popEl.querySelector('input');
   inp.addEventListener('keydown', async e => {
     if (!enterPressed(e)) return;
@@ -53,10 +60,10 @@ function openAddStatusPop(tab, k, anchor) {
     const value = inp.value.trim();
     if (!value) return;
     closePop();
-    if (await fieldCall('/api/fields/add_status', 'POST', { tbl: tab, key: k, value })) {
-      rebuildHead(tab).then(() => RENDER[tab]());
-      toast(`已加入「${value}」，默认不计支出 / 不提醒 / 不上时间线`);
-    }
+    fieldCall('/api/fields/add_status', 'POST', { tbl: tab, key: k, value }, {
+      refresh: () => rebuildHead(tab),
+      said: `已加入「${value}」，默认不计支出 / 不提醒 / 不上时间线`,
+    });
   });
   placePop(popEl, anchor);
   inp.focus();
@@ -168,6 +175,7 @@ function openOptionsPop(tab, k, anchor) {
       row.innerHTML = '';
       row.draggable = false;
       const inp = Object.assign(document.createElement('input'), { className: 'fp-q', value: x });
+      inp.setAttribute('aria-label', `「${x}」改名为`);
       row.appendChild(inp);
       inp.focus();
       inp.select();
@@ -196,7 +204,7 @@ function openOptionsPop(tab, k, anchor) {
   });
   const addRow = document.createElement('div');
   addRow.className = 'opt-add';
-  addRow.innerHTML = `<input class="fp-q" placeholder="新选项，回车添加">`;
+  addRow.innerHTML = `<input class="fp-q" placeholder="新选项，回车添加" aria-label="新选项">`;
   const addInp = addRow.querySelector('input');
   addInp.addEventListener('keydown', async e => {
     if (!enterPressed(e)) return;
@@ -218,8 +226,8 @@ function openNewColPop(tab, anchor) {
   popEl = document.createElement('div');
   popEl.className = 'filterpop optpop';
   popEl.innerHTML = `<div class="fp-head"><b>新建列</b></div>
-    <div class="fp-form"><input class="fp-q" data-name placeholder="列名"></div>
-    <div class="fp-form"><select class="mini-select fp-op" data-type>
+    <div class="fp-form"><input class="fp-q" data-name placeholder="列名" aria-label="列名"></div>
+    <div class="fp-form"><select class="mini-select fp-op" data-type aria-label="列类型">
       ${CREATABLE_TYPES.map(t => `<option value="${t}">${TYPES[t].label}</option>`).join('')}
     </select><button type="button" class="btn primary mini" data-go>创建</button></div>`;
   const go = async () => {
@@ -227,7 +235,7 @@ function openNewColPop(tab, anchor) {
     if (!name) { toast('列名不能为空', true); return; }
     const ftype = popEl.querySelector('[data-type]').value;
     closePop();
-    if (await fieldCall('/api/fields', 'POST', { tbl: tab, name, ftype })) await rebuildHead(tab);
+    await fieldCall('/api/fields', 'POST', { tbl: tab, name, ftype }, { refresh: () => rebuildHead(tab) });
   };
   popEl.querySelector('[data-go]').onclick = go;
   popEl.querySelector('[data-name]').addEventListener('keydown', e => { if (enterPressed(e)) go(); });
@@ -243,14 +251,14 @@ function openRenameColPop(tab, k, th) {
   popEl = document.createElement('div');
   popEl.className = 'filterpop optpop';
   popEl.innerHTML = `<div class="fp-head"><b>重命名列</b></div>
-    <div class="fp-form"><input class="fp-q" value="${esc(f.name)}"></div>`;
+    <div class="fp-form"><input class="fp-q" value="${esc(f.name)}" aria-label="列名"></div>`;
   const inp = popEl.querySelector('input');
   inp.addEventListener('keydown', async e => {
     if (!enterPressed(e)) return;
     const name = inp.value.trim();
     if (!name || name === f.name) { closePop(); return; }
     closePop();
-    if (await fieldCall(`/api/fields/${f.id}`, 'PUT', { name })) await rebuildHead(tab);
+    await fieldCall(`/api/fields/${f.id}`, 'PUT', { name }, { refresh: () => rebuildHead(tab) });
   });
   placePop(popEl, th);
   inp.focus();
@@ -366,7 +374,7 @@ function openHeadMenu(tab, th) {
     items.push({ ic: '✎', t: '重命名列', act: () => openRenameColPop(tab, k, th), keepPop: true });
     items.push({ ic: '✕', t: '删除列', act: async () => {
       if (!confirm(`删除列「${th.dataset.label}」？该列在所有行的值将被清除，不可撤销。`)) return;
-      if (await fieldCall(`/api/fields/${fid}`, 'DELETE', {})) await reloadAfterColumnDrop(tab);
+      await fieldCall(`/api/fields/${fid}`, 'DELETE', {}, { refresh: () => reloadAfterColumnDrop(tab) });
     } });
   }
   popEl = document.createElement('div');

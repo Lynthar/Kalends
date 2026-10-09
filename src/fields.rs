@@ -419,15 +419,14 @@ fn swap_option_in_list(conn: &Connection, tbl: &str, key: &str, from: &str, to: 
     Ok(())
 }
 
-// 原位改名（目标已存在则合并去重）或移除
-fn swap_in_vec(arr: &mut Vec<String>, from: &str, to: Option<&str>) {
-    match to {
-        Some(to) if !arr.iter().any(|x| x == to) => {
-            if let Some(p) = arr.iter().position(|x| x == from) {
-                arr[p] = to.to_string();
-            }
+// 多选值按集合改：旧值全部撤掉，新值落在第一个旧值的位置（已在就不再放）；别的元素连同非文本的原样留着
+fn swap_in_vec(arr: &mut Vec<Value>, from: &str, to: Option<&str>) {
+    let at = arr.iter().position(|x| x == from);
+    arr.retain(|x| x != from);
+    if let (Some(at), Some(to)) = (at, to) {
+        if !arr.iter().any(|x| x == to) {
+            arr.insert(at, json!(to));
         }
-        _ => arr.retain(|x| x != from),
     }
 }
 
@@ -442,9 +441,7 @@ fn swap_extra_value(obj: &mut serde_json::Map<String, Value>, key: &str, from: &
             true
         }
         Some(Value::Array(arr)) if arr.iter().any(|x| x.as_str() == Some(from)) => {
-            let mut ss: Vec<String> = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
-            swap_in_vec(&mut ss, from, to);
-            *arr = ss.into_iter().map(Value::from).collect();
+            swap_in_vec(arr, from, to);
             true
         }
         _ => false,
@@ -479,96 +476,123 @@ fn rewrite_extra(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use std::sync::{Arc, Mutex};
-    use tower::util::ServiceExt;
+    use crate::call;
+    use crate::db::one;
+    use axum::http::StatusCode;
+
+    /// 新库上的字段路由，连同它底下的库（好直接播种与回读）。
+    fn fresh() -> (Router, crate::Db) {
+        let app = App::for_tests(crate::db::fresh_in_memory().unwrap(), std::path::Path::new("."));
+        (router().with_state(app.clone()), app.db)
+    }
+
+    fn options(db: &crate::Db, tbl: &str, key: &str) -> Value {
+        let stored: String = one(&db.lock().unwrap(), "SELECT options FROM fields WHERE tbl=?1 AND key=?2", [tbl, key]);
+        serde_json::from_str(&stored).unwrap()
+    }
 
     /// 删掉最新一列再建列，新列不能拿回旧键：没刷新的页面里还挂着旧列的值，键一复用，
     /// 它们就在新列里复活并被写回库。删列时库属性里指着它的引用一并撤掉。
     #[tokio::test]
     async fn a_deleted_column_never_hands_its_key_to_the_next_one() {
-        let db = Arc::new(Mutex::new(crate::db::fresh_in_memory().unwrap()));
-        let call = |req: Request<Body>| {
-            let app = router().with_state(App { db: db.clone(), data_dir: std::path::PathBuf::from(".") });
-            async move {
-                let resp = app.oneshot(req).await.unwrap();
-                let status = resp.status();
-                let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-                (status, serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null))
-            }
-        };
-        let create = |name: &str| {
-            Request::post("/api/fields")
-                .header("content-type", "application/json")
-                .body(Body::from(json!({ "tbl": "subs", "name": name }).to_string()))
-                .unwrap()
-        };
-        let (_, first) = call(create("甲")).await;
+        let (r, db) = fresh();
+        let create = |name: &str| Some(json!({ "tbl": "subs", "name": name }));
+        let (_, first) = call(&r, "POST", "/api/fields", create("甲")).await;
         let key = first["key"].as_str().unwrap().to_string();
         db.lock().unwrap().execute("UPDATE collections SET note_field=?1 WHERE key='subs'", [&key]).unwrap();
-        let del = Request::delete(format!("/api/fields/{}", first["id"])).body(Body::empty()).unwrap();
-        assert_eq!(call(del).await.0, StatusCode::OK);
-        let (_, second) = call(create("乙")).await;
+        assert_eq!(call(&r, "DELETE", &format!("/api/fields/{}", first["id"]), None).await.0, StatusCode::OK);
+        let (_, second) = call(&r, "POST", "/api/fields", create("乙")).await;
         assert_ne!(second["key"].as_str().unwrap(), key);
-        let note: Option<String> =
-            crate::db::one(&db.lock().unwrap(), "SELECT note_field FROM collections WHERE key='subs'", []);
+        let note: Option<String> = one(&db.lock().unwrap(), "SELECT note_field FROM collections WHERE key='subs'", []);
         assert_eq!(note, None, "库属性还指着已删的列");
+    }
+
+    /// 建列回的就是注册表里那一行：键由 id 派生、排在该库末尾、值进 extra、默认上表、没给类型按文本。
+    /// 类型不认识或库不存在一律 400，什么都不建。
+    #[tokio::test]
+    async fn a_created_column_reads_back_as_registered() {
+        let (r, db) = fresh();
+        let count = || -> i64 { one(&db.lock().unwrap(), "SELECT count(*) FROM fields", []) };
+        let before = count();
+        for body in [json!({ "tbl": "vps", "name": "列", "ftype": "star" }), json!({ "tbl": "nope", "name": "列" })] {
+            assert_eq!(call(&r, "POST", "/api/fields", Some(body.clone())).await.0, StatusCode::BAD_REQUEST, "{body}");
+        }
+        assert_eq!(count(), before, "被拒的请求不该建列");
+        let last: i64 = one(&db.lock().unwrap(), "SELECT max(pos) FROM fields WHERE tbl='vps'", []);
+        let (status, made) = call(&r, "POST", "/api/fields", Some(json!({ "tbl": "vps", "name": "机房" }))).await;
+        assert_eq!(status, StatusCode::OK);
+        let id = made["id"].as_i64().unwrap();
+        assert_eq!(made, json!({
+            "id": id, "tbl": "vps", "key": format!("c{id}"), "name": "机房", "ftype": "text", "options": [],
+            "builtin": false, "pos": last + 1, "src": "extra", "shown": true, "config": null,
+        }));
+        let (_, all) = call(&r, "GET", "/api/fields", None).await;
+        assert_eq!(all.as_array().unwrap().iter().find(|f| f["id"] == id), Some(&made));
     }
 
     /// 列类型建后不可改是既定行为；带 `ftype` 的更新此前被静默忽略——既不改也不说，
     /// 调用方以为改成了。要 400 说明白，不能 200。
     #[tokio::test]
     async fn an_update_carrying_ftype_is_rejected_not_ignored() {
-        let db = Arc::new(Mutex::new(crate::db::fresh_in_memory().unwrap()));
+        let (r, db) = fresh();
         let (id, ftype): (i64, String) = db
             .lock()
             .unwrap()
-            .query_row("SELECT id, ftype FROM fields WHERE tbl='subs' AND key='price'", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
+            .query_row("SELECT id, ftype FROM fields WHERE tbl='subs' AND key='price'", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
             })
             .unwrap();
-        let put = |body: Value| {
-            let db = db.clone();
-            async move {
-                let app = router().with_state(App { db, data_dir: std::path::PathBuf::from(".") });
-                let req = Request::put(format!("/api/fields/{id}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap();
-                app.oneshot(req).await.unwrap().status()
-            }
-        };
+        let path = format!("/api/fields/{id}");
         // 负向对照：只改显示名照常
-        assert_eq!(put(json!({ "name": "费用" })).await, StatusCode::OK);
-        assert_eq!(put(json!({ "name": "价格", "ftype": "text" })).await, StatusCode::BAD_REQUEST);
+        assert_eq!(call(&r, "PUT", &path, Some(json!({ "name": "费用" }))).await.0, StatusCode::OK);
+        assert_eq!(call(&r, "PUT", &path, Some(json!({ "name": "价格", "ftype": "text" }))).await.0, StatusCode::BAD_REQUEST);
         let now: (String, String) = db
             .lock()
             .unwrap()
-            .query_row("SELECT name, ftype FROM fields WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_row("SELECT name, ftype FROM fields WHERE id=?1", [id], |row| Ok((row.get(0)?, row.get(1)?)))
             .unwrap();
         assert_eq!(now, ("费用".into(), ftype), "被拒的请求一个字段也不该写");
+    }
+
+    /// 名称列承载详情入口：可以改名，不能撤下表。别的列上下表照常，标记收 0 / 1。不存在的列 404。
+    #[tokio::test]
+    async fn the_name_column_can_be_renamed_but_never_hidden() {
+        let (r, db) = fresh();
+        let id_of = |key: &str| -> i64 { one(&db.lock().unwrap(), "SELECT id FROM fields WHERE tbl='subs' AND key=?1", [key]) };
+        let read = |id: i64| -> (String, i64) {
+            db.lock()
+                .unwrap()
+                .query_row("SELECT name, shown FROM fields WHERE id=?1", [id], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+        };
+        let put = |id: i64, body: Value| {
+            let r = &r;
+            async move { call(r, "PUT", &format!("/api/fields/{id}"), Some(body)).await.0 }
+        };
+        let (name, account) = (id_of("name"), id_of("account"));
+        let before = read(name);
+        assert_eq!(put(name, json!({ "name": "名", "shown": false })).await, StatusCode::BAD_REQUEST);
+        assert_eq!(read(name), before, "被拒的请求一个字段也不该写");
+        assert_eq!(put(name, json!({ "name": "名", "shown": true })).await, StatusCode::OK);
+        assert_eq!(read(name), ("名".into(), 1));
+        assert_eq!(put(account, json!({ "name": "账号", "shown": 1 })).await, StatusCode::OK);
+        assert_eq!(read(account), ("账号".into(), 1));
+        assert_eq!(put(account, json!({ "name": "账号", "shown": 0 })).await, StatusCode::OK);
+        assert_eq!(read(account), ("账号".into(), 0));
+        for body in [json!({ "name": "无" }), json!({ "name": "无", "shown": true })] {
+            assert_eq!(put(9999, body.clone()).await, StatusCode::NOT_FOUND, "{body}");
+        }
     }
 
     /// 字段端点与条目写入口同一分寸：选项不是数组、标记不是布尔或 0/1、ftype 不是文本、键序掺了
     /// 非文本，一律 400 且什么都不动。从前 options 传错类型会把整份词表连同颜色清成 []、回 200。
     #[tokio::test]
     async fn field_endpoints_refuse_wrong_types_and_change_nothing() {
-        let db = Arc::new(Mutex::new(crate::db::fresh_in_memory().unwrap()));
-        let call = |method: &str, path: String, body: Value| {
-            let app = router().with_state(App { db: db.clone(), data_dir: std::path::PathBuf::from(".") });
-            let req = Request::builder()
-                .method(method)
-                .uri(path)
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap();
-            async move { app.oneshot(req).await.unwrap().status() }
-        };
+        let (r, db) = fresh();
         let snapshot = || -> String {
-            crate::db::one(&db.lock().unwrap(), "SELECT group_concat(options || shown || name, '|') FROM fields", [])
+            one(&db.lock().unwrap(), "SELECT group_concat(options || shown || name, '|') FROM fields", [])
         };
-        let purpose_id: i64 = crate::db::one(&db.lock().unwrap(), "SELECT id FROM fields WHERE tbl='vps' AND key='purpose'", []);
+        let purpose_id: i64 = one(&db.lock().unwrap(), "SELECT id FROM fields WHERE tbl='vps' AND key='purpose'", []);
         let before = snapshot();
         let refused = [
             ("PUT", "/api/fields/options".to_string(), json!({ "tbl": "vps", "key": "purpose", "options": "建站" })),
@@ -585,7 +609,7 @@ mod tests {
             ("POST", "/api/fields/add_status".to_string(), json!({ "tbl": "subs", "key": "status", "value": 5 })),
         ];
         for (method, path, body) in refused {
-            assert_eq!(call(method, path, body.clone()).await, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(call(&r, method, &path, Some(body.clone())).await.0, StatusCode::BAD_REQUEST, "{body}");
         }
         assert_eq!(snapshot(), before, "被拒的请求一个字段也不该写");
         // 负向对照：界面实际发的形状照常
@@ -596,7 +620,161 @@ mod tests {
             ("PUT", "/api/fields/options".to_string(), json!({ "tbl": "vps", "key": "purpose", "options": [{ "v": "建站", "c": 2 }, "代理"] })),
         ];
         for (method, path, body) in ok {
-            assert_eq!(call(method, path, body.clone()).await, StatusCode::OK, "{body}");
+            assert_eq!(call(&r, method, &path, Some(body.clone())).await.0, StatusCode::OK, "{body}");
         }
+    }
+
+    /// 选项清单落表前先常规化：文本收成 `{v}`、去首尾空白、空值丢掉、按 v 去重留第一个、色号只认 0..9、
+    /// 语义标记只在传了时落。只有 builtin=0 的 sel / multi 列能这么改，库不存在同样 400。
+    #[tokio::test]
+    async fn option_lists_are_normalized_before_they_are_stored() {
+        let (r, db) = fresh();
+        let put = |tbl: &str, key: &str, options: Value| {
+            call(&r, "PUT", "/api/fields/options", Some(json!({ "tbl": tbl, "key": key, "options": options })))
+        };
+        let sent = json!([" a ", "", "a", { "v": "b", "c": 12 }, { "v": "c", "c": 4, "spend": 1 }, { "v": "d", "alert": false }]);
+        assert_eq!(put("vps", "purpose", sent).await.0, StatusCode::OK);
+        assert_eq!(
+            options(&db, "vps", "purpose"),
+            json!([{ "v": "a" }, { "v": "b" }, { "v": "c", "c": 4, "spend": 1 }, { "v": "d", "alert": 0 }])
+        );
+        // 引擎真列、没有选项的类型、不存在的库
+        for (tbl, key) in [("subs", "cycle"), ("vps", "product"), ("nope", "purpose")] {
+            assert_eq!(put(tbl, key, json!(["a"])).await.0, StatusCode::BAD_REQUEST, "{tbl}.{key}");
+        }
+    }
+
+    /// 状态语义按值逐项合并：只动点名的那个值、只动传了的标记，别的值与没传的标记原样。
+    #[tokio::test]
+    async fn status_semantics_change_only_the_named_flags_of_the_named_value() {
+        let (r, db) = fresh();
+        let before = options(&db, "subs", "status");
+        let at = before.as_array().unwrap().iter().position(|o| o["v"] == "Active").unwrap();
+        assert_eq!(before[at]["alert"], 1, "前提：Active 原本发提醒");
+        let sem = |key: &str| {
+            call(&r, "PUT", "/api/fields/semantics", Some(json!({ "tbl": "subs", "key": key, "options": [{ "v": "Active", "alert": 0 }] })))
+        };
+        assert_eq!(sem("status").await.0, StatusCode::OK);
+        let mut want = before.clone();
+        want[at]["alert"] = json!(0);
+        assert_eq!(options(&db, "subs", "status"), want);
+        assert_eq!(sem("category").await.0, StatusCode::BAD_REQUEST, "没有状态词表的列");
+    }
+
+    /// 状态词表只能追加：新值三个标记全关地排到末尾；已有的值（老形态的纯文本也算）400 且词表不动。
+    #[tokio::test]
+    async fn the_status_vocabulary_only_grows() {
+        let (r, db) = fresh();
+        let mut seeded = options(&db, "subs", "status");
+        seeded.as_array_mut().unwrap().push(json!("Legacy"));
+        db.lock()
+            .unwrap()
+            .execute("UPDATE fields SET options=?1 WHERE tbl='subs' AND key='status'", [seeded.to_string()])
+            .unwrap();
+        let add = |value: &str| {
+            call(&r, "POST", "/api/fields/add_status", Some(json!({ "tbl": "subs", "key": "status", "value": value })))
+        };
+        for dup in ["Active", "Legacy"] {
+            assert_eq!(add(dup).await.0, StatusCode::BAD_REQUEST, "{dup}");
+        }
+        assert_eq!(options(&db, "subs", "status"), seeded, "被拒的请求一个字段也不该写");
+        assert_eq!(add("Paused").await.0, StatusCode::OK);
+        let mut want = seeded.clone();
+        let list = want.as_array_mut().unwrap();
+        *list.last_mut().unwrap() = json!({ "v": "Legacy" });
+        list.push(json!({ "v": "Paused", "spend": 0, "alert": 0, "timeline": 0 }));
+        assert_eq!(options(&db, "subs", "status"), want);
+    }
+
+    const UNTOUCHED: &str = "2000-01-01 00:00:00";
+
+    /// 选项改名 / 删除的底子：vps 单选「用途」的词表是 [x, a(色 3)]，a 放第二位，改错了位置一眼可辨；
+    /// 一行 vps 挂着 a（多选里还有重复的 a 与一个非文本元素），一行 vps 没有 a，一行 subs 挂着同名键。
+    /// 各行 `updated_at` 定死在过去，回 (路由, 库, [命中行, 未命中行, 别库行])。
+    fn option_fixture() -> (Router, crate::Db, [i64; 3]) {
+        let (r, db) = fresh();
+        let ids = {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE fields SET options=?1 WHERE tbl='vps' AND key='purpose'",
+                [json!([{ "v": "x" }, { "v": "a", "c": 3 }]).to_string()],
+            )
+            .unwrap();
+            let seed = |coll: &str, extra: Value| -> i64 {
+                conn.query_row(
+                    "INSERT INTO items(collection_id, name, extra, updated_at)
+                     SELECT id, 'x', ?2, ?3 FROM collections WHERE key=?1 RETURNING id",
+                    params![coll, extra.to_string(), UNTOUCHED],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            };
+            [
+                seed("vps", json!({ "purpose": "a", "locations": ["x", "a", 3, "a"] })),
+                seed("vps", json!({ "purpose": "x", "locations": ["x"] })),
+                seed("subs", json!({ "purpose": "a" })),
+            ]
+        };
+        (r, db, ids)
+    }
+
+    /// 一行条目的 extra 与 `updated_at`。
+    fn item(db: &crate::Db, id: i64) -> (Value, String) {
+        db.lock()
+            .unwrap()
+            .query_row("SELECT extra, updated_at FROM items WHERE id=?1", [id], |row| {
+                Ok((serde_json::from_str(&row.get::<_, String>(0)?).unwrap(), row.get(1)?))
+            })
+            .unwrap()
+    }
+
+    /// 对单选「用途」与多选「位置」各发一次同样的请求，都要 200。
+    async fn on_both_columns(r: &Router, path: &str, body: impl Fn(&str) -> Value) {
+        for key in ["purpose", "locations"] {
+            assert_eq!(call(r, "POST", path, Some(body(key))).await.0, StatusCode::OK, "{key}");
+        }
+    }
+
+    /// 选项改名在词表里原位进行、带着颜色走，并传到这个库里每一行挂着它的值：单选整值换掉；多选按集合改，
+    /// 重复的旧值并成一个、不是文本的元素原样留着。没挂这个值的行与别的库一个字节都不动。
+    #[tokio::test]
+    async fn renaming_an_option_carries_its_color_and_reaches_every_row() {
+        let (r, db, [hit, miss, other]) = option_fixture();
+        let untouched = (item(&db, miss), item(&db, other));
+        on_both_columns(&r, "/api/fields/rename_option", |key| json!({ "tbl": "vps", "key": key, "from": "a", "to": "b" })).await;
+        assert_eq!(options(&db, "vps", "purpose"), json!([{ "v": "x" }, { "v": "b", "c": 3 }]));
+        let (extra, updated) = item(&db, hit);
+        assert_eq!(extra, json!({ "purpose": "b", "locations": ["x", "b", 3] }));
+        assert_ne!(updated, UNTOUCHED);
+        assert_eq!((item(&db, miss), item(&db, other)), untouched);
+    }
+
+    /// 改成一个已有的选项就是合并：被改名的那项连同颜色从词表里消失，单选行改指已有的那项，多选行里两者并成一个。
+    #[tokio::test]
+    async fn renaming_onto_an_existing_option_merges_the_two() {
+        let (r, db, [hit, ..]) = option_fixture();
+        on_both_columns(&r, "/api/fields/rename_option", |key| json!({ "tbl": "vps", "key": key, "from": "a", "to": "x" })).await;
+        assert_eq!(options(&db, "vps", "purpose"), json!([{ "v": "x" }]));
+        assert_eq!(item(&db, hit).0, json!({ "purpose": "x", "locations": ["x", 3] }));
+    }
+
+    /// 改成自己是空操作，词表与各行原样：走合并那条路的话，这一项会被当成重复删掉。
+    #[tokio::test]
+    async fn renaming_an_option_to_itself_changes_nothing() {
+        let (r, db, [hit, ..]) = option_fixture();
+        let before = (options(&db, "vps", "purpose"), item(&db, hit));
+        on_both_columns(&r, "/api/fields/rename_option", |key| json!({ "tbl": "vps", "key": key, "from": "a", "to": "a" })).await;
+        assert_eq!((options(&db, "vps", "purpose"), item(&db, hit)), before);
+    }
+
+    /// 删选项：移出词表，并从这个库每一行清掉——单选连键删掉，多选只摘这个值；别的行与别的库不动。
+    #[tokio::test]
+    async fn removing_an_option_clears_it_from_every_row() {
+        let (r, db, [hit, miss, other]) = option_fixture();
+        let untouched = (item(&db, miss), item(&db, other));
+        on_both_columns(&r, "/api/fields/remove_option", |key| json!({ "tbl": "vps", "key": key, "value": "a" })).await;
+        assert_eq!(options(&db, "vps", "purpose"), json!([{ "v": "x" }]));
+        assert_eq!(item(&db, hit).0, json!({ "locations": ["x", 3] }));
+        assert_eq!((item(&db, miss), item(&db, other)), untouched);
     }
 }

@@ -1,8 +1,8 @@
 // 写入路径：刷新逆序交付、同一行连续保存、保存在途时开表单、续费的在途与刷新失败、语义浮层连改、
-// 表单只写动过的控件、编辑器保存失败留住输入、换图标后取消、改显示币种。
+// 表单只写动过的控件、编辑器保存失败留住输入、换图标后取消、改显示币种、字段操作写成而界面没刷新。
 // 每条都用「扣住响应 / 注入失败」造出缺陷发作的那一刻，而不是指望慢机碰巧撞上。
 export default async function (t) {
-  const { APP, put, items, mk, fields, check, evl, waitFor, settle, sql } = t;
+  const { APP, put, items, mk, fields, check, evl, waitFor, settle, sql, menuClick } = t;
 
   // 在页面里包一层 api：命中 __hold 的那次请求照常发出、服务端照常处理，只把响应扣住等测试放行；
   // 命中 __fail 的那次直接抛错。其余模块按全局名调用 api，所以都会走这一层
@@ -216,5 +216,52 @@ export default async function (t) {
   check('改显示币种后当场折算',
     await evl(`document.querySelectorAll('#totals .cur').length === 1 && document.querySelector('#totals .cur .code').textContent === 'CNY'`) === true);
   await put('/api/settings', { 'fx.display': '' });
+  await evl('loadAll()');
+
+
+  /* 10. 字段操作写成了、界面没刷新：提示要说清已经生效（报成失败，用户会再建一列、再加一次值），
+     收尾里的异常也得进提示，不能变成没人接的 rejection。两种坏法：重取字段失败、重建表头抛错。 */
+  await evl(`window.addEventListener('unhandledrejection', () => { window.__rejected++; }); true`);
+  const breakRebuild = `(() => { const real = ensureCollDom;
+    ensureCollDom = () => { ensureCollDom = real; throw new Error('注入的失败'); }; return true; })()`;
+  const failRefetch = `window.__fail = (p, o) => p === '/api/fields' && !o?.method; true`;
+  const th = k => `document.querySelector('#view-subs th[data-k="${k}"]')`;
+  // 字段操作不走 write 队列，settle 等不到它：清空 toast 再等下一条提示出来
+  const nextToast = async act => {
+    await evl(`window.__rejected = 0; document.querySelector('#toast').textContent = ''`);
+    await act();
+    await waitFor(`document.querySelector('#toast').textContent !== ''`);
+    return toastText();
+  };
+  const refreshFails = async (what, inject, act, written) => {
+    await evl(inject);
+    const said = await nextToast(() => evl(act));
+    check(`${what}：写成而界面没刷新时说清已生效`, said.includes('，但界面没刷新（注入的失败）'), said);
+    check(`${what}：没有漏接的 rejection`, await evl('window.__rejected') === 0, String(await evl('window.__rejected')));
+    check(`${what}：服务端确实写成了`, await written());
+    await evl(`rebuildHead('subs')`);
+  };
+  const subsCol = async name => (await fields()).find(f => f.tbl === 'subs' && f.name === name);
+  await refreshFails('建列', breakRebuild, `(() => { openNewColPop('subs', ${th('name')});
+    popEl.querySelector('[data-name]').value = '收尾失败列'; popEl.querySelector('[data-go]').click(); return true; })()`,
+  async () => !!await subsCol('收尾失败列'));
+  const made = await subsCol('收尾失败列');
+  await refreshFails('改列名', failRefetch, `(() => { openRenameColPop('subs', '${made.key}', ${th('name')});
+    const i = popEl.querySelector('input'); i.value = '改过的列';
+    i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' })); return true; })()`,
+  async () => !!await subsCol('改过的列'));
+  await refreshFails('加状态值', breakRebuild, `(() => { openAddStatusPop('subs', 'status', ${th('status')});
+    const i = popEl.querySelector('input'); i.value = 'Paused';
+    i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' })); return true; })()`,
+  async () => (await fields()).find(f => f.tbl === 'subs' && f.key === 'status').options.some(o => o.v === 'Paused'));
+  await evl(`window.__fail = p => p === '/api/overview'; true`);
+  let opened = false;
+  const dropSaid = await nextToast(async () => {
+    opened = await menuClick(`#view-subs th[data-k="${made.key}"]`, '删除列');
+  });
+  check('删列：打开表头菜单删除', opened);
+  check('删列：写成而界面没刷新时说清已生效', dropSaid.includes('，但界面没刷新（注入的失败）'), dropSaid);
+  check('删列：没有漏接的 rejection', await evl('window.__rejected') === 0, String(await evl('window.__rejected')));
+  check('删列：服务端确实删了', !await subsCol('改过的列'));
   await evl('loadAll()');
 }
