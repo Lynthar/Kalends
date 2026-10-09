@@ -143,22 +143,25 @@ fn chunk_text(text: &str, limit: usize) -> Vec<String> {
         }
     }
     let mut out: Vec<String> = Vec::new();
-    let mut cur = String::new();
+    let mut cur: Vec<String> = Vec::new();
     let mut used = 0usize;
     for p in pieces {
         let n = p.chars().count();
-        if used > 0 && used + 1 + n > limit {
-            out.push(std::mem::take(&mut cur));
+        if !cur.is_empty() && used + 1 + n > limit {
+            out.push(cur.join("\n"));
+            cur.clear();
             used = 0;
         }
-        if used > 0 {
-            cur.push('\n');
-            used += 1;
-        }
-        cur.push_str(&p);
-        used += n;
+        used += n + usize::from(!cur.is_empty());
+        cur.push(p);
     }
-    out.push(cur);
+    out.push(cur.join("\n"));
+    // 只剩空白的片 Telegram 拒收，一片被拒整条就失败、已发出的片随重试再发一遍；
+    // 整条都是空白时留一片，让它照常被拒，别当成发出去了
+    out.retain(|p| !p.trim().is_empty());
+    if out.is_empty() {
+        out.push(String::new());
+    }
     out
 }
 
@@ -206,9 +209,9 @@ async fn send_email_within(cfg: &EmailCfg, subject: &str, body: &str, budget: st
         .header(ContentType::TEXT_PLAIN)
         .body(body.to_string())?;
     let builder = if cfg.starttls {
-        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&cfg.host)?
+        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&cfg.host).map_err(|e| smtp_error(&e))?
     } else {
-        AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.host)?
+        AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.host).map_err(|e| smtp_error(&e))?
     };
     // 用户名为空就别带凭据：无认证的内网中继会拒绝空 AUTH
     let builder = builder.port(cfg.port);
@@ -221,7 +224,7 @@ async fn send_email_within(cfg: &EmailCfg, subject: &str, body: &str, budget: st
     };
     match tokio::time::timeout(budget, transport.send(msg)).await {
         Ok(sent) => sent.map(drop).map_err(|e| {
-            let e = anyhow::Error::new(e);
+            let e = smtp_error(&e);
             match tls_hint(&format!("{e:#}")) {
                 Some(h) => e.context(h),
                 None => e,
@@ -229,6 +232,12 @@ async fn send_email_within(cfg: &EmailCfg, subject: &str, body: &str, budget: st
         }),
         Err(_) => Err(anyhow!("邮件服务器连上了，但在时限内没有走完一次会话")),
     }
+}
+
+/// lettre 的 SMTP 错误文案已经逐层拼进了原因，又从 `source()` 再交一遍：原样进 anyhow 的话，
+/// `{:#}` 会把每层原因重复一次。只取文案。
+fn smtp_error(e: &lettre::transport::smtp::Error) -> anyhow::Error {
+    anyhow!("{e}")
 }
 
 /// 把 rustls 的握手错误翻成能照着改的话；认不出就 None（原文照样在原因链里）。
@@ -986,6 +995,13 @@ mod tests {
         // 短文本原样一片
         assert_eq!(chunk_text("短消息", 100), vec!["短消息"]);
         assert_eq!(chunk_text("", 100), vec![""]);
+        // 空行照算一行，落在片首也不能被吞
+        assert_eq!(chunk_text("\nabc", 100), vec!["\nabc"]);
+        assert_eq!(chunk_text("aaaa\n\nb", 4), vec!["aaaa", "\nb"]);
+        // 写满一片后只剩空行：不能产出空片，Telegram 拒收空文本，整条投递跟着失败
+        assert_eq!(chunk_text("aaaa\n", 4), vec!["aaaa"]);
+        // 连同分隔符恰好等于上限的仍并成一片
+        assert_eq!(chunk_text("aa\nb", 4), vec!["aa\nb"]);
         // 多行超限：按行拆片，每片不超限，拼回去还原
         let lines: Vec<String> = (0..40).map(|i| format!("· 条目{i}：三十天后到期")).collect();
         let text = lines.join("\n");
@@ -1075,6 +1091,25 @@ mod tests {
         let sent = tokio::time::timeout(std::time::Duration::from_secs(5), send_email_within(&cfg, "s", "b", budget)).await;
         let err = sent.expect("5 秒还没返回：会话没有总截止").unwrap_err();
         assert!(err.to_string().contains("时限"), "{err}");
+    }
+
+    /// 发送失败的原因要只出现一次：它进「发送测试」的回包与发送记录，同一句读两遍像是两个错误。
+    #[tokio::test]
+    async fn an_smtp_failure_names_its_cause_once() {
+        // 刚释放的回环端口：连接当场被拒，拿同一次拒绝的原文当期望值，不依赖各平台的 errno
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let cause = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap_err().to_string();
+        let cfg = EmailCfg {
+            host: "127.0.0.1".into(),
+            port,
+            starttls: true,
+            username: String::new(),
+            password: String::new(),
+            from: "a@example.com".into(),
+            to: "b@example.com".into(),
+        };
+        let err = format!("{:#}", send_email(&cfg, "s", "b").await.unwrap_err());
+        assert_eq!(err.matches(&cause).count(), 1, "{err}");
     }
 
     /// 旧条目的提醒还在路上时它被删了、同库新建了一条同 due 的：旧请求晚到落下的日志

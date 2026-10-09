@@ -29,16 +29,10 @@ pub struct Report {
 pub fn run(conn: &Connection, data_dir: &Path) -> Result<Report> {
     let backups = data_dir.join("backups");
     fs::create_dir_all(&backups).with_context(|| format!("建不了 {}", backups.display()))?;
-    // 顺手扫掉上一次被硬杀留下的半截快照
-    for entry in fs::read_dir(&backups).with_context(|| format!("读不了 {}", backups.display()))?.flatten() {
-        let p = entry.path();
-        let looks_ours = p
-            .file_name()
-            .is_some_and(|n| n.to_string_lossy().starts_with("snapshot-"));
-        if looks_ours && p.extension().is_some_and(|x| x == "tmp") {
-            let _ = fs::remove_file(&p);
-        }
-    }
+    let export_dir = data_dir.join("export");
+    // 顺手扫掉上一次被硬杀留下的半截快照（连同 VACUUM 的日志）与半截导出
+    sweep(&backups, |n| n.starts_with("snapshot-") && (n.ends_with(".tmp") || n.ends_with(".tmp-journal")));
+    sweep(&export_dir, |n| n.ends_with(".jsonl.tmp"));
     // **先写 .tmp 再改名**："今天备过了吗"看的就是正式名在不在，而 VACUUM INTO 直写
     // 目标路径——半途死掉会留半截快照占着正式名，当天备份从此静默跳过。已存在的正式
     // 快照不要先删：rename 本就原地覆盖，先删了再失败，赔上的是今天那份好快照。
@@ -48,7 +42,6 @@ pub fn run(conn: &Connection, data_dir: &Path) -> Result<Report> {
         .with_context(|| format!("快照写不了 {}", tmp.display()))?;
     fs::rename(&tmp, &snapshot).with_context(|| format!("快照改名成 {} 失败", snapshot.display()))?;
 
-    let export_dir = data_dir.join("export");
     fs::create_dir_all(&export_dir).with_context(|| format!("建不了 {}", export_dir.display()))?;
     for table in TABLES {
         let mut stmt = conn.prepare(&format!("SELECT * FROM {table}"))?;
@@ -86,11 +79,7 @@ pub fn run(conn: &Connection, data_dir: &Path) -> Result<Report> {
     let mut snaps: Vec<PathBuf> = fs::read_dir(&backups)
         .with_context(|| format!("读不了 {}", backups.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with("snapshot-"))
-                && p.extension().is_some_and(|x| x == "db")
-        })
+        .filter(|p| p.file_name().is_some_and(|n| is_dated_snapshot(&n.to_string_lossy())))
         .collect();
     snaps.sort();
     let mut removed = 0;
@@ -104,6 +93,24 @@ pub fn run(conn: &Connection, data_dir: &Path) -> Result<Report> {
         export_dir,
         removed,
     })
+}
+
+/// 尽力删掉 `dir` 里名字满足 `half_written` 的文件；目录读不了就算了，清扫不该挡住备份本身。
+fn sweep(dir: &Path, half_written: impl Fn(&str) -> bool) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        if half_written(&entry.file_name().to_string_lossy()) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// 只有 `snapshot-YYYY-MM-DD.db` 进轮转：别的名字（如手放的 `snapshot-manual.db`）按字典序排在
+/// 日期名之后，进了轮转就永远轮不到它出局，白占一个名额。
+fn is_dated_snapshot(name: &str) -> bool {
+    name.strip_prefix("snapshot-")
+        .and_then(|n| n.strip_suffix(".db"))
+        .is_some_and(|d| d.parse::<chrono::NaiveDate>().is_ok_and(|day| day.to_string() == d))
 }
 
 /* ── 恢复：把快照装配成一个全新数据目录并当场验证 ─────────────────── */
@@ -472,10 +479,10 @@ mod tests {
         assert!(out.contains(&token) && out.contains(r#""value":"1234""#), "ICS 令牌与 PIN 照旧导出：{out}");
     }
 
-    /// 快照轮转只认 `snapshot-*.db`、保留 14 份；开头扫掉上次硬杀留下的 `snapshot-*.tmp`。
-    /// 迁移前快照与别人的文件既不进轮转也不被当垃圾清掉。
+    /// 快照轮转只认 `snapshot-YYYY-MM-DD.db`、保留 14 份；开头扫掉上次硬杀留下的半截快照、
+    /// VACUUM 日志与半截导出。迁移前快照、手放的快照与别人的文件既不进轮转也不被当垃圾清掉。
     #[test]
-    fn run_sweeps_half_written_snapshots_and_keeps_fourteen() {
+    fn run_sweeps_half_written_files_and_keeps_fourteen() {
         let root = tempfile::tempdir().unwrap();
         let data = root.path().join("data");
         let conn = crate::db::open(&data).unwrap();
@@ -485,8 +492,14 @@ mod tests {
             fs::write(backups.join(format!("snapshot-2020-01-{day:02}.db")), b"old").unwrap();
         }
         fs::write(backups.join("snapshot-2020-01-01.db.tmp"), b"half").unwrap();
+        fs::write(backups.join("snapshot-2020-01-01.db.tmp-journal"), b"half").unwrap();
+        fs::write(backups.join("snapshot-manual.db"), b"keep").unwrap();
         fs::write(backups.join("pre-migration-v4.db"), b"keep").unwrap();
         fs::write(backups.join("other.tmp"), b"keep").unwrap();
+        let export = data.join("export");
+        fs::create_dir_all(&export).unwrap();
+        // 名字不在这一轮要写的表里：不靠开头的清扫，这一轮写完它也还在
+        fs::write(export.join("old.jsonl.tmp"), b"half").unwrap();
 
         let report = run(&conn, &data).unwrap();
         assert!(report.snapshot.is_file());
@@ -499,10 +512,13 @@ mod tests {
         let snaps = fs::read_dir(&backups)
             .unwrap()
             .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
-            .filter(|n| n.starts_with("snapshot-") && n.ends_with(".db"))
+            .filter(|n| n.starts_with("snapshot-") && n.ends_with(".db") && n != "snapshot-manual.db")
             .count();
         assert_eq!(snaps, 14);
         assert!(!backups.join("snapshot-2020-01-01.db.tmp").exists(), "半截快照没扫掉");
+        assert!(!backups.join("snapshot-2020-01-01.db.tmp-journal").exists(), "VACUUM 日志没扫掉");
+        assert!(!export.join("old.jsonl.tmp").exists(), "半截导出没扫掉");
+        assert!(backups.join("snapshot-manual.db").exists(), "手放的快照不进轮转");
         assert!(backups.join("pre-migration-v4.db").exists(), "迁移前快照不进轮转");
         assert!(backups.join("other.tmp").exists(), "不是自己的 .tmp 别动");
     }
