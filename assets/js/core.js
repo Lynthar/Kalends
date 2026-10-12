@@ -414,6 +414,60 @@ $('#up-more').onclick = () => setUpWindow('all');
 
 // 续费后后端给不出到期日：多半是没有周期或买断，但存量里周期写坏、日期越界的也走到这里
 const NO_NEXT_DUE = '算不出下一个到期日（没有周期、买断，或周期与日期有误）';
+
+/* 续费确认框：日期默认今天（服务端的本地日），晚几天才来记就改成实际付款那天，台账与起算都落在那天。
+   主按钮先聚焦、回车即记：和原生 confirm 一样一下就过，最高频的动作不能被拖慢。 */
+let renewAnswer = null; // 开着的那一轮在等的回答；每一轮只答一次
+const answerRenew = v => { const a = renewAnswer; renewAnswer = null; a?.(v); };
+function renewDialog() {
+  let d = $('#dlg-renew');
+  if (d) return d;
+  d = document.createElement('dialog');
+  d.id = 'dlg-renew';
+  d.setAttribute('aria-labelledby', 'dlg-renew-title');
+  d.innerHTML = `<form method="dialog">
+      <h3 id="dlg-renew-title"></h3>
+      <div class="fgrid">
+        <label class="span2"><span id="dlg-renew-label"></span><input type="date" data-r="date"></label>
+      </div>
+      <p class="fp-note">晚几天才来记的，改成实际付款那天</p>
+      <p id="dlg-renew-note" class="fp-note" hidden></p>
+      <footer>
+        <button type="button" class="btn ghost" data-close>取消</button>
+        <button type="submit" class="btn primary">记账</button>
+      </footer>
+    </form>`;
+  document.body.appendChild(d);
+  d.querySelector('[data-close]').onclick = () => d.close();
+  // 结果在提交那一刻同步取。close 是排队派发的，上一轮的可能晚到、落在这一轮开框之后，靠它判结果会张冠李戴
+  d.querySelector('form').addEventListener('submit', () => answerRenew(d.querySelector('[data-r="date"]').value));
+  d.addEventListener('close', () => { if (!d.open) answerRenew(null); });
+  return d;
+}
+
+/* 问一次付款日期：确认回所选日期（空串＝交给服务端按今天记），取消回 null。
+   paidDays 是这一条已有台账的日子：选中其中一天要说出来，否则在途丢了响应再点一次就多记一笔。 */
+function askRenewDate(title, verb, paidDays) {
+  const d = renewDialog();
+  const today = state.overview?.today || '';
+  const inp = d.querySelector('[data-r="date"]');
+  const note = $('#dlg-renew-note');
+  $('#dlg-renew-title').textContent = title;
+  $('#dlg-renew-label').textContent = `${verb}日期`;
+  inp.value = today;
+  inp.max = today;
+  inp.oninput = () => {
+    const day = inp.value || today;
+    note.hidden = !paidDays.includes(day);
+    note.textContent = `${day === today ? '今天' : day}已经记过一笔${verb}，再记就是第二笔`;
+  };
+  inp.oninput();
+  answerRenew(null); // 框能再开说明上一轮已经关了；没被提交答掉的就是取消
+  d.showModal();
+  d.querySelector('[type="submit"]').focus();
+  return new Promise(done => { renewAnswer = done; });
+}
+
 async function doRenew(key, btn) {
   const [kind, id] = key.split(':');
   // 表格里的行未必落在到期窗口内，所以先从本库找，找不到再回退到到期时间线
@@ -421,20 +475,20 @@ async function doRenew(key, btn) {
     || (state.overview?.upcoming || []).find(u => u.kind === kind && u.id === +id);
   const verb = it?.verb || collOf(kind)?.verb || '续费';
   if (busyWrite(`item:${id}`)) return void toast('上一次还在处理，稍等', true);
-  // 响应在途中丢了的话，前端分不清记没记上（服务端可能已经提交），重试就多记一笔：今天记过就多问一句
-  let again = false;
+  let paidDays = [];
   try {
-    again = (await api('/api/ledger')).some(r => r.kind === kind && r.item_id === +id && r.renewed_at === state.overview?.today);
-  } catch { /* 读不出台账只是少问这一句，照常确认 */ }
-  const name = it?.name || '';
-  if (!confirm(again ? `「${name}」今天已经记过一笔${verb}，确定再记一笔？` : `记一笔「${name}」的${verb}？`)) return;
+    paidDays = (await api('/api/ledger')).filter(r => r.kind === kind && r.item_id === +id).map(r => r.renewed_at);
+  } catch { /* 读不出台账只是少提醒这一句，照常确认 */ }
+  const paidOn = await askRenewDate(`记一笔「${it?.name || ''}」的${verb}`, verb, paidDays);
+  if (paidOn === null) return;
   // 慢链路上一个往返内毫无动静，用户就会再点一次、再确认一次——多记一笔、多推一期
   const was = btn?.textContent;
   if (btn) { btn.disabled = true; btn.textContent = '记账中…'; }
-  const r = await write(`item:${id}`, () => api(`/api/items/${id}/renew`, { method: 'POST', body: '{}' }), {
+  const body = JSON.stringify(paidOn ? { renewed_at: paidOn } : {});
+  const r = await write(`item:${id}`, () => api(`/api/items/${id}/renew`, { method: 'POST', body }), {
     once: true,
     // 报出下次到期是哪天（renew_from='today' 会把账单日拽走，说出来才看得见）；日期由
-    // 后端算，前端不自己算。算不出到期日时后端仍把上次续费日记成今天——旧日期被覆盖要说出来
+    // 后端算，前端不自己算。算不出到期日时后端仍把上次续费日记成付款日——旧日期被覆盖要说出来
     done: r => r?.due ? `已记账，下次到期 ${r.due}`
       : r?.last_renewed ? `已记账，上次${verb}日记作 ${r.last_renewed}；${NO_NEXT_DUE}`
       : `已记一笔；${NO_NEXT_DUE}`,

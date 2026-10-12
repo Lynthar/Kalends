@@ -59,12 +59,12 @@ pub fn due_from(
 }
 
 /// 找不出结果就放弃，别把线程转死。周付从 1970 年推到现在也才 ~2900 期，越过这个数说明
-/// 周期或日期本身有问题：`next` 锚点返回 None＝不动日期；`last` + `schedule` 按「没有日程」回落成今天。
+/// 周期或日期本身有问题：`next` 锚点返回 None＝不动日期；`last` + `schedule` 按「没有日程」回落成付款日。
 const MAX_PERIODS: u32 = 10_000;
 
-/// 续费动作把锚点日期改写成哪一天；None＝推不动，调用方不改日期。
+/// 在 `paid_on` 付的这笔续费把锚点日期改写成哪一天；None＝推不动，调用方不改日期。
 /// `due_anchor` 管到期日从哪儿来，`renew_from` 管续费后从哪天起算（`schedule`＝账单日
-/// 不动 / `today`＝从操作当天重算），两轴正交；`last` 算不出日程时回落成今天。
+/// 不动 / `today`＝从付款那天重算），两轴正交；`last` 算不出日程时回落成付款日。
 #[allow(clippy::too_many_arguments)]
 pub fn renew_to(
     anchor: &str,
@@ -73,44 +73,44 @@ pub fn renew_to(
     cycle_days: Option<i64>,
     next_renewal: Option<NaiveDate>,
     last_renewed: Option<NaiveDate>,
-    today: NaiveDate,
+    paid_on: NaiveDate,
 ) -> Option<NaiveDate> {
     if anchor == "next" {
         if renew_from == "today" {
-            return advance(today, cycle, cycle_days);
+            return advance(paid_on, cycle, cycle_days);
         }
-        // 逾期多期时一路推到今天之后。**每一步都从原始日期算第 n 期**，不能拿上一步的
+        // 逾期多期时一路推到付款日之后。**每一步都从原始日期算第 n 期**，不能拿上一步的
         // 结果再推一期：月加法会钳到月末，钳过之后锚点就永久丢了（1/31 迭代六次得 7/28）
         let start = next_renewal?;
         for n in 1..=MAX_PERIODS {
             // 无周期时 advance_n 恒为 None，立刻收手别空转
             let d = advance_n(start, cycle, cycle_days, n)?;
-            if d > today {
+            if d > paid_on {
                 return Some(d);
             }
         }
         return None;
     }
     if renew_from == "today" {
-        return Some(today);
+        return Some(paid_on);
     }
     // last + schedule：把 last_renewed 推到"刚付的那一期"，于是到期日落回原本的账单日。
     // 判据要拿 advance(D) 而不是 advance_n(start, m+1)——存进去的是 D，之后 due_from 也
-    // 是从 D 推一期，所以只有前者能保证"这次续费之后到期日真的在今天之后"。
+    // 是从 D 推一期，所以只有前者能保证"这次续费之后到期日真的在付款日之后"。
     let mut scheduled = None;
     if let Some(start) = last_renewed {
         for m in 1..=MAX_PERIODS {
             let Some(d) = advance_n(start, cycle, cycle_days, m) else {
                 break;
             };
-            if advance(d, cycle, cycle_days).is_some_and(|next| next > today) {
+            if advance(d, cycle, cycle_days).is_some_and(|next| next > paid_on) {
                 scheduled = Some(d);
                 break;
             }
         }
     }
-    // 没有上次续费日、买断、无周期——都没有日程可言，回落成操作当天
-    Some(scheduled.unwrap_or(today))
+    // 没有上次续费日、买断、无周期——都没有日程可言，回落成付款日
+    Some(scheduled.unwrap_or(paid_on))
 }
 
 /// 折算为"每月几倍"的系数，用于分币种月支出；不可折算（买断等）返回 None。
@@ -608,7 +608,7 @@ mod tests {
     }
 
     /// `renew_to` 的两个轴要真的正交：同一个 `last` 锚点，`schedule` 保住账单日、
-    /// `today` 从操作当天重算。
+    /// `today` 从付款当天重算。
     #[test]
     fn renewing_on_schedule_keeps_the_billing_day() {
         let today = d("2026-08-09");
@@ -631,10 +631,10 @@ mod tests {
         assert_eq!(got, Some(today));
     }
 
-    /// `last` 锚点算不出日程时回落成今天。缺 `last_renewed` 的条目全靠点一次续费把日期
+    /// `last` 锚点算不出日程时回落成付款日。缺 `last_renewed` 的条目全靠点一次续费把日期
     /// 补上——回落没了那条路就断了，只留下一笔无处落地的台账。
     #[test]
-    fn renewing_without_a_schedule_falls_back_to_today() {
+    fn renewing_without_a_schedule_falls_back_to_the_payment_day() {
         let today = d("2026-08-09");
         // 没有上次续费日：无从谈起"原定日程"
         assert_eq!(renew_to("last", "schedule", "annual", None, None, None, today), Some(today));
@@ -645,6 +645,17 @@ mod tests {
         );
         // next 锚点缺下次续费日则确实推不动：那侧没有可回落的锚点，维持原状不猜
         assert_eq!(renew_to("next", "schedule", "annual", None, None, None, today), None);
+    }
+
+    /// 补记的续费按付款那天算，不按记账那天：晚三天才来点，SIM 的保号窗口不能跟着晚三天。
+    #[test]
+    fn a_backdated_renewal_counts_from_the_day_it_was_paid() {
+        let paid = d("2026-06-20");
+        assert_eq!(renew_to("last", "today", "days", Some(30), None, Some(d("2026-05-17")), paid), Some(paid));
+        assert_eq!(renew_to("next", "today", "monthly", None, Some(d("2026-06-15")), None, paid), Some(d("2026-07-20")));
+        // 按日程的库只补到付款日所在那一期：6/20 付的是 6/15 那期，7/15 那期哪怕今天已过也还欠着
+        assert_eq!(renew_to("last", "schedule", "monthly", None, None, Some(d("2026-05-15")), paid), Some(d("2026-06-15")));
+        assert_eq!(renew_to("next", "schedule", "monthly", None, Some(d("2026-05-15")), None, paid), Some(d("2026-07-15")));
     }
 
     /// 跨多期前进一律一次性算第 n 期。逐期迭代会在经过一次二月之后把月末锚点永久丢掉，

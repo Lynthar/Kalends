@@ -20,6 +20,8 @@ const SEM_DEFAULT = {
   Active: { spend: 1, alert: 1, timeline: 1 },
   Ending: { spend: 0, alert: 0, timeline: 1 },
 };
+// 新建条目没选状态时落的值（同后端 DEFAULT_STATUS），所以它删不掉
+const DEFAULT_STATUS = 'Planned';
 function semOf(key, status) {
   const o = (fieldOf(key, 'status')?.options || []).find(x => x.v === status);
   const s = o && ['spend', 'alert', 'timeline'].some(f => f in o) ? o : SEM_DEFAULT[status] || { spend: 0, alert: 0, timeline: 0 };
@@ -483,7 +485,7 @@ function fieldControl(key, f, it) {
     const opts = statusOrder(key);
     // 词表外的存量值也列出来：不列的话浏览器选中首项，表单显示的就不是这一行真正的状态
     if (val && !opts.includes(val)) opts.unshift(val);
-    lab.innerHTML = `<span>${esc(f.name || f.key)}</span><select data-f="${esc(f.key)}">${opts.map(o => `<option${o === (val || 'Planned') ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+    lab.innerHTML = `<span>${esc(f.name || f.key)}</span><select data-f="${esc(f.key)}">${opts.map(o => `<option${o === (val || DEFAULT_STATUS) ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
   } else if (f.key === 'price' && f.src === 'col') {
     // 币种并进费用栏：金额与币种一起填。currency 不是注册字段（迁移 0013 撤了它的列），
     // 值由这枚 select 写，itemBody 单独读——与 parent_id 同一处理方式
@@ -696,7 +698,7 @@ function collDialog() {
         </select></label>
         <label><span>续费起算</span><select data-c="renew_from">
           <option value="schedule">按原定到期日（账单日不变）</option>
-          <option value="today">从操作当天重新计时</option>
+          <option value="today">从付款当天重新计时</option>
         </select></label>
         <label><span>到期动作说法</span><input data-c="verb" placeholder="续费"></label>
       </div>

@@ -578,6 +578,9 @@ async fn templates() -> R {
 /// 模板对拍单测才对得上（`serde_json` 会按字母重排键，不能拿来压缩）。
 const STATUS_VOCAB: &str = r#"[{"v":"Active","spend":1,"alert":1,"timeline":1},{"v":"Planned","spend":0,"alert":0,"timeline":0},{"v":"Ending","spend":0,"alert":0,"timeline":1},{"v":"Ended","spend":0,"alert":0,"timeline":0}]"#;
 
+/// 新建条目没带状态时落的值；两份词表都有它，`fields::drop_status` 不让删。
+pub const DEFAULT_STATUS: &str = "Planned";
+
 /// 三个续费库共用的六值词表：比通用词表多 Deferred（比价目录，记各档位供比较）
 /// 与 Unused（未启用），两者都不计支出、不提醒、不上时间线。
 const RENEWAL_STATUS_VOCAB: &str = r#"[{"v":"Active","spend":1,"alert":1,"timeline":1},{"v":"Planned","spend":0,"alert":0,"timeline":0},{"v":"Deferred","spend":0,"alert":0,"timeline":0},{"v":"Unused","spend":0,"alert":0,"timeline":0},{"v":"Ending","spend":0,"alert":0,"timeline":1},{"v":"Ended","spend":0,"alert":0,"timeline":0}]"#;
@@ -1050,7 +1053,7 @@ fn item_values(b: &Value) -> anyhow::Result<Vec<rusqlite::types::Value>> {
     Ok(vec![
         V::from(name),
         i(b, "parent_id").map_or(V::Null, V::from),
-        V::from(s(b, "status").unwrap_or_else(|| "Planned".into())),
+        V::from(s(b, "status").unwrap_or_else(|| DEFAULT_STATUS.into())),
         f(b, "price").map_or(V::Null, V::from),
         s(b, "currency").map_or(V::Null, V::from),
         s(b, "cycle").map_or(V::Null, V::from),
@@ -1325,9 +1328,18 @@ type RenewRow = (
 
 pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value> {
     // amount 传错类型会被 `f()` 当成缺席、静默回落到条目价格——台账会记下一个没人填过的数
-    crate::api::check_shape(b, &["currency", "note"], &[], &["amount"])?;
+    crate::api::check_shape(b, &["currency", "note", "renewed_at"], &[], &["amount"])?;
     // 币种与条目同一规范化：台账记下就改不了
     let paid_in = s(b, "currency").map(|c| normalize_currency(&c)).transpose()?;
+    let today = engine::today();
+    // 晚几天才来记的续费：台账与起算都落在实际付款那天，缺省今天；未来的日子还没付过
+    let paid_on = match s(b, "renewed_at") {
+        Some(v) => NaiveDate::parse_from_str(&normalize_shaped("date", &v)?, "%Y-%m-%d")?,
+        None => today,
+    };
+    if paid_on > today {
+        return Err(bad(format!("续费日期不能晚于今天（{today}）")));
+    }
     let row: Option<RenewRow> = conn
         .query_row(
             "SELECT c.key, c.due_anchor, c.renew_from, i.price, i.currency,
@@ -1367,7 +1379,6 @@ pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value
     else {
         return Err(missing("条目不存在"));
     };
-    let today = engine::today();
     // 记账与推日期是一件事：只落成一半的话，账记了而到期日没动，界面照旧显示逾期，
     // 而台账已经声称这笔付过了——"台账=事实"这条承诺就断在这里
     let tx = conn.unchecked_transaction()?;
@@ -1379,7 +1390,7 @@ pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value
         params![
             key,
             id,
-            today.to_string(),
+            paid_on.to_string(),
             f(b, "amount").or(price),
             paid_in.or(currency),
             s(b, "note"),
@@ -1400,7 +1411,7 @@ pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value
         cycle_days,
         day(&next),
         day(&last),
-        today,
+        paid_on,
     );
     let col = if anchor == "next" {
         "next_renewal"
@@ -2843,6 +2854,35 @@ mod tests {
         assert!(renew_item(&conn, 9999, &json!({})).is_err());
     }
 
+    /// 补记晚点的续费：台账与起算都落在 `renewed_at` 那天；未来日期与坏日期在动任何东西之前拒掉。
+    #[test]
+    fn a_backdated_renewal_lands_on_the_day_it_was_paid() {
+        let conn = fresh();
+        let today = engine::today();
+        let paid = today - chrono::Days::new(3);
+        let sim = insert_item(
+            &conn,
+            coll(&conn, "sims"),
+            &json!({ "name": "SIM", "cycle": "days", "cycle_days": 30, "last_renewed": "2026-01-01" }),
+        )
+        .unwrap();
+        let ledger = |conn: &Connection| one::<i64>(conn, "SELECT count(*) FROM renewal_ledger WHERE item_id=?1", [sim]);
+        let tomorrow = (today + chrono::Days::new(1)).to_string();
+        for bad in [json!(tomorrow), json!("3 天前"), json!(3)] {
+            assert!(renew_item(&conn, sim, &json!({ "renewed_at": bad })).is_err(), "{bad}");
+        }
+        assert_eq!(ledger(&conn), 0, "被拒的续费记了账");
+        assert_eq!(one::<String>(&conn, "SELECT last_renewed FROM items WHERE id=?1", [sim]), "2026-01-01");
+
+        let out = renew_item(&conn, sim, &json!({ "renewed_at": paid.to_string() })).unwrap();
+        assert_eq!(out["last_renewed"], json!(paid.to_string()));
+        assert_eq!(out["due"], json!((paid + chrono::Days::new(30)).to_string()));
+        assert_eq!(one::<String>(&conn, "SELECT renewed_at FROM renewal_ledger WHERE item_id=?1", [sim]), paid.to_string());
+        // 空串按缺省处理，记成今天
+        renew_item(&conn, sim, &json!({ "renewed_at": "" })).unwrap();
+        assert_eq!(one::<String>(&conn, "SELECT last_renewed FROM items WHERE id=?1", [sim]), today.to_string());
+    }
+
     /// 库路由 + 字段路由共用一个库，好在建库 / 改库之后回读字段注册表。
     fn routed(conn: Connection, data_dir: &std::path::Path) -> Router {
         router().merge(crate::fields::router()).with_state(App::for_tests(conn, data_dir))
@@ -2867,6 +2907,7 @@ mod tests {
             ("items", vec![
                 ("PATCH", format!("/api/items/{id}"), Some(json!({ "note": "x" }))),
                 ("POST", format!("/api/items/{id}/renew"), Some(json!({}))),
+                ("POST", "/api/fields/drop_status".into(), Some(json!({ "tbl": "subs", "key": "status", "value": "Ended" }))),
                 ("DELETE", format!("/api/items/{id}/logo"), None),
                 ("POST", format!("/api/items/{id}/logo/fetch"), Some(json!({}))),
             ]),
@@ -2880,6 +2921,7 @@ mod tests {
                 ("PUT", format!("/api/fields/{fid}"), Some(json!({ "name": "标签", "shown": false }))),
                 ("PUT", "/api/fields/semantics".into(), Some(json!({ "tbl": "subs", "key": "status", "options": [{ "v": "Active", "spend": true }] }))),
                 ("POST", "/api/fields/add_status".into(), Some(json!({ "tbl": "subs", "key": "status", "value": "New" }))),
+                ("POST", "/api/fields/drop_status".into(), Some(json!({ "tbl": "subs", "key": "status", "value": "Ended" }))),
                 ("PUT", "/api/fields/options".into(), Some(json!({ "tbl": "subs", "key": fkey, "options": ["a"] }))),
                 ("DELETE", format!("/api/fields/{fid}"), None),
             ]),

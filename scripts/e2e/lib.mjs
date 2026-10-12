@@ -245,6 +245,24 @@ export const helpers = (evl, sleepFn = sleep) => ({
     for (const end = Date.now() + ms; (hit = await probe()) !== 'toast' && Date.now() < end;) await sleepFn(40);
     return hit;
   },
+  // 续费确认框：等它开出来，给了日期就改成那天，再点「记账」。框没开出来回 false 交给断言报 FAIL
+  confirmRenew: async (date = '', ms = 5000) => {
+    for (const end = Date.now() + ms; Date.now() < end; await sleepFn(40)) {
+      if (!await evl(`!!document.querySelector('#dlg-renew')?.open`)) continue;
+      return evl(`(() => {
+        const d = document.querySelector('#dlg-renew');
+        const date = ${JSON.stringify(date)};
+        if (date) {
+          const i = d.querySelector('[data-r="date"]');
+          i.value = date;
+          i.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        d.querySelector('[type="submit"]').click();
+        return true;
+      })()`);
+    }
+    return false;
+  },
   // 点表头 → 菜单 → 点条目
   menuClick: async (thSel, itemText) => {
     await evl(`document.querySelector('${thSel}').click()`);

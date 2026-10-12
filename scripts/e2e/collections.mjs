@@ -1,6 +1,6 @@
 // 库：自建库、建库模板、库设置（库序、字段序与上表、状态语义）、哪些列删得掉、移列与调宽、续费起算、换到期模型、删光也不崩（放最后）。
 export default async function (t) {
-  const { APP, sleep, post, put, patch, raw, mk, items, fields, check, today, day, send, evl, shot, consoleMsgs, menuClick, thWidthSum, tableW, evlSafe, settle, waitFor, sql } = t;
+  const { APP, sleep, post, put, patch, raw, mk, items, fields, check, today, day, send, evl, shot, consoleMsgs, menuClick, thWidthSum, tableW, evlSafe, settle, waitFor, sql, confirmRenew } = t;
   /* 12g. 自建库：新建 → 默认字段集 → 表头/行由字段生成 → 语义驱动的续费按钮 → 删库 */
   const nc = await post('/api/collections', { name: '域名', icon: '🌐', due_anchor: 'next' });
   check('新建库返回库键', /^k\d+$/.test(nc.key || ''), JSON.stringify(nc));
@@ -189,8 +189,8 @@ export default async function (t) {
   check('模板域字段在表头菜单里可编辑选项', await evl(`optionsEditable('${DK}','doc_type')`) === true);
   // 没有周期就推不动到期日：只记一笔账，提示不能谎报"周期已推进"；当场开表单停在到期日那栏，
   // 原因写在表单里（续费的 toast 发在开框之前，压在表单下面，几秒就消失）
-  await evl(`window.confirm = () => true`);
   await evl(`document.querySelector('#${DK}-body tr [data-renew]').click()`);
+  check('证件续费开出确认框', await confirmRenew());
   await waitFor(`!!document.querySelector('#dlg-item')?.open`);
   await settle();
   const rmsg = await evl(`document.querySelector('#toast').textContent`);
@@ -459,7 +459,7 @@ export default async function (t) {
   check('条目跟着回到到期时间线',
     (await (await fetch(APP + 'api/overview')).json()).upcoming.some(u => u.kind === BK && !u.muted));
 
-  // 状态词表只增不改删：加得进去，且新值默认没有任何语义
+  // 状态词表能加、能删没人用的值、不能改名：加得进去，且新值默认没有任何语义
   await evl(`closePop()`);
   await evl(`document.querySelector('.tablewrap[data-tab="${BK}"] th[data-k="status"]').click()`);
   await sleep(300);
@@ -491,6 +491,22 @@ export default async function (t) {
   check('状态格仍不给现场新建（只挑不建）', await evl(
     `!document.querySelector('.cellpop .opt-add')`) === true);
   await evl(`closePop()`);
+  // 没有条目在用的状态值能删：语义浮层只给它们 ✕（在用的 Active、新建默认的 Planned 都没有）
+  await evl(`openStatusSemPop('${BK}', 'status', document.querySelector('.tablewrap[data-tab="${BK}"] th[data-k="status"]'))`);
+  await waitFor(`!!document.querySelector('.sempop')`);
+  const droppable = await evl(`[...document.querySelectorAll('.sempop .opt-row')]
+    .filter(r => r.querySelector('[data-drop]')).map(r => r.querySelector('.fp-v').textContent)`);
+  check('语义浮层只给没人用的状态值删除钮',
+    droppable.includes('待寄回') && !droppable.includes('Active') && !droppable.includes('Planned'), JSON.stringify(droppable));
+  await waitFor(`!document.querySelector('.sempop').getAnimations().length`);
+  await shot('26-status-drop');
+  await evl(`[...document.querySelectorAll('.sempop .opt-row')].find(r => r.textContent.includes('待寄回')).querySelector('[data-drop]').click()`);
+  check('删完给出提示', await waitFor(`document.querySelector('#toast').textContent.includes('已删除状态「待寄回」')`),
+    await evl(`document.querySelector('#toast').textContent`));
+  const stDropped = (await (await fetch(`${APP}api/fields`)).json()).find(f => f.tbl === BK && f.key === 'status');
+  check('删掉的状态值从词表里没了', !stDropped.options.some(o => o.v === '待寄回'), JSON.stringify(stDropped.options.map(o => o.v)));
+  check('在用的状态值接口同样删不掉',
+    !(await raw('/api/fields/drop_status', 'POST', { tbl: BK, key: 'status', value: 'Active' })).ok);
 
 
   /* 12i-2. 哪些列删得掉：判据是 src='extra' 不是 builtin——域字段与自定义列同权，

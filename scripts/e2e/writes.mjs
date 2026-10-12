@@ -2,7 +2,7 @@
 // 表单只写动过的控件、编辑器保存失败留住输入、换图标后取消、改显示币种、字段操作写成而界面没刷新。
 // 每条都用「扣住响应 / 注入失败」造出缺陷发作的那一刻，而不是指望慢机碰巧撞上。
 export default async function (t) {
-  const { APP, put, items, mk, fields, check, evl, waitFor, settle, sql, menuClick } = t;
+  const { APP, put, items, mk, fields, check, evl, waitFor, settle, sql, menuClick, confirmRenew } = t;
 
   // 在页面里包一层 api：命中 __hold 的那次请求照常发出、服务端照常处理，只把响应扣住等测试放行；
   // 命中 __fail 的那次直接抛错。其余模块按全局名调用 api，所以都会走这一层
@@ -101,6 +101,7 @@ export default async function (t) {
     doRenew('subs:${A.id}', document.querySelector('#up-list [data-renew="subs:${A.id}"]'));
     return true;
   })()`);
+  check('续费确认框开出来', await confirmRenew());
   check('续费请求在路上', await held());
   check('按钮立刻进入在途态', await evl(`(() => {
     const b = document.querySelector('#up-list [data-renew="subs:${A.id}"]');

@@ -39,19 +39,18 @@ async function fieldCall(path, method, body, { refresh = refreshFields, said = '
 const putOpts = (tab, k, opts) => fieldCall('/api/fields/options', 'PUT', { tbl: tab, key: k, options: opts });
 
 /* 状态语义浮层：每个状态值自己声明计不计支出 / 发不发提醒 / 上不上到期时间线，
-   engine 与 notify 都读这三个标记。只改标记不动值——状态是 items 的真列，
-   改名删值要连行数据一起迁移，那不在这条路上做。 */
+   engine 与 notify 都读这三个标记。值本身只能删没有条目在用的，不能改名——状态是 items 的
+   真列，改名要连行数据一起迁移。 */
 const SEM_FLAGS = [['spend', '计支出'], ['alert', '提醒'], ['timeline', '时间线']];
 
-/* 新增状态值：词表只增不改不删。新值三个语义标记默认全关，
-   要它计支出/提醒/上时间线得再去「状态语义…」里勾。 */
+/* 新增状态值。新值三个语义标记默认全关，要它计支出/提醒/上时间线得再去「状态语义…」里勾。 */
 function openAddStatusPop(tab, k, anchor) {
   closePop();
   popKey = 'addst:' + tab + ':' + k;
   popEl = document.createElement('div');
   popEl.className = 'filterpop optpop';
   popEl.innerHTML = `<div class="fp-head"><b>新增状态值</b></div>
-    <div class="fp-note">词表只能加，不能改名或删除——状态是条目的真列，改它要连行数据一起迁移</div>
+    <div class="fp-note">状态值加了不能改名（它是条目的真列）；没有条目在用的值可以在「状态语义…」里删掉</div>
     <div class="opt-add"><input class="fp-q" placeholder="新状态，回车加入" aria-label="新状态值"></div>`;
   const inp = popEl.querySelector('input');
   inp.addEventListener('keydown', async e => {
@@ -75,15 +74,20 @@ function openStatusSemPop(tab, k, anchor) {
   popEl = document.createElement('div');
   popEl.className = 'filterpop optpop sempop';
   popEl.innerHTML = `<div class="fp-head"><b>状态语义 · ${esc(colLabel(tab, k))}</b></div>
-    <div class="fp-note">勾了「计支出」才进支出统计，「提醒」才发通知，「时间线」才上到期栏与日历；提醒只发给时间线上的条目，两者连着勾</div>`;
+    <div class="fp-note">勾了「计支出」才进支出统计，「提醒」才发通知，「时间线」才上到期栏与日历；提醒只发给时间线上的条目，两者连着勾。没有条目在用的值可以删（✕）</div>`;
   const stored = storedOpts(tab, k);
+  const used = new Set((state[tab] || []).map(r => String(r.status || '').toLowerCase()));
   for (const o of stored) {
     const sem = semOf(tab, o.v);
     const row = document.createElement('div');
     row.className = 'opt-row';
+    // 删除钮的判据同后端 drop_status：没有条目在用（不分大小写）、不是新建默认值、词表不删空
+    const droppable = !used.has(o.v.toLowerCase()) && o.v !== DEFAULT_STATUS && stored.length > 1;
     row.innerHTML = `<span class="fp-v">${stPill(o.v)}</span>` + SEM_FLAGS.map(([f, lab]) =>
       `<label class="check sem"><input type="checkbox" data-f="${f}"${sem[f] ? ' checked' : ''}><span>${lab}</span></label>`
-    ).join('');
+    ).join('') + (droppable
+      ? `<button type="button" class="btn link fp-del" data-drop title="删除" aria-label="删除状态「${esc(o.v)}」">✕</button>`
+      : '<span class="fp-del"></span>');
     // 只发这一项改到的位：后端按值逐项合并、没出现的不动。拿打开时的整份快照去发，
     // 同一次打开里改第二项就会把第一项的改动写回原值
     const box = f => row.querySelector(`input[data-f="${f}"]`);
@@ -96,6 +100,14 @@ function openStatusSemPop(tab, k, anchor) {
         tbl: tab, key: k, options: [{ v: o.v, ...flags }],
       }) }));
     });
+    const drop = row.querySelector('[data-drop]');
+    if (drop) drop.onclick = () => {
+      closePop();
+      fieldCall('/api/fields/drop_status', 'POST', { tbl: tab, key: k, value: o.v }, {
+        refresh: () => rebuildHead(tab),
+        said: `已删除状态「${o.v}」`,
+      });
+    };
     popEl.appendChild(row);
   }
   placePop(popEl, anchor);
@@ -349,7 +361,7 @@ function openHeadMenu(tab, th) {
   if (optionsEditable(tab, k)) {
     items.push({ ic: '≡', t: '编辑选项…', act: () => openOptionsPop(tab, k, th), keepPop: true });
   }
-  // 状态词表只能加不能改删（状态是真列，改名删值要连行数据一起迁移），语义标记可以随便改
+  // 状态词表能加、能删没人用的值，不能改名（状态是真列，改名要连行数据一起迁移）；语义标记随便改
   if (colType(tab, k) === 'status' && storedOpts(tab, k).length) {
     items.push({ ic: '＋', t: '新增状态值…', act: () => openAddStatusPop(tab, k, th), keepPop: true });
     items.push({ ic: '◐', t: '状态语义…', act: () => openStatusSemPop(tab, k, th), keepPop: true });

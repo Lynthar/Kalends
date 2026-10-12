@@ -30,6 +30,7 @@ pub fn router() -> Router<App> {
         .route("/api/fields/order", put(set_order))
         .route("/api/fields/semantics", put(set_semantics))
         .route("/api/fields/add_status", post(add_status))
+        .route("/api/fields/drop_status", post(drop_status))
         .route("/api/fields/rename_option", post(rename_option))
         .route("/api/fields/remove_option", post(remove_option))
         .route("/api/fields/{id}", put(update).delete(delete_field))
@@ -213,8 +214,7 @@ async fn set_order(State(app): State<App>, Json(b): Json<Value>) -> R {
     Ok(Json(json!({ "ok": true })))
 }
 
-// 状态语义：只改状态词表选项上的 spend/alert/timeline 三个标记，不碰值本身。
-// 状态是 items 的真列，改名/删值得连行数据一起迁移，那不在这条路上做。
+// 状态语义：只改状态词表选项上的 spend/alert/timeline 三个标记，不碰值本身（增删值见 add_status）。
 async fn set_semantics(State(app): State<App>, Json(b): Json<Value>) -> R {
     check_shape(&b, &["tbl", "key"], &[], &[])?;
     let tbl = s(&b, "tbl").ok_or_else(|| bad("缺少 tbl"))?;
@@ -246,15 +246,8 @@ async fn set_semantics(State(app): State<App>, Json(b): Json<Value>) -> R {
     Ok(Json(json!({ "ok": true })))
 }
 
-/// 状态词表唯一开放的写口：**只能追加**。改名与删除要连行数据一起迁移（状态是 items 的真列，
-/// 还驱动支出/提醒/时间线三层语义），那两件事不在这条路上做。新值不带语义标记，
-/// engine 读不到标记就按内置默认理解——`status_sem` 对未知值返回三项全关，用户再去语义浮层里勾。
-async fn add_status(State(app): State<App>, Json(b): Json<Value>) -> R {
-    check_shape(&b, &["tbl", "key", "value"], &[], &[])?;
-    let tbl = s(&b, "tbl").ok_or_else(|| bad("缺少 tbl"))?;
-    let key = s(&b, "key").ok_or_else(|| bad("缺少 key"))?;
-    let value = s(&b, "value").ok_or_else(|| bad("状态值不能为空"))?;
-    let conn = app.db.lock().unwrap();
+/// 状态词表那一行：(字段 id, 选项)，老形态的纯文本选项常规化成 `{v}`。
+fn status_options(conn: &Connection, tbl: &str, key: &str) -> anyhow::Result<(i64, Vec<Value>)> {
     let (id, stored): (i64, String) = conn
         .query_row(
             "SELECT id,options FROM fields WHERE tbl=?1 AND key=?2 AND ftype='status'",
@@ -266,13 +259,61 @@ async fn add_status(State(app): State<App>, Json(b): Json<Value>) -> R {
     let mut opts: Vec<Value> = serde_json::from_str(&stored).unwrap_or_default();
     for o in &mut opts {
         if let Value::String(s) = o {
-            *o = json!({ "v": s.clone() }); // 老形态常规化
+            *o = json!({ "v": s.clone() });
         }
     }
+    Ok((id, opts))
+}
+
+/// 状态词表能追加新值、删掉没人用的值，**不能改名**：状态是 items 的真列，还驱动支出/提醒/时间线
+/// 三层语义，改名得连行数据一起迁移。新值不带语义——`status_sem` 对未知值三项全关，用户再去语义浮层里勾。
+async fn add_status(State(app): State<App>, Json(b): Json<Value>) -> R {
+    check_shape(&b, &["tbl", "key", "value"], &[], &[])?;
+    let tbl = s(&b, "tbl").ok_or_else(|| bad("缺少 tbl"))?;
+    let key = s(&b, "key").ok_or_else(|| bad("缺少 key"))?;
+    let value = s(&b, "value").ok_or_else(|| bad("状态值不能为空"))?;
+    let conn = app.db.lock().unwrap();
+    let (id, mut opts) = status_options(&conn, &tbl, &key)?;
     if opts.iter().any(|o| o["v"] == value.as_str()) {
         return Err(bad(format!("状态「{value}」已经在词表里")).into());
     }
     opts.push(json!({ "v": value, "spend": 0, "alert": 0, "timeline": 0 }));
+    conn.execute(
+        "UPDATE fields SET options=?1 WHERE id=?2",
+        params![serde_json::to_string(&opts)?, id],
+    )?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// 只删本库没有条目在用的状态值（大小写不同也算在用）。`DEFAULT_STATUS` 是新建条目的缺省，
+/// 删了它新行就落在词表外，不给删；词表也不能删空——界面上加值的入口挂在非空词表上。
+async fn drop_status(State(app): State<App>, Json(b): Json<Value>) -> R {
+    check_shape(&b, &["tbl", "key", "value"], &[], &[])?;
+    let tbl = s(&b, "tbl").ok_or_else(|| bad("缺少 tbl"))?;
+    let key = s(&b, "key").ok_or_else(|| bad("缺少 key"))?;
+    let value = s(&b, "value").ok_or_else(|| bad("状态值不能为空"))?;
+    if value == crate::collections::DEFAULT_STATUS {
+        return Err(bad(format!("「{value}」是新建条目的默认状态，不能删")).into());
+    }
+    let conn = app.db.lock().unwrap();
+    let (id, mut opts) = status_options(&conn, &tbl, &key)?;
+    let (_, cond) = scope(&conn, &tbl)?;
+    let before = opts.len();
+    opts.retain(|o| o["v"] != value.as_str());
+    if opts.len() == before {
+        return Err(bad(format!("词表里没有「{value}」")).into());
+    }
+    if opts.is_empty() {
+        return Err(bad("词表至少要留一个状态").into());
+    }
+    let used: i64 = conn.query_row(
+        &format!("SELECT count(*) FROM items WHERE {cond} AND status=?1 COLLATE NOCASE"),
+        [&value],
+        |r| r.get(0),
+    )?;
+    if used > 0 {
+        return Err(bad(format!("还有 {used} 个条目是「{value}」，先把它们改成别的状态再删")).into());
+    }
     conn.execute(
         "UPDATE fields SET options=?1 WHERE id=?2",
         params![serde_json::to_string(&opts)?, id],
@@ -607,6 +648,7 @@ mod tests {
             ("PUT", format!("/api/fields/{purpose_id}"), json!({ "name": "用途", "shown": "no" })),
             ("PUT", "/api/fields/order".to_string(), json!({ "tbl": "subs", "keys": ["name", 3] })),
             ("POST", "/api/fields/add_status".to_string(), json!({ "tbl": "subs", "key": "status", "value": 5 })),
+            ("POST", "/api/fields/drop_status".to_string(), json!({ "tbl": "subs", "key": "status", "value": 5 })),
         ];
         for (method, path, body) in refused {
             assert_eq!(call(&r, method, &path, Some(body.clone())).await.0, StatusCode::BAD_REQUEST, "{body}");
@@ -661,9 +703,9 @@ mod tests {
         assert_eq!(sem("category").await.0, StatusCode::BAD_REQUEST, "没有状态词表的列");
     }
 
-    /// 状态词表只能追加：新值三个标记全关地排到末尾；已有的值（老形态的纯文本也算）400 且词表不动。
+    /// 追加状态值：新值三个标记全关地排到末尾；已有的值（老形态的纯文本也算）400 且词表不动。
     #[tokio::test]
-    async fn the_status_vocabulary_only_grows() {
+    async fn an_added_status_goes_last_and_duplicates_are_refused() {
         let (r, db) = fresh();
         let mut seeded = options(&db, "subs", "status");
         seeded.as_array_mut().unwrap().push(json!("Legacy"));
@@ -683,6 +725,43 @@ mod tests {
         let list = want.as_array_mut().unwrap();
         *list.last_mut().unwrap() = json!({ "v": "Legacy" });
         list.push(json!({ "v": "Paused", "spend": 0, "alert": 0, "timeline": 0 }));
+        assert_eq!(options(&db, "subs", "status"), want);
+    }
+
+    /// 删状态值只删本库没有条目在用的：在用的（大小写不同也算）、新建默认的 Planned、词表里没有的、
+    /// 会把词表删空的一律 400 且词表不动；别库有条目用同名值不妨碍本库删，老形态的纯文本选项照样删得掉。
+    #[tokio::test]
+    async fn only_status_values_nobody_uses_can_be_dropped() {
+        let (r, db) = fresh();
+        let mut seeded = options(&db, "subs", "status");
+        seeded.as_array_mut().unwrap().push(json!("Legacy"));
+        {
+            let conn = db.lock().unwrap();
+            conn.execute("UPDATE fields SET options=?1 WHERE tbl='subs' AND key='status'", [seeded.to_string()])
+                .unwrap();
+            conn.execute("UPDATE fields SET options='[{\"v\":\"Only\"}]' WHERE tbl='vps' AND key='status'", [])
+                .unwrap();
+            for (coll, status) in [("subs", "ending"), ("sims", "Unused")] {
+                conn.execute(
+                    "INSERT INTO items(collection_id, name, status) SELECT id, 'x', ?2 FROM collections WHERE key=?1",
+                    params![coll, status],
+                )
+                .unwrap();
+            }
+        }
+        let drop = |tbl: &str, value: &str| {
+            call(&r, "POST", "/api/fields/drop_status", Some(json!({ "tbl": tbl, "key": "status", "value": value })))
+        };
+        for value in ["Ending", "Planned", "Nope"] {
+            assert_eq!(drop("subs", value).await.0, StatusCode::BAD_REQUEST, "{value}");
+        }
+        assert_eq!(options(&db, "subs", "status"), seeded, "被拒的请求一个字段也不该写");
+        assert_eq!(drop("vps", "Only").await.0, StatusCode::BAD_REQUEST, "词表删空了");
+        for value in ["Unused", "Legacy"] {
+            assert_eq!(drop("subs", value).await.0, StatusCode::OK, "{value}");
+        }
+        let mut want = seeded.clone();
+        want.as_array_mut().unwrap().retain(|o| o["v"] != "Unused" && o.as_str() != Some("Legacy"));
         assert_eq!(options(&db, "subs", "status"), want);
     }
 

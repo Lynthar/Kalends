@@ -1,6 +1,6 @@
 // 台账与设置页：续费记账可见、通知记录空态、坏渠道配置停保存、阈值与默认值来自服务端声明。
 export default async function (t) {
-  const { APP, sleep, put, items, check, day, send, evl, shot, settle, waitFor, toastOnTop, dialogs } = t;
+  const { APP, sleep, put, items, check, day, send, evl, shot, settle, waitFor, toastOnTop, dialogs, confirmRenew } = t;
   const toastSeen = async label => { const hit = await toastOnTop(); check(label, hit === 'toast', hit); };
   /* 17.6. 「已续费」记的那笔账要能被看到：写台账这条路 e2e 从没走过，
      而台账在界面上一直没有入口——点完按钮，账进了库就再也见不到。 */
@@ -9,6 +9,7 @@ export default async function (t) {
   await evl(`switchTab('subs')`);
   await sleep(300);
   await evl(`document.querySelector('#subs-body tr[data-id="${ledgerTarget.id}"] [data-renew]').click()`);
+  check('点「已续费」开出确认框', await confirmRenew());
   await sleep(1300);
   const led = await (await fetch(APP + 'api/ledger')).json();
   const entry = led.find(x => x.item_id === ledgerTarget.id && x.kind === 'subs');
@@ -17,17 +18,69 @@ export default async function (t) {
   check('续费把到期日往后推了',
     (await (await fetch(APP + 'api/collections/subs/items')).json())
       .find(r => r.id === ledgerTarget.id).next_renewal > ledgerTarget.next_renewal);
-  // 续费的响应在途中丢了，前端分不清记没记上：今天已经记过一笔的条目再点要多问一句，别的照常
-  const askFor = async row => evl(`(async () => {
-    const keep = window.confirm;
-    let asked = '';
-    window.confirm = m => { asked = m; return false; };
-    try { await doRenew('subs:${row.id}'); } finally { window.confirm = keep; }
-    return asked;
+  // 续费的响应在途中丢了，前端分不清记没记上：所选那天已经记过一笔的，确认框里要说出来，别的照常
+  const openRenew = async row => {
+    await evl(`doRenew('subs:${row.id}'); true`);
+    return waitFor(`!!document.querySelector('#dlg-renew')?.open`);
+  };
+  const renewNote = () => evl(`(() => {
+    const n = document.querySelector('#dlg-renew-note');
+    return n.hidden ? '' : n.textContent;
   })()`);
+  const pickDay = d => evl(`(() => {
+    const i = document.querySelector('#dlg-renew [data-r="date"]');
+    i.value = '${d}';
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  })()`);
+  const cancelRenew = () => evl(`document.querySelector('#dlg-renew [data-close]').click()`);
+  const ledgerRows = async () => (await (await fetch(APP + 'api/ledger')).json()).length;
   const other = (await items('subs')).find(r => r.id !== ledgerTarget.id && r.name);
-  check('今天记过一笔的再续费要多问一句', (await askFor(ledgerTarget)).includes('今天已经记过一笔'));
-  check('今天没记过的照常问', (await askFor(other)) === `记一笔「${other.name}」的续费？`);
+  const rows0 = await ledgerRows();
+  await openRenew(ledgerTarget);
+  check('今天记过一笔的再续费，框里说出来', (await renewNote()).includes('今天已经记过一笔'), await renewNote());
+  check('续费框默认今天、主按钮先聚焦（回车即记）', await evl(`(() => {
+    const d = document.querySelector('#dlg-renew');
+    return d.querySelector('[data-r="date"]').value === state.overview.today && document.activeElement === d.querySelector('[type="submit"]');
+  })()`) === true, await evl(`document.activeElement?.outerHTML.slice(0, 100)`));
+  await shot('12a-renew-dialog');
+  await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] });
+  await sleep(300);
+  await shot('12b-renew-dialog-dark');
+  await send('Emulation.setEmulatedMedia', { features: [] });
+  await pickDay(day(-1));
+  check('换成没记过的一天，提示收起', (await renewNote()) === '');
+  // 未来的日子还没付过：日期框的上限挡住提交，框留着
+  await pickDay(day(1));
+  await evl(`document.querySelector('#dlg-renew [type="submit"]').click()`);
+  await sleep(300);
+  check('选了明天提交不出去', await evl(`document.querySelector('#dlg-renew').open`) === true);
+  await cancelRenew();
+  await openRenew(other);
+  check('今天没记过的照常问', await evl(`document.querySelector('#dlg-renew-title').textContent`) === `记一笔「${other.name}」的续费`
+    && (await renewNote()) === '');
+  await cancelRenew();
+  await settle();
+  check('取消两次，台账一笔没多', await ledgerRows() === rows0);
+  // 晚三天才来记的保号：台账与上次续费日都落在实际那天，窗口从那天算
+  const sim = (await items('sims')).find(r => r.name.includes('Ultra'));
+  await evl(`switchTab('sims')`);
+  await waitFor(`!!document.querySelector('#sims-body tr[data-id="${sim.id}"] [data-renew]')`);
+  await evl(`document.querySelector('#sims-body tr[data-id="${sim.id}"] [data-renew]').click()`);
+  // 上一轮关框的 close 事件排队晚到、落在这一轮开框之后（headless 里实测碰到过）：不能把这一轮当成取消
+  await waitFor(`!!document.querySelector('#dlg-renew')?.open`);
+  await evl(`document.querySelector('#dlg-renew').dispatchEvent(new Event('close')); true`);
+  check('保号的确认框开出来', await confirmRenew(day(-3)));
+  // 关框的 close 事件是异步派发的，记账请求晚一拍才登记；屏上还挂着上一笔的 toast，等的是这一笔报出的到期日
+  check('报出从实际那天算的到期日', await waitFor(`document.querySelector('#toast').textContent === '已记账，下次到期 ${day(87)}'`),
+    await evl(`document.querySelector('#toast').textContent`));
+  await settle();
+  const simLed = (await (await fetch(APP + 'api/ledger')).json()).find(l => l.kind === 'sims' && l.item_id === sim.id);
+  const simAfter = (await items('sims')).find(r => r.id === sim.id);
+  check('补记的保号落在实际那天', simLed?.renewed_at === day(-3) && simAfter.last_renewed === day(-3),
+    JSON.stringify([simLed?.renewed_at, simAfter.last_renewed]));
+  check('取消过的那两轮没有跟着这一笔记进去', await ledgerRows() === rows0 + 1, `${rows0} → ${await ledgerRows()}`);
+  await evl(`switchTab('subs')`);
   await evl(`openSettings()`);
   await sleep(800);
   check('设置页里列出了这笔台账', await evl(
