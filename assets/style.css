@@ -286,6 +286,7 @@ main { max-width: 1400px; margin: 0 auto; padding: .6rem 1.4rem 3rem; }
 .grid td.cdate { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .grid .ops { width: 1%; white-space: nowrap; text-align: right; }
 .grid .sub-parent { color: var(--ink-2); font-size: .75rem; }
+.grid .automark { color: var(--ink-2); font-size: .72rem; margin-left: .35rem; }
 .grid .muted { color: var(--ink-2); }
 .grid .clip { max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ticon { display: inline-block; width: 14px; height: 14px; margin-right: .34rem; vertical-align: -2px; opacity: .75; }

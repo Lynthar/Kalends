@@ -2,7 +2,7 @@
 // 表单只写动过的控件、编辑器保存失败留住输入、换图标后取消、改显示币种、字段操作写成而界面没刷新。
 // 每条都用「扣住响应 / 注入失败」造出缺陷发作的那一刻，而不是指望慢机碰巧撞上。
 export default async function (t) {
-  const { APP, post, put, items, mk, fields, check, evl, waitFor, settle, sql, menuClick, confirmRenew } = t;
+  const { APP, post, put, patch, items, mk, fields, check, evl, waitFor, settle, sql, menuClick, confirmRenew, shot, send, sleep } = t;
 
   // 在页面里包一层 api：命中 __hold 的那次请求照常发出、服务端照常处理，只把响应扣住等测试放行；
   // 命中 __fail 的那次直接抛错。其余模块按全局名调用 api，所以都会走这一层
@@ -293,4 +293,48 @@ export default async function (t) {
     `${prow}.querySelector('[data-del]').click()`, async () => !await subsCol('面板收尾列'));
   await evl('loadAll()');
   await evl(`document.querySelector('#dlg-coll').close()`);
+
+
+  /* 11. 自动续费开关存开启那天：勾上写今天；已开着的再保存（取消又勾回也算）日期不动——刷成今天，
+     中间没续的期就甩给了手动；取消写 null。到期栏、名称格、台账各标一处。 */
+  await evl(`switchTab('subs')`);
+  const today = await evl('state.overview.today');
+  const inDays = n => { const d = new Date(`${today}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+  const au = await mk('subs', { name: '自动续费甲', status: 'Active', price: 5, currency: 'USD', cycle: 'monthly', next_renewal: inDays(5) });
+  await evl('loadAll()');
+  const openAuto = async () => {
+    await evl(`tbodyOf('subs').querySelector('tr[data-id="${au.id}"] [data-open]').click()`);
+    return waitFor(`!!document.querySelector('#dlg-item')?.open`);
+  };
+  const saveAuto = async clicks => {
+    check('自动续费：表单打开', await openAuto());
+    await evl(`(() => { const c = document.querySelector('#item-fields [data-auto]');
+      for (let n = 0; n < ${clicks}; n++) c.click();
+      document.querySelector('#form-item').requestSubmit(); return true; })()`);
+    await settle();
+    return (await row('subs', au.id)).auto_renew;
+  };
+  check('自动续费：勾上记成今天', await saveAuto(1) === today);
+  check('自动续费：名称格标「自动」',
+    await evl(`tbodyOf('subs').querySelector('tr[data-id="${au.id}"] .automark')?.textContent`) === '自动');
+  const upLi = `[...document.querySelectorAll('#up-list li')].find(li => li.querySelector('.nm')?.textContent === '自动续费甲')`;
+  check('自动续费：到期栏标出、按不催人的样子画',
+    await evl(`(() => { const li = ${upLi}; return !!li && li.querySelector('.meta').textContent.includes('自动续费') && li.classList.contains('quiet'); })()`) === true);
+  await shot('27-auto-renew-row');
+  await openAuto();
+  await shot('27-auto-renew-form');
+  await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] });
+  await sleep(300); // 输入框背景有 .2s 过渡，立刻拍会拍到浅底深字的半截
+  await shot('27-auto-renew-form-dark');
+  await send('Emulation.setEmulatedMedia', { features: [] });
+  await evl(`document.querySelector('#dlg-item').close()`);
+  await patch(`/api/items/${au.id}`, { auto_renew: inDays(-30) });
+  await evl('loadAll()');
+  check('自动续费：已开着的取消又勾回，开启日不动', await saveAuto(2) === inDays(-30));
+  check('自动续费：取消写空', await saveAuto(1) === null);
+  sql('INSERT INTO renewal_ledger(kind, item_id, renewed_at, amount, currency, auto) VALUES(?,?,?,?,?,1)',
+    ['subs', au.id, inDays(-1), 5, 'USD']);
+  await evl('loadLedger()');
+  check('自动续费：台账标出自动记的那笔', await waitFor(`[...document.querySelectorAll('#ledger-list .lg-row')]
+    .some(r => r.textContent.includes('自动续费甲') && r.textContent.includes('自动续费'))`));
 }

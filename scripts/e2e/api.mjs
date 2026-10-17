@@ -30,6 +30,9 @@ export default async function (t) {
   // 空名不再是客户端错误：表尾「＋ 新建」就是先插一行空的、再就地填（界面上渲染成「未命名」）
   const blank9 = await post('/api/collections/subs/items', { status: 'Active' });
   check('条目缺名称是允许的', typeof blank9.id === 'number', JSON.stringify(blank9));
+  // 自动续费开关存开启日：不是日期的值拒掉，免得作业读不出开启日、整条静默不续
+  check('自动续费写成非日期 → 400', await codeOf(`/api/items/${blank9.id}`, 'PATCH', { auto_renew: '乱来' }) === 400);
+  check('自动续费写成布尔 → 400', await codeOf(`/api/items/${blank9.id}`, 'PATCH', { auto_renew: true }) === 400);
   await raw(`/api/items/${blank9.id}`, 'DELETE');
   check('未知字段类型 → 400', await codeOf('/api/fields', 'POST', { tbl: 'subs', name: 'x', ftype: 'bogus' }) === 400);
   check('未知建库模板 → 400', await codeOf('/api/collections', 'POST', { name: 'x', template: 'bogus' }) === 400);

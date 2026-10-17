@@ -371,7 +371,7 @@ export default async function (t) {
   await sleep(600);
   check('库设置浮层出现字段面板',
     await evl(`!document.querySelector('#coll-fields-box').hidden
-      && document.querySelectorAll('#coll-fields .opt-row').length === 12`) === true);
+      && document.querySelectorAll('#coll-fields .opt-row').length === 11`) === true);
   const fb = await evl(`[...document.querySelectorAll('#coll-fields .opt-row .fp-v')].map(e => e.textContent)`);
   await evl(`(() => {
     const rows = [...document.querySelectorAll('#coll-fields .opt-row')];

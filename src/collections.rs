@@ -439,14 +439,6 @@ const TEMPLATES: &[Template] = &[
                 ..EXTRA
             },
             Field {
-                key: "auto_renew",
-                name: "自动续费",
-                ftype: "sel",
-                shown: 1,
-                options: "开,关",
-                ..EXTRA
-            },
-            Field {
                 key: "dns",
                 name: "DNS 托管",
                 ftype: "sel",
@@ -789,10 +781,10 @@ async fn remove(State(app): State<App>, Path(id): Path<i64>) -> R {
 
 /* ── 条目 ───────────────────────────────────────────────────────── */
 
-// pos 排在最后：它不在 WRITE_COLS 里（手动序只由 /items/order 改，整行 PUT 碰不到它），
-// 追加在末尾就不必动 item_row 里既有的下标。
+// 后加的列一律追加在末尾，不必动 item_row 里既有的下标。pos 不在 WRITE_COLS 里：
+// 手动序只由 /items/order 改，整行 PATCH 碰不到它。
 const ITEM_COLS: &str = "id,collection_id,name,parent_id,status,price,currency,cycle,cycle_days,\
-                         next_renewal,last_renewed,url,notes,logo,extra,created_at,updated_at,pos";
+                         next_renewal,last_renewed,url,notes,logo,extra,created_at,updated_at,pos,auto_renew";
 
 pub fn item_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -814,6 +806,7 @@ pub fn item_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "created_at": r.get::<_, String>(15)?,
         "updated_at": r.get::<_, String>(16)?,
         "pos": r.get::<_, Option<i64>>(17)?,
+        "auto_renew": r.get::<_, Option<String>>(18)?,
     }))
 }
 
@@ -1017,8 +1010,8 @@ fn normalize_item(conn: &Connection, coll: i64, b: &mut Value, cur: Option<&Valu
     if let Some(st) = b.get("status").and_then(Value::as_str) {
         b["status"] = json!(respell_status(conn, &key, st)?);
     }
-    // 两个日期真列不看注册表：锚点另一侧那列不注册，照样被读、被导出
-    for k in ["next_renewal", "last_renewed"] {
+    // 这几个日期真列不看注册表：锚点另一侧那列与自动续费的开启日都不注册，照样被读、被导出
+    for k in ["next_renewal", "last_renewed", "auto_renew"] {
         if let Some(v) = b.get(k).and_then(Value::as_str) {
             b[k] = json!(normalize_shaped("date", v)?);
         }
@@ -1063,13 +1056,14 @@ fn item_values(b: &Value) -> anyhow::Result<Vec<rusqlite::types::Value>> {
         s(b, "url").map_or(V::Null, V::from),
         s(b, "notes").map_or(V::Null, V::from),
         extra_str(b).map_or(V::Null, V::from),
+        s(b, "auto_renew").map_or(V::Null, V::from),
     ])
 }
 
 // logo 不在可写列里：文件名由服务端生成、删条目按行内名字删文件——放开它就能把 A 的
 // 文件名写进 B，删 B 时连 A 的图标一起删掉。上传/抓取/清除各有专用端点。
 const WRITE_COLS: &str = "name,parent_id,status,price,currency,cycle,cycle_days,\
-                          next_renewal,last_renewed,url,notes,extra";
+                          next_renewal,last_renewed,url,notes,extra,auto_renew";
 
 /// 条目写入口的类型校验：出现的键必须是它该有的类型（`api::check_shape`），logo 带非空值
 /// 直接拒——`null`/`""` 按「不在可写集」忽略，整行回读再 PATCH 回来的用法才过得去。
@@ -1079,7 +1073,7 @@ fn check_item_shape(b: &Value) -> anyhow::Result<()> {
     }
     crate::api::check_shape(
         b,
-        &["name", "status", "currency", "cycle", "next_renewal", "last_renewed", "url", "notes"],
+        &["name", "status", "currency", "cycle", "next_renewal", "last_renewed", "url", "notes", "auto_renew"],
         &["parent_id", "cycle_days"],
         &["price"],
     )
@@ -1310,8 +1304,6 @@ async fn items_bulk_delete(State(app): State<App>, Json(b): Json<Value>) -> R {
     Ok(Json(json!({ "ok": true, "deleted": deleted })))
 }
 
-/// 记一笔续费：写台账并按库的到期模型推进日期。
-/// `anchor='next'` 推进 `next_renewal`（逾期则连推到今天之后），`anchor='last'` 把上次续费记为今天。
 type RenewRow = (
     String,
     String,
@@ -1326,6 +1318,16 @@ type RenewRow = (
     String,
 );
 
+/// 一笔续费的账面。金额与币种缺省取条目现值；`auto` 只由自动续费作业置位，接口不收。
+struct Payment {
+    paid_on: NaiveDate,
+    amount: Option<f64>,
+    currency: Option<String>,
+    note: Option<String>,
+    auto: bool,
+}
+
+/// 「已续费」接口：解析请求体，付款日缺省今天、不能晚于今天，然后照常记一笔。
 pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value> {
     // amount 传错类型会被 `f()` 当成缺席、静默回落到条目价格——台账会记下一个没人填过的数
     crate::api::check_shape(b, &["currency", "note", "renewed_at"], &[], &["amount"])?;
@@ -1340,6 +1342,13 @@ pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value
     if paid_on > today {
         return Err(bad(format!("续费日期不能晚于今天（{today}）")));
     }
+    renew(conn, id, &Payment { paid_on, amount: f(b, "amount"), currency: paid_in, note: s(b, "note"), auto: false })
+}
+
+/// 记一笔续费：写台账并按库的到期模型推进日期。
+/// `anchor='next'` 推进 `next_renewal`（逾期则连推到付款日之后），`anchor='last'` 把上次续费推到付款日那一期。
+fn renew(conn: &Connection, id: i64, pay: &Payment) -> anyhow::Result<Value> {
+    let paid_on = pay.paid_on;
     let row: Option<RenewRow> = conn
         .query_row(
             "SELECT c.key, c.due_anchor, c.renew_from, i.price, i.currency,
@@ -1385,17 +1394,18 @@ pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value
     // 名字当场钉进台账。只记 (kind, item_id) 的话，条目一删这笔账就没了名字——
     // 台账是事实记录，得能自证，不该跟着当前条目变。
     tx.execute(
-        "INSERT INTO renewal_ledger(kind,item_id,renewed_at,amount,currency,note,item_name,coll_name)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+        "INSERT INTO renewal_ledger(kind,item_id,renewed_at,amount,currency,note,item_name,coll_name,auto)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
         params![
             key,
             id,
             paid_on.to_string(),
-            f(b, "amount").or(price),
-            paid_in.or(currency),
-            s(b, "note"),
+            pay.amount.or(price),
+            pay.currency.clone().or(currency),
+            pay.note,
             item_name,
             coll_name,
+            pay.auto,
         ],
     )?;
     // 日期该落在哪天由 engine 那个纯函数说了算——四种组合都在那里，且有单测钉着
@@ -1424,7 +1434,6 @@ pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value
             params![d.to_string(), id],
         )?;
     }
-    tx.commit()?;
     // 顺带回一个 due：界面据此如实报出"下次到期是哪天"。锚点被拽走过的人一眼能看见，
     // 而算日期的仍然只有 engine 一处——前端自己再算一遍就又是两份会各说各话的实现
     let moved = moved.map(|d| d.to_string());
@@ -1435,10 +1444,42 @@ pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value
         if anchor == "next" { moved.as_deref() } else { None },
         if anchor == "next" { None } else { moved.as_deref() },
     );
+    // 自动记的账必须真把到期日推过账单日：推不动（年份封顶之类）还落账的话，每一轮都会再记一笔
+    if pay.auto && due.is_none_or(|d| d <= paid_on) {
+        anyhow::bail!("自动续费推不动条目 {id}（账单日 {paid_on}），这笔没记");
+    }
+    tx.commit()?;
     Ok(json!({
         col: moved,
         "due": due.map(|d| d.to_string()),
     }))
+}
+
+/// 自动续费：归它管、账单日已过的条目逐期各记一笔（日期即各期账单日），追到今天为止；返回记了几笔。
+/// 一条出错只记日志、不拦别的条目。
+pub fn auto_renew(conn: &Connection, today: NaiveDate) -> anyhow::Result<usize> {
+    let mut done = 0;
+    for (id, first) in engine::auto_renewals(conn, today)? {
+        let mut due = first;
+        let caught_up = loop {
+            let pay = Payment { paid_on: due, amount: None, currency: None, note: None, auto: true };
+            let r = match renew(conn, id, &pay) {
+                Ok(r) => r,
+                Err(e) => break Err(e),
+            };
+            done += 1;
+            tracing::info!("auto-renewed item {id} for {due}");
+            // renew 保证新到期日晚于账单日，日期严格递增，这圈必然追到今天
+            match r["due"].as_str().and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()) {
+                Some(next) if next < today => due = next,
+                _ => break Ok(()),
+            }
+        };
+        if let Err(e) = caught_up {
+            tracing::warn!("auto renew failed for item {id}: {e:#}");
+        }
+    }
+    Ok(done)
 }
 
 async fn items_renew(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value>) -> R {
@@ -2881,6 +2922,114 @@ mod tests {
         // 空串按缺省处理，记成今天
         renew_item(&conn, sim, &json!({ "renewed_at": "" })).unwrap();
         assert_eq!(one::<String>(&conn, "SELECT last_renewed FROM items WHERE id=?1", [sim]), today.to_string());
+    }
+
+    /// 自动续费：账单日过了才记、逐期各记一笔（日期即账单日，金额币种取条目现值），追到今天为止；
+    /// 当天的、开启前就逾期的、状态不计支出的、买断的、没开的一概不动；三种锚点 / 起算各自落对日期。
+    #[test]
+    fn auto_renewal_books_each_billing_day_that_has_passed() {
+        let conn = fresh();
+        let today = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap();
+        let mk = |key: &str, b: Value| insert_item(&conn, coll(&conn, key), &b).unwrap();
+        let sub = |name: &str, status: &str, cycle: &str, next: &str, since: Option<&str>| {
+            mk("subs", json!({ "name": name, "status": status, "price": 9.99, "currency": "USD",
+                               "cycle": cycle, "next_renewal": next, "auto_renew": since }))
+        };
+        let missed = sub("三期没记", "Active", "monthly", "2026-03-15", Some("2026-03-01"));
+        let due_today = sub("今天扣款", "Active", "monthly", "2026-06-10", Some("2026-01-01"));
+        let before_since = sub("开启前逾期", "Active", "monthly", "2026-05-01", Some("2026-05-20"));
+        let ending = sub("到期不续", "Ending", "monthly", "2026-05-01", Some("2026-01-01"));
+        let manual = sub("没开", "Active", "monthly", "2026-05-01", None);
+        let lifetime = sub("买断", "Active", "lifetime", "2026-05-01", Some("2026-01-01"));
+        let vps = mk("vps", json!({ "name": "VPS", "status": "Active", "cycle": "annual",
+                                    "last_renewed": "2025-06-01", "auto_renew": "2026-01-01" }));
+        let sim = mk("sims", json!({ "name": "SIM", "status": "Active", "cycle": "days", "cycle_days": 30,
+                                     "last_renewed": "2026-05-01", "auto_renew": "2026-05-01" }));
+
+        assert_eq!(auto_renew(&conn, today).unwrap(), 5);
+        let books = |id: i64| -> Vec<(String, Option<f64>, Option<String>, bool)> {
+            let mut stmt = conn
+                .prepare("SELECT renewed_at, amount, currency, auto FROM renewal_ledger WHERE item_id=?1 ORDER BY id")
+                .unwrap();
+            stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let usd = |d: &str| (d.to_string(), Some(9.99), Some("USD".to_string()), true);
+        assert_eq!(books(missed), [usd("2026-03-15"), usd("2026-04-15"), usd("2026-05-15")]);
+        assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE id=?1", [missed]), "2026-06-15");
+        for id in [due_today, before_since, ending, manual, lifetime] {
+            assert!(books(id).is_empty(), "条目 {id} 不该自动记账");
+        }
+        // VPS 按账单日（schedule）、SIM 从付款日（today）起算——付款日就是账单日，两者落在同一天
+        assert_eq!(books(vps), [("2026-06-01".to_string(), None, None, true)]);
+        assert_eq!(one::<String>(&conn, "SELECT last_renewed FROM items WHERE id=?1", [vps]), "2026-06-01");
+        assert_eq!(books(sim), [("2026-05-31".to_string(), None, None, true)]);
+        assert_eq!(one::<String>(&conn, "SELECT last_renewed FROM items WHERE id=?1", [sim]), "2026-05-31");
+        // 追平之后再跑一轮什么都不记
+        assert_eq!(auto_renew(&conn, today).unwrap(), 0);
+        // 手点的续费永远不是自动的，请求体里带 auto 也一样
+        renew_item(&conn, manual, &json!({ "auto": true })).unwrap();
+        assert_eq!(books(manual).iter().map(|b| b.3).collect::<Vec<_>>(), [false]);
+    }
+
+    /// 自动记的账推不动日期就不落账：否则每一轮都再记一笔，台账无限膨胀而到期日原地不动。
+    #[test]
+    fn an_auto_renewal_that_cannot_move_the_date_books_nothing() {
+        let conn = fresh();
+        let id = insert_item(
+            &conn,
+            coll(&conn, "subs"),
+            &json!({ "name": "买断", "status": "Active", "cycle": "lifetime", "next_renewal": "2026-05-01" }),
+        )
+        .unwrap();
+        let paid_on = NaiveDate::from_ymd_opt(2026, 5, 1).unwrap();
+        let pay = Payment { paid_on, amount: None, currency: None, note: None, auto: true };
+        assert!(renew(&conn, id, &pay).is_err());
+        assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM renewal_ledger", []), 0);
+        assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE id=?1", [id]), "2026-05-01");
+    }
+
+    /// 到期栏只把「真会自动续的那一期」标成自动、并且静音（只进摘要）；开启前就逾期的那期
+    /// 照常提醒，状态不计支出的不算自动。
+    #[test]
+    fn only_the_period_auto_renewal_covers_is_marked_and_muted() {
+        let conn = fresh();
+        let today = engine::today();
+        let day = |n: i64| (today + chrono::Duration::days(n)).to_string();
+        let subs = coll(&conn, "subs");
+        let mk = |name: &str, status: &str, next: String, since: String| {
+            insert_item(&conn, subs, &json!({ "name": name, "status": status, "cycle": "monthly",
+                                              "next_renewal": next, "auto_renew": since })).unwrap()
+        };
+        let covered = mk("会自动续", "Active", day(3), day(-10));
+        let stale = mk("开启前逾期", "Active", day(-5), day(-1));
+        let ending = mk("到期不续", "Ending", day(3), day(-10));
+        let ups = engine::upcoming(&conn).unwrap();
+        let flags = |id: i64| {
+            let u = ups.iter().find(|u| u["id"] == id).unwrap();
+            (u["auto"].as_bool().unwrap(), u["muted"].as_bool().unwrap())
+        };
+        assert_eq!(flags(covered), (true, true));
+        assert_eq!(flags(stale), (false, false));
+        assert_eq!(flags(ending), (false, true));
+    }
+
+    /// 开关存开启日：写入按日期规范化、空值关掉，非日期与非文本拒掉。
+    #[test]
+    fn the_auto_renew_switch_is_a_date() {
+        let conn = fresh();
+        let id = insert_item(&conn, coll(&conn, "subs"), &json!({ "name": "x" })).unwrap();
+        let read = || one::<Option<String>>(&conn, "SELECT auto_renew FROM items WHERE id=?1", [id]);
+        update_item(&conn, id, &json!({ "auto_renew": "2026-6-1" })).unwrap();
+        assert_eq!(read().as_deref(), Some("2026-06-01"));
+        for bad in [json!("乱来"), json!(true), json!(1)] {
+            assert!(update_item(&conn, id, &json!({ "auto_renew": bad })).is_err(), "{bad}");
+        }
+        assert_eq!(read().as_deref(), Some("2026-06-01"));
+        update_item(&conn, id, &json!({ "auto_renew": null })).unwrap();
+        assert_eq!(read(), None);
     }
 
     /// 库路由 + 字段路由共用一个库，好在建库 / 改库之后回读字段注册表。

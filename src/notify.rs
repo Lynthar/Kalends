@@ -263,9 +263,11 @@ fn tls_hint(chain: &str) -> Option<&'static str> {
 /// 单条到期项的通知文案。
 pub fn line(it: &Value) -> String {
     let days = it["days_left"].as_i64().unwrap_or(0);
+    // 会自动续的那期不用人去付，说「到期」会让人以为得动手；逾期的那期不归自动续费管，照常说
+    let end = if it["auto"].as_bool().unwrap_or(false) { "自动续费" } else { "到期" };
     let when = match days.cmp(&0) {
-        Ordering::Greater => format!("{days} 天后到期"),
-        Ordering::Equal => "今天到期".to_string(),
+        Ordering::Greater => format!("{days} 天后{end}"),
+        Ordering::Equal => format!("今天{end}"),
         Ordering::Less => format!("已过期 {} 天", -days),
     };
     let name = it["name"].as_str().unwrap_or("");
@@ -649,6 +651,11 @@ pub async fn tick(db: &Db) -> Result<()> {
 pub async fn scheduler(db: Db) {
     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
     loop {
+        // 自动续费先跑、且不受渠道开关管：同一轮的摘要读到的得是续过的日期，没配通知的人也照样续
+        let renewed = crate::collections::auto_renew(&db.lock().unwrap(), engine::today());
+        if let Err(e) = renewed {
+            tracing::warn!("auto renew failed: {e:#}");
+        }
         if let Err(e) = tick(&db).await {
             tracing::warn!("notify tick failed: {e:#}");
         }
@@ -1025,6 +1032,10 @@ mod tests {
         assert!(line(&base(3)).starts_with("3 天后到期"));
         assert!(line(&base(0)).starts_with("今天到期"));
         assert!(line(&base(-5)).starts_with("已过期 5 天"));
+        // 会自动续的那期不用人动手，别说成「到期」
+        let auto = |days: i64| json!({ "days_left": days, "name": "Netflix", "due": "2026-08-01", "auto": true });
+        assert!(line(&auto(3)).starts_with("3 天后自动续费"));
+        assert!(line(&auto(0)).starts_with("今天自动续费"));
     }
 
     #[test]

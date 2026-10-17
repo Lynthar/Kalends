@@ -252,7 +252,8 @@ async fn ledger_list(State(app): State<App>) -> R {
         "SELECT l.id, l.kind, l.item_id, l.renewed_at, l.amount, l.currency, l.note,
                 coalesce(l.coll_name, c.name),
                 coalesce(l.item_name,
-                  (SELECT i.name FROM items i WHERE i.id = l.item_id AND i.collection_id = c.id))
+                  (SELECT i.name FROM items i WHERE i.id = l.item_id AND i.collection_id = c.id)),
+                l.auto
          FROM renewal_ledger l LEFT JOIN collections c ON c.key = l.kind
          ORDER BY l.renewed_at DESC, l.id DESC LIMIT 500",
     )?;
@@ -268,6 +269,7 @@ async fn ledger_list(State(app): State<App>) -> R {
                 "note": r.get::<_, Option<String>>(6)?,
                 "coll_name": r.get::<_, Option<String>>(7)?,
                 "item_name": r.get::<_, Option<String>>(8)?,
+                "auto": r.get::<_, bool>(9)?,
             }))
         })?
         .collect::<rusqlite::Result<_>>()?;

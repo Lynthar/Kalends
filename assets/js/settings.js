@@ -102,7 +102,7 @@ async function loadLedger() {
       const div = document.createElement('div');
       div.className = 'lg-row';
       div.innerHTML = `<span class="lg-d">${esc(r.renewed_at)}</span>
-        <span class="lg-n">${esc(r.item_name || `#${r.item_id}`)}<small>${esc(r.coll_name || r.kind)}</small></span>
+        <span class="lg-n">${esc(r.item_name || `#${r.item_id}`)}<small>${esc(r.coll_name || r.kind)}${r.auto ? ' · 自动续费' : ''}</small></span>
         <span class="lg-a">${amtHtml(r.currency, r.amount)}</span>`;
       box.appendChild(div);
     }

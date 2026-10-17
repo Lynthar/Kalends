@@ -258,7 +258,7 @@ function renderColl(key) {
     const tds = fields.map(f => {
       const v = fieldVal(f, it);
       if (f.key === entry) {
-        return `<td>${hasKids ? `<button class="tgl" data-tgl type="button" title="折叠 / 展开子行">${collapsed.has(it.id) ? '▸' : '▾'}</button>` : ''}${(!depth && parent) ? `<span class="sub-parent">${esc(parent.name)} ↳ </span>` : ''}${logoOf(it) ? `<img class="slogo" src="/logos/${esc(logoOf(it))}" alt="" loading="lazy">` : ''}${nameCell(it.name)}${safeUrl(it.url) ? ` <a class="btn link" href="${esc(safeUrl(it.url))}" target="_blank" rel="noreferrer">↗</a>` : ''}<button class="rowopen" data-open type="button" title="打开详情">⤢</button>${sub ? `<div class="muted" style="font-size:.75rem">${subTel ? TYPES.tel.cell(sub) : esc(sub)}</div>` : ''}</td>`;
+        return `<td>${hasKids ? `<button class="tgl" data-tgl type="button" title="折叠 / 展开子行">${collapsed.has(it.id) ? '▸' : '▾'}</button>` : ''}${(!depth && parent) ? `<span class="sub-parent">${esc(parent.name)} ↳ </span>` : ''}${logoOf(it) ? `<img class="slogo" src="/logos/${esc(logoOf(it))}" alt="" loading="lazy">` : ''}${nameCell(it.name)}${it.auto_renew ? '<span class="automark">自动</span>' : ''}${safeUrl(it.url) ? ` <a class="btn link" href="${esc(safeUrl(it.url))}" target="_blank" rel="noreferrer">↗</a>` : ''}<button class="rowopen" data-open type="button" title="打开详情">⤢</button>${sub ? `<div class="muted" style="font-size:.75rem">${subTel ? TYPES.tel.cell(sub) : esc(sub)}</div>` : ''}</td>`;
       }
       if (f.key === 'left') return `<td class="wide">${leftBar(it)}</td>`;
       if (f.key === 'price') {
@@ -332,7 +332,8 @@ function itemDialog() {
   // 一打开就显示成了别的样子，照控件现值整张写回去就是一次静默改写
   const touch = e => {
     const el = e.target;
-    const k = el.dataset.f || el.closest('[data-mbox]')?.dataset.mbox || (el.matches('[data-parent]') ? 'parent_id' : '');
+    const k = el.dataset.f || el.closest('[data-mbox]')?.dataset.mbox
+      || (el.matches('[data-parent]') ? 'parent_id' : el.matches('[data-auto]') ? 'auto_renew' : '');
     if (k) editingItem?.touched.add(k);
   };
   d.querySelector('#item-fields').addEventListener('input', touch);
@@ -436,6 +437,7 @@ function openItemDialog(key, it, { focus, note } = {}) {
     if (f.src === 'calc') continue; // 算出来的列不可编辑
     box.appendChild(fieldControl(key, f, it));
   }
+  box.appendChild(autoRow(it));
   box.appendChild(parentRow(key, it));
   if (it) box.appendChild(logoRow(it));
   $('#dlg-item-note').hidden = !note;
@@ -502,6 +504,15 @@ function fieldControl(key, f, it) {
     lab.innerHTML = `<span>${esc(f.name || f.key)}</span><input type="${type}"${type === 'number' ? ' step="any"' : ''} data-f="${esc(f.key)}"${mark} value="${esc(val)}">`;
   }
   return lab;
+}
+
+/* 自动续费开关。值是开启那天（itemBody 取），不是注册字段，与父条目同一处理方式。 */
+function autoRow(it) {
+  const box = document.createElement('div');
+  box.className = 'field span2';
+  box.innerHTML = `<label class="check"><input type="checkbox" data-auto${it?.auto_renew ? ' checked' : ''}><span>自动续费</span></label>
+    <span class="fp-note">账单日过后自动记一笔、推到下一期；开启前就已逾期的期仍要手动点一次「已续费」</span>`;
+  return box;
 }
 
 /* 父条目：子行只有两层，候选是同库顶层行；已有子行的不能再挂到别人下面（后端
@@ -645,14 +656,19 @@ function itemBody(key, touched) {
   // 币种同理：它并进了费用栏，迁移 0013 起不再是注册字段，上面那圈循环读不到它
   const csel = document.querySelector('#item-fields [data-f="currency"]');
   if (csel && want('currency')) cols.currency = fxCode(csel.value); // 手打的 usd 一律存成 USD；空串＝清空
+  // 自动续费存开启那天，只管那天之后的账单日：已开着的保持原日期，刷成今天会把中间没续的期甩给手动
+  const auto = document.querySelector('#item-fields [data-auto]');
+  const autoOn = auto && want('auto_renew') ? auto.checked : undefined;
   return row => {
-    if (!Object.keys(ext).length) return { ...cols };
+    const out = { ...cols };
+    if (autoOn !== undefined) out.auto_renew = autoOn ? row.auto_renew || state.overview.today : null;
+    if (!Object.keys(ext).length) return out;
     const extra = { ...(row.extra || {}) };
     for (const [k, v] of Object.entries(ext)) {
       if (v == null || v === '' || (Array.isArray(v) && !v.length)) delete extra[k];
       else extra[k] = v;
     }
-    return { ...cols, extra };
+    return { ...out, extra };
   };
 }
 

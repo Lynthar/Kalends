@@ -35,6 +35,16 @@ on a NAS for months without attention.
   last renewal and a cycle and let it work the date out. Cycles run from weekly
   to three-yearly, plus lifetime and an arbitrary number of days — so a 181-day
   SIM keep-alive is an ordinary setting, not a special case.
+- **Renewing is one click.** Marking an item renewed moves its date forward and
+  writes a ledger entry; if you log it late, set the day you actually paid. Each
+  library decides where the next period starts: the billing schedule (a VPS
+  billed on the 15th stays on the 15th) or the payment day (a SIM keep-alive
+  window restarts when you top up). Items the provider charges automatically
+  can be set to auto-renew: the day after a billing date, Kalends books that
+  period in the ledger, marked as automatic, and moves on to the next one, as
+  long as the status counts as spending. Periods already overdue when you
+  switch it on still need one manual renewal, and auto-renewing items show up
+  in the daily digest instead of getting reminders of their own.
 - **Status values carry meaning.** Each one declares whether it counts as
   spending, whether it should remind you, and whether it belongs on the
   timeline.

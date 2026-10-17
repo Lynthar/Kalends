@@ -320,8 +320,9 @@ function renderUpcoming() {
     const d = it.days_left;
     const cls = d < 0 ? 'd-over' : d <= 3 ? 'd-soon' : d <= 7 ? 'd-week' : 'd-far';
     const daysTxt = d < 0 ? `${-d}<small>天前</small>` : d === 0 ? `今<small>到期</small>` : `${d}<small>天后</small>`;
-    // muted＝状态语义关掉了提醒（Ending 到期不续）：还在时间线上，但不该催人
-    const meta = [collName(it.kind), it.cycle, it.action, it.muted ? '不提醒' : ''].filter(Boolean).join(' · ');
+    // muted＝不单独提醒：状态关了提醒（Ending 到期不续），或这期会自动续（auto）。还在时间线上，但不该催人
+    const meta = [collName(it.kind), it.cycle, it.action, it.auto ? '自动续费' : it.muted ? '不提醒' : '']
+      .filter(Boolean).join(' · ');
     const li = document.createElement('li');
     li.className = cls + (it.muted ? ' quiet' : '');
     li.style.setProperty('--i', Math.min(idx, 12)); // 错峰封顶：长列表末尾不必干等一秒多

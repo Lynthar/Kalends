@@ -260,6 +260,8 @@ struct Row {
     last_renewed: Option<String>,
     due_anchor: String,
     extra: Value,
+    /// 自动续费的开启日；None＝没开
+    auto_renew: Option<String>,
 }
 
 impl Row {
@@ -272,6 +274,15 @@ impl Row {
             self.next_renewal.as_deref(),
             self.last_renewed.as_deref(),
         )
+    }
+
+    /// 这一期到期日是否归自动续费管。状态得计支出（停付了的不能替人记账）、周期推得动，
+    /// 且账单日不早于开启日：开启前就逾期的期仍要用户自己对齐，否则陈旧日期会一次补出一串没核过的账。
+    fn auto_covers(&self, sem: StatusSem, due: NaiveDate) -> bool {
+        let since = self.auto_renew.as_deref().and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
+        sem.spend
+            && since.is_some_and(|s| due >= s)
+            && advance(due, self.cycle.as_deref().unwrap_or(""), self.cycle_days).is_some()
     }
 
     /// 算不出到期日时，到底缺的是哪一项。**不能只按锚点二选一**：`last` 算不出有
@@ -334,7 +345,7 @@ fn rows(conn: &Connection) -> Result<Vec<Row>> {
     let mut stmt = conn.prepare(
         "SELECT c.key, c.verb, c.note_field, c.subtitle, c.due_anchor,
                 i.id, i.name, i.status, i.price, i.currency, i.cycle, i.cycle_days,
-                i.next_renewal, i.last_renewed, i.extra
+                i.next_renewal, i.last_renewed, i.extra, i.auto_renew
          FROM items i JOIN collections c ON c.id = i.collection_id
          ORDER BY c.pos, i.id",
     )?;
@@ -359,6 +370,7 @@ fn rows(conn: &Connection) -> Result<Vec<Row>> {
                 next_renewal: r.get(12)?,
                 last_renewed: r.get(13)?,
                 extra: crate::api::extra_json(extra),
+                auto_renew: r.get(15)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -443,6 +455,7 @@ pub fn upcoming(conn: &Connection) -> Result<Vec<Value>> {
             continue;
         }
         let Some(due) = r.due() else { continue };
+        let auto = r.auto_covers(sem, due);
         let note = r
             .note_field
             .as_deref()
@@ -462,13 +475,27 @@ pub fn upcoming(conn: &Connection) -> Result<Vec<Value>> {
                 "currency": r.currency,
                 "cycle": cycle_label(r.cycle.as_deref().unwrap_or(""), r.cycle_days),
                 "action": note,
-                // 不提醒但仍显示的状态（Ending）在前端与通知里都要能识别
-                "muted": !sem.alert,
+                // 不提醒但仍显示的（Ending、会自动续的）在前端与通知里都要能识别：只进摘要
+                "muted": !sem.alert || auto,
+                "auto": auto,
             }),
         ));
     }
     items.sort_by_key(|(d, _)| *d);
     Ok(items.into_iter().map(|(_, v)| v).collect())
+}
+
+/// 该由自动续费记账的条目与它眼下那期的账单日。账单日当天照常显示「今天」，过了那天才轮到它。
+pub fn auto_renewals(conn: &Connection, today: NaiveDate) -> Result<Vec<(i64, NaiveDate)>> {
+    let sems = sem_map(conn)?;
+    let mut out = Vec::new();
+    for r in rows(conn)? {
+        let Some(due) = r.due().filter(|d| *d < today) else { continue };
+        if r.auto_covers(sem_of(&sems, &r.key, &r.status), due) {
+            out.push((r.id, due));
+        }
+    }
+    Ok(out)
 }
 
 /// 该计支出、却因缺币种或周期而没被计进去的条目（`totals` 要金额与币种同时在场）。
@@ -548,6 +575,7 @@ mod tests {
             last_renewed: None,
             due_anchor: "next".into(),
             extra,
+            auto_renew: None,
         }
     }
 

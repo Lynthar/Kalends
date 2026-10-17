@@ -27,6 +27,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0019_rating_out_of_ten.sql"),
     include_str!("../migrations/0020_drop_media.sql"),
     include_str!("../migrations/0021_ids_are_never_reused.sql"),
+    include_str!("../migrations/0022_auto_renew.sql"),
 ];
 
 /// 一个跑完全部迁移的内存库，等价于"全新安装"。只给测试用。
@@ -300,7 +301,7 @@ mod tests {
     }
 
     /// 从 v14（新架构时代）迁到当前：自定义库/自定义列/extra 原样存续，
-    /// 0016「用户改过就不动」的防线、0017 的默认值落点、0018 的近似回填各钉一处。
+    /// 0016「用户改过就不动」的防线、0017 的默认值落点、0018 的近似回填、0022 的列并开关各钉一处。
     #[test]
     fn a_v14_era_database_with_custom_shapes_upgrades_intact() {
         let conn = db_at(14, include_str!("../tests/fixtures/uv14-data.sql"));
@@ -333,6 +334,18 @@ mod tests {
         assert_eq!(one::<i64>(&conn, "SELECT seq FROM id_seq WHERE name='fields'", []), 950);
         assert_eq!(next_id(&conn, "fields").unwrap(), 951);
         assert_eq!(next_id(&conn, "items").unwrap(), 1000);
+        // 0022：k5 的开/关并进开关（开＝迁移那天起自动续），键与列一起退场、别的 extra 不动；
+        // k6 有开/关之外的值，整库原样；存量台账都不是自动记的
+        let since = one::<Option<String>>(&conn, "SELECT auto_renew FROM items WHERE name='example.com'", []);
+        assert!(since.is_some_and(|d| chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d").is_ok()));
+        assert_eq!(one::<String>(&conn, "SELECT extra FROM items WHERE name='example.com'", []), r#"{"registrar":"ExampleReg"}"#);
+        assert_eq!(one::<Option<String>>(&conn, "SELECT auto_renew FROM items WHERE name='example.org'", []), None);
+        assert_eq!(one::<String>(&conn, "SELECT extra FROM items WHERE name='example.org'", []), "{}");
+        assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM fields WHERE tbl='k5' AND key='auto_renew'", []), 0);
+        assert_eq!(one::<Option<String>>(&conn, "SELECT auto_renew FROM items WHERE name='example.net'", []), None);
+        assert_eq!(one::<String>(&conn, "SELECT json_extract(extra,'$.auto_renew') FROM items WHERE name='example.net'", []), "是");
+        assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM fields WHERE tbl='k6' AND key='auto_renew'", []), 1);
+        assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM renewal_ledger WHERE auto != 0", []), 0);
     }
 
     /// 0020 只在媒体清空后放行：还有媒体行就整库拒绝迁移，原样无损。

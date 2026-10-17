@@ -2,13 +2,18 @@
 -- 在后续迁移里原样存续。行的取值即断言的预期来源，改这里必须同步改测试。
 
 INSERT INTO collections(id, key, name, due_anchor, pos, builtin) VALUES
-  (4, 'books', '藏书', 'next', 4, 0);
+  (4, 'books', '藏书', 'next', 4, 0),
+  (5, 'k5', '域名', 'next', 5, 0),
+  (6, 'k6', '域名乙', 'next', 6, 0);
 
 INSERT INTO fields(tbl, key, name, ftype, options, builtin, pos, src, shown) VALUES
   ('subs',  'c1',           '付费方式', 'sel',    '["月付","年付"]', 0, 30, 'extra', 1),
   ('books', 'name',         '名称',     'text',   '[]',              1, 1,  'col',   1),
   ('books', 'status',       '状态',     'status', '[]',              1, 2,  'col',   1),
-  ('books', 'next_renewal', '到期',     'date',   '[]',              1, 3,  'col',   1);
+  ('books', 'next_renewal', '到期',     'date',   '[]',              1, 3,  'col',   1),
+  -- 域名模板的「自动续费」开/关列：k5 只有开/关/空，并进开关；k6 加过别的值，原样留着
+  ('k5',    'auto_renew',   '自动续费', 'sel',    '[{"v":"开"},{"v":"关"}]', 0, 4, 'extra', 1),
+  ('k6',    'auto_renew',   '自动续费', 'sel',    '[{"v":"开"},{"v":"关"},{"v":"是"}]', 0, 4, 'extra', 1);
 
 -- 已删列留下的痕迹：库属性还指着它（c950），另有一行 extra 里挂着孤儿键（c900）
 UPDATE collections SET note_field = 'c950' WHERE key = 'books';
@@ -20,7 +25,10 @@ INSERT INTO items(id, collection_id, name, status, price, currency, cycle, cycle
   (101, 1, 'Example Plus',    'Active', 11.99, 'USD', 'monthly', NULL, '2026-09-01', NULL,         '{"c1":"月付","payment_method":"PayPal"}', 1),
   (102, 2, 'ExampleTel',      'Active', NULL,  NULL,  'days',    90,   NULL,         '2026-07-01', '{"phone_number":"+44 7700 900456","c900":"已删列的残值"}', 1),
   (103, 3, 'ExampleHost',     'Active', 5.5,   'USD', 'annual',  NULL, NULL,         '2026-05-20', '{"product":"VPS-Basic","cores":2}',       1),
-  (104, 4, 'Example Almanac', 'Active', NULL,  NULL,  NULL,      NULL, '2026-12-31', NULL,         NULL,                                      1);
+  (104, 4, 'Example Almanac', 'Active', NULL,  NULL,  NULL,      NULL, '2026-12-31', NULL,         NULL,                                      1),
+  (105, 5, 'example.com',     'Active', 10,    'USD', 'annual',  NULL, '2027-03-01', NULL,         '{"auto_renew":"开","registrar":"ExampleReg"}', 1),
+  (106, 5, 'example.org',     'Active', 10,    'USD', 'annual',  NULL, '2027-04-01', NULL,         '{"auto_renew":"关"}',                     2),
+  (107, 6, 'example.net',     'Active', 10,    'USD', 'annual',  NULL, '2027-05-01', NULL,         '{"auto_renew":"是"}',                     1);
 
 INSERT INTO renewal_ledger(kind, item_id, renewed_at, amount, currency) VALUES
   ('subs',  101, '2026-08-01', 11.99, 'USD'),
