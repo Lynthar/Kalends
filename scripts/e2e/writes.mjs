@@ -2,7 +2,7 @@
 // 表单只写动过的控件、编辑器保存失败留住输入、换图标后取消、改显示币种、字段操作写成而界面没刷新。
 // 每条都用「扣住响应 / 注入失败」造出缺陷发作的那一刻，而不是指望慢机碰巧撞上。
 export default async function (t) {
-  const { APP, put, items, mk, fields, check, evl, waitFor, settle, sql, menuClick, confirmRenew } = t;
+  const { APP, post, put, items, mk, fields, check, evl, waitFor, settle, sql, menuClick, confirmRenew } = t;
 
   // 在页面里包一层 api：命中 __hold 的那次请求照常发出、服务端照常处理，只把响应扣住等测试放行；
   // 命中 __fail 的那次直接抛错。其余模块按全局名调用 api，所以都会走这一层
@@ -265,4 +265,32 @@ export default async function (t) {
   check('删列：没有漏接的 rejection', await evl('window.__rejected') === 0, String(await evl('window.__rejected')));
   check('删列：服务端确实删了', !await subsCol('改过的列'));
   await evl('loadAll()');
+
+  /* 库设置的字段面板走同一套报法；「上表」只在没写成时把勾选翻回去——写成了还翻，界面就跟服务端对着干 */
+  const pf = await post('/api/fields', { tbl: 'subs', name: '面板收尾列', ftype: 'text' });
+  const prow = `[...document.querySelectorAll('#coll-fields .opt-row')]
+    .find(r => r.querySelector('.fp-v').textContent === '面板收尾列')`;
+  const redrawPanel = `(async () => { await rebuildHead('subs'); fillCollFields(collOf('subs')); return true; })()`;
+  await evl(`(async () => { await refreshFields(); await openCollDialog(collOf('subs')); return true; })()`);
+  check('面板：新列出现在库设置里', await waitFor(`!!${prow}`));
+  const shownNow = async () => (await subsCol('面板收尾列')).shown;
+  const tick = () => evl(`${prow}.querySelector('input').checked`);
+  const was = await tick();
+  await evl(`window.__fail = (p, o) => p === '/api/fields/${pf.id}' && o?.method === 'PUT'; true`);
+  const putSaid = await nextToast(() => evl(`${prow}.querySelector('input').click()`));
+  check('面板上表：没写成就报原错', putSaid.includes('注入的失败') && !putSaid.includes('界面没刷新'), putSaid);
+  check('面板上表：没写成时勾选翻回原样', await tick() === was && await shownNow() === was);
+  await refreshFails('面板上表', failRefetch, `${prow}.querySelector('input').click()`,
+    async () => await shownNow() === !was);
+  check('面板上表：写成了就留着新勾选', await tick() === !was);
+  await evl(redrawPanel);
+  const subsKeys = async () => (await fields()).filter(f => f.tbl === 'subs').map(f => f.key);
+  const keysBefore = await subsKeys();
+  await refreshFails('面板排序', failRefetch, `${prow}.querySelector('[data-up]').click()`,
+    async () => (await subsKeys()).indexOf(pf.key) === keysBefore.indexOf(pf.key) - 1);
+  await evl(redrawPanel);
+  await refreshFails('面板删列', `window.__fail = p => p === '/api/overview'; true`,
+    `${prow}.querySelector('[data-del]').click()`, async () => !await subsCol('面板收尾列'));
+  await evl('loadAll()');
+  await evl(`document.querySelector('#dlg-coll').close()`);
 }

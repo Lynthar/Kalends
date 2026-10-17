@@ -767,13 +767,10 @@ function fillCollFields(c) {
   const list = $('#coll-fields');
   list.innerHTML = '';
   const fs = fieldsOf(c.key);
-  const apply = async body => {
-    try {
-      await api('/api/fields/order', { method: 'PUT', body: JSON.stringify(body) });
-      await rebuildHead(c.key); // 本机那份过期的列序覆写由 settleView 结算，见上方注释
-      fillCollFields(c);
-    } catch (err) { toast(err.message, true); }
-  };
+  const call = (path, method, body, refresh = () => rebuildHead(c.key)) =>
+    fieldCall(path, method, body, { refresh: async () => { await refresh(); fillCollFields(c); } });
+  // 本机那份过期的列序覆写由 settleView 结算，见上方注释
+  const apply = body => call('/api/fields/order', 'PUT', body);
   fs.forEach((f, idx) => {
     const row = document.createElement('div');
     row.className = 'opt-row';
@@ -797,23 +794,15 @@ function fillCollFields(c) {
     row.querySelector('[data-up]').onclick = () => move(-1);
     row.querySelector('[data-dn]').onclick = () => move(1);
     // 不上表的列没有表头，表头菜单那条删除入口够不着——这儿是它们唯一的出口
-    row.querySelector('[data-del]')?.addEventListener('click', async () => {
+    row.querySelector('[data-del]')?.addEventListener('click', () => {
       if (!confirm(`删除列「${f.name || f.key}」？该列在所有行的值将被清除，不可撤销。`)) return;
-      try {
-        await api(`/api/fields/${f.id}`, { method: 'DELETE' });
-        await reloadAfterColumnDrop(c.key); // 顺带刷字段注册表，下面这次重绘读到的才是删后的字段集
-        fillCollFields(c);
-      } catch (err) { toast(err.message, true); }
+      // 顺带刷字段注册表，随后的重绘读到的才是删后的字段集
+      call(`/api/fields/${f.id}`, 'DELETE', {}, () => reloadAfterColumnDrop(c.key));
     });
     if (!locked) row.querySelector('input').onchange = async e => {
       const on = e.target.checked;
-      try {
-        await api(`/api/fields/${f.id}`, {
-          method: 'PUT', body: JSON.stringify({ name: f.name, shown: on }),
-        });
-        await rebuildHead(c.key);
-        fillCollFields(c);
-      } catch (err) { toast(err.message, true); e.target.checked = !on; }
+      // 只在没写成时翻回去：写成了而重绘失败，勾选框此刻的样子就是服务端的样子
+      if (!await call(`/api/fields/${f.id}`, 'PUT', { name: f.name, shown: on })) e.target.checked = !on;
     };
     reorderDnD(row, {
       group: 'coll-field',

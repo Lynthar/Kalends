@@ -19,21 +19,22 @@ function effectiveOptions(tab, k) {
 }
 
 /* 写失败与「写成了、界面没刷新」分开报（同 core.js write）：后者报成失败，用户会再做一遍。
-   refresh 是写成之后的界面收尾，said 是成功时的提示。 */
+   refresh 是写成之后的界面收尾，said 是成功时的提示；返回服务端写成了没有（收尾失败也算写成）。 */
 async function fieldCall(path, method, body, { refresh = refreshFields, said = '' } = {}) {
   try {
     await api(path, { method, body: JSON.stringify(body) });
   } catch (err) {
     toast(err.message, true);
-    return;
+    return false;
   }
   try {
     await refresh();
   } catch (err) {
     toast(`${said || '已生效'}，但界面没刷新（${err.message}）：别重复操作，稍后刷新页面再看`, true);
-    return;
+    return true;
   }
   if (said) toast(said);
+  return true;
 }
 
 const putOpts = (tab, k, opts) => fieldCall('/api/fields/options', 'PUT', { tbl: tab, key: k, options: opts });

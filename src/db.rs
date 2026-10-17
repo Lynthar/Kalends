@@ -361,7 +361,8 @@ mod tests {
         assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM sqlite_master WHERE name='media_items'", []), 0);
     }
 
-    /// 升级启动必须先落迁移前快照（停在旧版本的整份库）；全新安装不落；落不下去就不启动。
+    /// 升级启动必须先落迁移前快照（停在旧版本的整份库），上次硬杀留下的半截快照与 VACUUM 日志
+    /// 重试后不能还在 backups/ 里；全新安装不落；落不下去就不启动。
     #[test]
     fn an_upgrade_start_snapshots_the_database_before_migrating() {
         fn stage_v4(dir: &Path) {
@@ -373,14 +374,25 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         stage_v4(dir.path());
+        let backups = dir.path().join("backups");
+        std::fs::create_dir(&backups).unwrap();
+        // 日志是 SQLite 在空目标上当陈货删的：前提是重试用同一个文件名，快照名别带时间戳
+        for half in ["pre-migration-v4.db.tmp", "pre-migration-v4.db.tmp-journal"] {
+            std::fs::write(backups.join(half), b"half").unwrap();
+        }
         let conn = open(dir.path()).unwrap();
         assert_eq!(one::<i64>(&conn, "PRAGMA user_version", []), known_version());
         let frozen = Connection::open_with_flags(
-            dir.path().join("backups").join("pre-migration-v4.db"),
+            backups.join("pre-migration-v4.db"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .unwrap();
         assert_eq!(one::<i64>(&frozen, "PRAGMA user_version", []), 4);
+        let mut left: Vec<_> = std::fs::read_dir(&backups).unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["pre-migration-v4.db"], "半截快照或 VACUUM 日志没扫掉");
 
         // 全新安装没有可备的东西，不该留下 backups/
         let fresh = tempfile::tempdir().unwrap();
