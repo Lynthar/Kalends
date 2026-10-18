@@ -74,7 +74,7 @@ function colFromField(key, f) {
   const isPrice = f.src === 'col' && f.key === 'price';
   const get = r => fieldVal(f, r);
   return {
-    t, fkey: f.key, src: f.src, custom: f.builtin ? 0 : f.id,
+    t, fkey: f.key, src: f.src, ftype: f.ftype, custom: f.builtin ? 0 : f.id,
     conv: CONV_TYPES.includes(t) ? 1 : 0,
     ord: f.key === 'status' ? statusOrder(key) : null,
     str: numeric || isCycle ? 0 : 1,
@@ -155,7 +155,7 @@ function ensureCollDom(c) {
     else $('#view-pills').after(wrap);
   }
   HEAD_SEL[key] = `.tablewrap[data-tab="${key}"] thead`;
-  SEARCH_FIELDS[key] = r => [r.name, r.notes, ...Object.values(r.extra || {}).flatMap(v => Array.isArray(v) ? v : [v])];
+  SEARCH_FIELDS[key] = r => [r.name, ...Object.values(r.extra || {}).flatMap(v => Array.isArray(v) ? v : [v])];
   RENDER[key] = () => renderColl(key);
   views[key] = viewShape(views[key]);
   COLS[key] = Object.fromEntries(shownFields(key).map(f => [f.key, colFromField(key, f)]));

@@ -594,13 +594,8 @@ fn anchor_fields(anchor: &str) -> &'static [FieldDef] {
     }
 }
 
-fn seed_fields(
-    conn: &Connection,
-    key: &str,
-    anchor: &str,
-    tpl: Option<&Template>,
-) -> anyhow::Result<()> {
-    // 序号留了空档，模板的域字段插在 10 段
+/// 每个库都有的通用字段（模板的 `base` 只能调整这些）。序号留了空档，模板的域字段插在 10 段。
+fn generic_defs(anchor: &str) -> Vec<FieldDef> {
     let mut defs: Vec<FieldDef> = vec![
         ("name", "名称", "text", "col", 1, 1),
         ("status", "状态", "status", "col", 1, 2),
@@ -609,9 +604,20 @@ fn seed_fields(
         ("cycle", "周期", "sel", "col", 1, 32),
     ];
     defs.extend_from_slice(anchor_fields(anchor));
-    defs.push(("notes", "备注", "text", "col", 1, 50));
+    // 备注不被引擎读，是一列普通的自定义列（src='extra'、builtin=0，与模板的域字段同权）
+    defs.push(("notes", "备注", "text", "extra", 1, 50));
     defs.push(("cycle_days", "周期天数", "num", "col", 0, 60));
     defs.push(("url", "链接", "text", "col", 0, 61));
+    defs
+}
+
+fn seed_fields(
+    conn: &Connection,
+    key: &str,
+    anchor: &str,
+    tpl: Option<&Template>,
+) -> anyhow::Result<()> {
+    let mut defs = generic_defs(anchor);
     for (k, name, shown) in tpl.map_or(&[][..], |t| t.base) {
         let Some(d) = defs.iter_mut().find(|d| d.0 == *k) else {
             continue;
@@ -629,9 +635,9 @@ fn seed_fields(
         let options = if k == "status" { status_vocab } else { "[]" };
         conn.execute(
             "INSERT INTO fields(id,tbl,key,name,ftype,src,shown,pos,builtin,options)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,1,?9)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
              ON CONFLICT(tbl,key) DO NOTHING",
-            params![db::next_id(conn, "fields")?, key, k, name, ftype, src, shown, pos, options],
+            params![db::next_id(conn, "fields")?, key, k, name, ftype, src, shown, pos, i64::from(src != "extra"), options],
         )?;
     }
     for (n, f) in tpl.map_or(&[][..], |t| t.extra).iter().enumerate() {
@@ -810,7 +816,7 @@ async fn remove(State(app): State<App>, Path(id): Path<i64>) -> R {
 // 后加的列一律追加在末尾，不必动 item_row 里既有的下标。pos 不在 WRITE_COLS 里：
 // 手动序只由 /items/order 改，整行 PATCH 碰不到它。
 const ITEM_COLS: &str = "id,collection_id,name,parent_id,status,price,currency,cycle,cycle_days,\
-                         next_renewal,last_renewed,url,notes,logo,extra,created_at,updated_at,pos,auto_renew";
+                         next_renewal,last_renewed,url,logo,extra,created_at,updated_at,pos,auto_renew";
 
 pub fn item_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -826,13 +832,12 @@ pub fn item_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "next_renewal": r.get::<_, Option<String>>(9)?,
         "last_renewed": r.get::<_, Option<String>>(10)?,
         "url": r.get::<_, Option<String>>(11)?,
-        "notes": r.get::<_, Option<String>>(12)?,
-        "logo": r.get::<_, Option<String>>(13)?,
-        "extra": extra_json(r.get::<_, Option<String>>(14)?),
-        "created_at": r.get::<_, String>(15)?,
-        "updated_at": r.get::<_, String>(16)?,
-        "pos": r.get::<_, Option<i64>>(17)?,
-        "auto_renew": r.get::<_, Option<String>>(18)?,
+        "logo": r.get::<_, Option<String>>(12)?,
+        "extra": extra_json(r.get::<_, Option<String>>(13)?),
+        "created_at": r.get::<_, String>(14)?,
+        "updated_at": r.get::<_, String>(15)?,
+        "pos": r.get::<_, Option<i64>>(16)?,
+        "auto_renew": r.get::<_, Option<String>>(17)?,
     }))
 }
 
@@ -1080,7 +1085,6 @@ fn item_values(b: &Value) -> anyhow::Result<Vec<rusqlite::types::Value>> {
         s(b, "next_renewal").map_or(V::Null, V::from),
         s(b, "last_renewed").map_or(V::Null, V::from),
         s(b, "url").map_or(V::Null, V::from),
-        s(b, "notes").map_or(V::Null, V::from),
         extra_str(b).map_or(V::Null, V::from),
         s(b, "auto_renew").map_or(V::Null, V::from),
     ])
@@ -1089,17 +1093,21 @@ fn item_values(b: &Value) -> anyhow::Result<Vec<rusqlite::types::Value>> {
 // logo 不在可写列里：文件名由服务端生成、删条目按行内名字删文件——放开它就能把 A 的
 // 文件名写进 B，删 B 时连 A 的图标一起删掉。上传/抓取/清除各有专用端点。
 const WRITE_COLS: &str = "name,parent_id,status,price,currency,cycle,cycle_days,\
-                          next_renewal,last_renewed,url,notes,extra,auto_renew";
+                          next_renewal,last_renewed,url,extra,auto_renew";
 
 /// 条目写入口的类型校验：出现的键必须是它该有的类型（`api::check_shape`），logo 带非空值
 /// 直接拒——`null`/`""` 按「不在可写集」忽略，整行回读再 PATCH 回来的用法才过得去。
+/// 顶层 `notes` 一律拒：备注已是 extra 列，照旧放行的话回 200 却什么都没写。
 fn check_item_shape(b: &Value) -> anyhow::Result<()> {
     if b.get("logo").is_some_and(|v| !(v.is_null() || v.as_str() == Some(""))) {
         return Err(bad("图标不走这里：上传/抓取/清除各有专用端点"));
     }
+    if b.get("notes").is_some() {
+        return Err(bad("备注已并入 extra：写成 extra.notes"));
+    }
     crate::api::check_shape(
         b,
-        &["name", "status", "currency", "cycle", "next_renewal", "last_renewed", "url", "notes", "auto_renew"],
+        &["name", "status", "currency", "cycle", "next_renewal", "last_renewed", "url", "auto_renew"],
         &["parent_id", "cycle_days"],
         &["price"],
     )
@@ -2056,10 +2064,10 @@ mod tests {
         .unwrap();
         let id = conn.last_insert_rowid();
 
-        update_item(&conn, id, &json!({ "notes": "改个备注" })).unwrap();
+        update_item(&conn, id, &json!({ "extra": { "notes": "改个备注" } })).unwrap();
         let (notes, currency, due): (String, String, String) = conn
             .query_row(
-                "SELECT notes, currency, next_renewal FROM items WHERE id=?1",
+                "SELECT json_extract(extra, '$.notes'), currency, next_renewal FROM items WHERE id=?1",
                 [id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -2147,9 +2155,12 @@ mod tests {
         assert!(update_item(&conn, id, &json!({ "logo": "item-9-9.png" })).is_err());
         assert!(insert_item(&conn, coll, &json!({ "name": "乙", "logo": "item-9-9.png" })).is_err());
         // 整行回读再 PATCH 回来的形状（logo:null）要能过：它按「不在可写集」忽略
-        update_item(&conn, id, &json!({ "logo": null, "notes": "改备注" })).unwrap();
+        update_item(&conn, id, &json!({ "logo": null, "extra": { "notes": "改备注" } })).unwrap();
+        // 备注已是 extra 列：照旧写顶层 notes 要明说，不能回 200 却什么都没写
+        assert!(update_item(&conn, id, &json!({ "notes": "旧写法" })).is_err());
+        assert!(insert_item(&conn, coll, &json!({ "name": "丙", "notes": "旧写法" })).is_err());
         let (logo, notes): (Option<String>, String) = conn
-            .query_row("SELECT logo, notes FROM items WHERE id=?1", [id], |r| {
+            .query_row("SELECT logo, json_extract(extra, '$.notes') FROM items WHERE id=?1", [id], |r| {
                 Ok((r.get(0)?, r.get(1)?))
             })
             .unwrap();
@@ -2348,7 +2359,7 @@ mod tests {
         )
         .unwrap();
         let old = conn.last_insert_rowid();
-        update_item(&conn, old, &json!({ "notes": "改个备注" })).unwrap();
+        update_item(&conn, old, &json!({ "extra": { "notes": "改个备注" } })).unwrap();
         assert!(update_item(&conn, old, &json!({ "cycle": "days" })).is_err());
     }
 
@@ -2699,14 +2710,9 @@ mod tests {
             assert!(ANCHORS.contains(&t.anchor) && RENEW_FROMS.contains(&t.renew_from), "{}", t.id);
             let tbl = format!("chk_{}", t.id);
             seed_fields(&conn, &tbl, t.anchor, Some(t)).unwrap();
-            let generic: Vec<String> = {
-                let mut st = conn
-                    .prepare("SELECT key FROM fields WHERE tbl=?1 AND builtin=1")
-                    .unwrap();
-                st.query_map([&tbl], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
-            };
+            let generic: Vec<&str> = generic_defs(t.anchor).iter().map(|d| d.0).collect();
             for (k, name, shown) in t.base {
-                assert!(generic.iter().any(|g| g == k), "{}：base 调整了这个到期模型不会播下的字段 {k}", t.id);
+                assert!(generic.contains(k), "{}：base 调整了这个到期模型不会播下的字段 {k}", t.id);
                 let (got_name, got_shown): (String, i64) = conn
                     .query_row("SELECT name, shown FROM fields WHERE tbl=?1 AND key=?2", params![tbl, k], |r| {
                         Ok((r.get(0)?, r.get(1)?))
@@ -2720,7 +2726,7 @@ mod tests {
             let mut keys = std::collections::HashSet::new();
             for f in t.extra {
                 assert!(!f.key.is_empty() && !f.name.is_empty(), "{}：域字段键与名不能为空", t.id);
-                assert!(keys.insert(f.key) && !generic.iter().any(|g| g == f.key), "{}：域字段键 {} 重复或撞上通用字段", t.id, f.key);
+                assert!(keys.insert(f.key) && !generic.contains(&f.key), "{}：域字段键 {} 重复或撞上通用字段", t.id, f.key);
                 assert!(f.options.is_empty() || matches!(f.ftype, "sel" | "multi"), "{}：{} 不是词表列却带预置选项", t.id, f.key);
                 let (name, ftype, shown, builtin): (String, String, i64, i64) = conn
                     .query_row(
@@ -2807,7 +2813,7 @@ mod tests {
         assert!(items_of(&conn, "subs").unwrap().iter().any(|r| r["id"] == price && r["price"].is_null()));
         renew_item(&conn, price, &json!({})).unwrap();
 
-        update_item(&conn, price, &json!({ "notes": "只改备注" })).unwrap();
+        update_item(&conn, price, &json!({ "extra": { "notes": "只改备注" } })).unwrap();
         assert_eq!(one::<String>(&conn, "SELECT typeof(price)||':'||price FROM items WHERE id=?1", [price]), "text:12,50");
     }
 
@@ -2821,8 +2827,8 @@ mod tests {
         let tier = insert_item(&conn, subs, &json!({ "name": "档位", "parent_id": svc })).unwrap();
         let kid = insert_item(&conn, subs, &json!({ "name": "孙" })).unwrap();
         conn.execute("UPDATE items SET parent_id=?1 WHERE id=?2", [tier, kid]).unwrap();
-        update_item(&conn, kid, &json!({ "notes": "只改备注" })).unwrap();
-        update_item(&conn, tier, &json!({ "notes": "只改备注" })).unwrap();
+        update_item(&conn, kid, &json!({ "extra": { "notes": "只改备注" } })).unwrap();
+        update_item(&conn, tier, &json!({ "extra": { "notes": "只改备注" } })).unwrap();
         assert_eq!(one::<Option<i64>>(&conn, "SELECT parent_id FROM items WHERE id=?1", [kid]), Some(tier), "存量链接原样保留");
         assert!(update_item(&conn, kid, &json!({ "parent_id": tier })).is_err(), "请求带来的三层仍拦");
     }

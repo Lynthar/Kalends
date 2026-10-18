@@ -28,6 +28,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0020_drop_media.sql"),
     include_str!("../migrations/0021_ids_are_never_reused.sql"),
     include_str!("../migrations/0022_auto_renew.sql"),
+    include_str!("../migrations/0023_notes_become_a_custom_column.sql"),
 ];
 
 /// 一个跑完全部迁移的内存库，等价于"全新安装"。只给测试用。
@@ -298,6 +299,18 @@ mod tests {
         // 0020：媒体表连媒体字段注册一起退场（fixture 里没有媒体行）
         assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM sqlite_master WHERE name='media_items'", []), 0);
         assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM fields WHERE tbl='media'", []), 0);
+        // 0023：v4 的订阅备注经 0007 进了条目真列，再搬进 extra；与 0007 搬来的域字段并存
+        assert_eq!(one::<String>(&conn, "SELECT json_extract(extra,'$.notes') FROM items WHERE name='Beta Cloud'", []), "年底再看");
+        assert_eq!(one::<String>(&conn, "SELECT json_extract(extra,'$.notes') FROM items WHERE name='alpha Host'", []), "团队账号");
+        assert_eq!(one::<String>(&conn, "SELECT json_extract(extra,'$.c1') FROM items WHERE name='alpha Host'", []), "自定义值");
+        assert_notes_became_a_custom_column(&conn);
+    }
+
+    /// 0023 之后：items 没有 notes 真列，每个库的备注都注册成可改名、可删的 extra 列。
+    fn assert_notes_became_a_custom_column(conn: &Connection) {
+        assert_eq!(one::<i64>(conn, "SELECT count(*) FROM pragma_table_info('items') WHERE name='notes'", []), 0);
+        assert_eq!(one::<i64>(conn, "SELECT count(*) FROM fields WHERE key='notes' AND NOT (src='extra' AND builtin=0)", []), 0);
+        assert!(one::<i64>(conn, "SELECT count(*) FROM fields WHERE key='notes'", []) >= 3);
     }
 
     /// 从 v14（新架构时代）迁到当前：自定义库/自定义列/extra 原样存续，
@@ -346,6 +359,12 @@ mod tests {
         assert_eq!(one::<String>(&conn, "SELECT json_extract(extra,'$.auto_renew') FROM items WHERE name='example.net'", []), "是");
         assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM fields WHERE tbl='k6' AND key='auto_renew'", []), 1);
         assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM renewal_ledger WHERE auto != 0", []), 0);
+        // 0023：备注搬进 extra，原有的键不动；空串不搬（extra 原样）；真列退场，注册表里成了自定义列
+        assert_eq!(one::<String>(&conn, "SELECT json_extract(extra,'$.notes') FROM items WHERE name='Example Plus'", []), "每月对账");
+        assert_eq!(one::<String>(&conn, "SELECT json_extract(extra,'$.c1') FROM items WHERE name='Example Plus'", []), "月付");
+        assert_eq!(one::<String>(&conn, "SELECT extra FROM items WHERE name='Example Almanac'", []), r#"{"notes":"纸本"}"#);
+        assert_eq!(one::<String>(&conn, "SELECT extra FROM items WHERE name='ExampleHost'", []), r#"{"product":"VPS-Basic","cores":2}"#);
+        assert_notes_became_a_custom_column(&conn);
     }
 
     /// 0020 只在媒体清空后放行：还有媒体行就整库拒绝迁移，原样无损。

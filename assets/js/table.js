@@ -85,14 +85,15 @@ const inExtra = col => (col.src ? col.src === 'extra' : !!col.custom);
 
 const LOCK_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3.5" y="7.2" width="9" height="6.3" rx="1.4"/><path d="M5.6 7.2V5.4a2.4 2.4 0 0 1 4.8 0v1.8"/></svg>';
 const CALC_SVG = '<svg viewBox="0 0 16 16"><text x="4.2" y="12.6" font-size="13" font-style="italic" font-weight="600" fill="currentColor">ƒ</text></svg>';
-// 列的归属：表头标记、表头菜单与字段面板共用这一份，说法也只写在这里。
-// custom＝extra 列（可改名、可删）；calc＝算出来的（值不能编辑）；system＝引擎真列
+// 列的归属：表头标记、表头菜单与字段面板共用这一份，说法也只写在这里。custom＝extra 列（可改名、
+// 可删）；calc＝算出来的（值不能编辑）；system＝引擎真列；composite＝几个字段拼成的（规格，按格填）
 const COL_KINDS = {
   custom: { tip: '自定义列：可以改名、删除' },
   calc: { mark: CALC_SVG, tip: '自动算出：值不能编辑，不能改名、删除' },
   system: { mark: LOCK_SVG, tip: '系统列：不能改名、删除' },
+  composite: { mark: LOCK_SVG, tip: '系统列：由几个字段拼成，点开按格填；不能改名、删除' },
 };
-const colKind = col => (inExtra(col) ? 'custom' : col.src === 'calc' ? 'calc' : 'system');
+const colKind = col => (inExtra(col) ? 'custom' : col.src !== 'calc' ? 'system' : col.ftype === 'tpl' ? 'composite' : 'calc');
 // 算出来的列在表头用 ƒ 顶替类型图标；其余照类型
 const headIcon = (tab, k) => (colKind(COLS[tab][k]) === 'calc' ? CALC_SVG : TYPES[colType(tab, k)].icon);
 
@@ -296,7 +297,7 @@ function initHead(tab) {
     const kind = colKind(COLS[tab][th.dataset.k]);
     th.classList.add(`th-${kind}`);
     th.title = COL_KINDS[kind].tip;
-    if (kind === 'system') th.append(Object.assign(document.createElement('span'), { className: 'tlock', innerHTML: LOCK_SVG }));
+    if (COL_KINDS[kind].mark === LOCK_SVG) th.append(Object.assign(document.createElement('span'), { className: 'tlock', innerHTML: LOCK_SVG }));
     initColDrag(tab, th);
     initColResize(tab, th);
     th.onclick = () => openHeadMenu(tab, th); // Notion 式：点表头开属性菜单

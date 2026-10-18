@@ -1,10 +1,10 @@
 -- user_version=4 时代（库泛化之前的最后形态）的合成数据，全为虚构的通用值，
 -- 给 db.rs 的「中间版本升级」测试当起点：行的取值即断言的预期来源，改这里必须同步改测试。
 
-INSERT INTO subscriptions(id, name, parent_id, category, status, price, currency, cycle, next_renewal, payment_method, account, url, extra) VALUES
-  (10, 'Beta Cloud', NULL, 'CloudSvc', 'Active', NULL, NULL,  NULL,      NULL,         NULL,   'user@example.com', 'https://example.com', NULL),
-  (20, 'Pro tier',   10,   NULL,       'Active', 9.99, 'USD', 'annual',  '2027-01-15', 'Visa', NULL,               NULL,                  'not json'),
-  (30, 'alpha Host', NULL, 'DevTools', 'Ended',  30,   'CNY', 'monthly', NULL,         NULL,   NULL,               NULL,                  '{"c1":"自定义值"}');
+INSERT INTO subscriptions(id, name, parent_id, category, status, price, currency, cycle, next_renewal, payment_method, account, url, extra, notes) VALUES
+  (10, 'Beta Cloud', NULL, 'CloudSvc', 'Active', NULL, NULL,  NULL,      NULL,         NULL,   'user@example.com', 'https://example.com', NULL,              '年底再看'),
+  (20, 'Pro tier',   10,   NULL,       'Active', 9.99, 'USD', 'annual',  '2027-01-15', 'Visa', NULL,               NULL,                  'not json',        NULL),
+  (30, 'alpha Host', NULL, 'DevTools', 'Ended',  30,   'CNY', 'monthly', NULL,         NULL,   NULL,               NULL,                  '{"c1":"自定义值"}', '团队账号');
 
 INSERT INTO price_history(subscription_id, price, currency, effective_from) VALUES
   (10, 7.99, 'USD', '2024-01-01'),

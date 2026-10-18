@@ -565,7 +565,8 @@ export default async function (t) {
   const mCol = await thMenuOf('subs', 'price');
   check('引擎真列（价格）没有删除列', !mCol.includes('删除列'), mCol);
   check('引擎真列（价格）没有重命名列', !mCol.includes('重命名列'), mCol);
-  const vpsCalc = delFs.find(f => f.tbl === 'vps' && f.src === 'calc' && f.shown);
+  // 真正算出来的是剩余天数；规格虽然 src 也是 calc，却是几个可写字段拼成的（另有一条断言）
+  const vpsCalc = delFs.find(f => f.tbl === 'vps' && f.key === 'left');
   const mCalc = await thMenuOf('vps', vpsCalc.key);
   check(`算出来的列（${vpsCalc.name}）没有删除列`, !mCalc.includes('删除列'), mCalc);
   // 只看表头就分得出列的归属：系统列挂锁、算出来的列是 ƒ、自定义列换色；菜单里留一行说明为什么没有那两项
@@ -575,7 +576,8 @@ export default async function (t) {
     const th = (tab, k) => document.querySelector('.tablewrap[data-tab="' + tab + '"] th[data-k="' + k + '"]');
     const desc = t => ({ kind: [...t.classList].find(c => c.startsWith('th-')), lock: !!t.querySelector('.tlock'),
       icon: t.querySelector('.ticon').textContent, title: t.title, color: getComputedStyle(t).color });
-    return { sys: desc(th('subs', 'price')), custom: desc(th('subs', '${seededExtra.key}')), calc: desc(th('vps', '${vpsCalc.key}')) };
+    return { sys: desc(th('subs', 'price')), custom: desc(th('subs', '${seededExtra.key}')), calc: desc(th('vps', '${vpsCalc.key}')),
+      spec: desc(th('vps', 'spec')), notes: desc(th('subs', 'notes')) };
   })()`);
   check('系统列表头挂锁、悬停说明不能改名删除',
     headKinds.sys.kind === 'th-system' && headKinds.sys.lock && headKinds.sys.title === '系统列：不能改名、删除',
@@ -585,6 +587,11 @@ export default async function (t) {
   check('自定义列表头不挂锁、换了颜色',
     headKinds.custom.kind === 'th-custom' && !headKinds.custom.lock && headKinds.custom.color !== headKinds.sys.color,
     JSON.stringify(headKinds));
+  check('规格是几个字段拼成的：挂锁、说明按格填，不是 ƒ',
+    headKinds.spec.kind === 'th-composite' && headKinds.spec.lock && headKinds.spec.icon !== 'ƒ'
+    && headKinds.spec.title.includes('按格填'), JSON.stringify(headKinds.spec));
+  check('备注是自定义列：不挂锁、水色', headKinds.notes.kind === 'th-custom' && !headKinds.notes.lock
+    && headKinds.notes.color === headKinds.custom.color, JSON.stringify(headKinds.notes));
   check('后端同样拒绝删非 extra 列',
     (await fetch(`${APP}api/fields/${delFs.find(f => f.tbl === 'subs' && f.key === 'price').id}`,
       { method: 'DELETE' })).status === 404);
@@ -604,7 +611,8 @@ export default async function (t) {
   check('字段面板给 extra 列出了删除按钮',
     panelBy[nameOfKey('registrar')] === true && panelBy[nameOfKey('dns')] === true, JSON.stringify(panelDel));
   check('字段面板不给真列/算出来的列删除按钮',
-    panelBy['名称'] === false && panelBy['费用'] === false && panelBy['备注'] === false, JSON.stringify(panelDel));
+    panelBy['名称'] === false && panelBy['费用'] === false, JSON.stringify(panelDel));
+  check('备注是自定义列，字段面板给它删除按钮', panelBy['备注'] === true, JSON.stringify(panelDel));
   await shot('16-field-panel-delete');
 
   // shown=0 的列：表头上没有它，只能从面板删——删完表头不该有任何变化

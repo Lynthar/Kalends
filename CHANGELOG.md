@@ -2,6 +2,18 @@
 
 Release notes are taken from this file verbatim — each `## vX.Y.Z` section becomes that release's body.
 
+## v0.3.2
+
+**New**: an item can renew itself. Turn on auto-renew and, the day after a billing date passes, that period is booked in the ledger (marked automatic) and the item moves on; periods already overdue when you turn it on still need one manual renewal. "Renewed" asks which day you paid, so logging a SIM top-up late no longer pushes its window back. Status values no item uses can be dropped.
+
+**Columns**: headers show what each column is: a lock on system columns, ƒ on computed ones, and custom columns in aqua, like the ＋ that adds them. Notes is now an ordinary custom column you can rename or delete. On touch screens, long-press a column header or library tab to drag it.
+
+**Library settings**: the due-date options read as plain questions. Switching how a library records due dates carries every item's date across instead of leaving them blank (a monthly date on the 29th–31st can land up to three days earlier). The ⚙ sits beside search, and resetting column widths lives there.
+
+**Fixed**: toasts show above open dialogs; the price editor's amount box is wide enough to read; a settings-panel change that saved but failed to redraw is no longer reported as failed; backup rotation leaves files it didn't write alone.
+
+**Upgrading**: one migration moves notes into each item's custom fields, after a snapshot lands in `backups/pre-migration-v22.db`. API clients must send notes as `extra.notes`; a top-level `notes` now gets a 400.
+
 ## v0.3.1
 
 **Looks different**: in a narrow window, a table showing a date or number column now scrolls sideways instead of squeezing dates down to "2026-…". On touch screens the row checkbox, drag handle and ⤢ are always visible and large enough to tap. Scrolling no longer closes the cell editor, so rotating a phone keeps what you typed. Renewing something with no cycle, like an ID document, opens its form at the due date.

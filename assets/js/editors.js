@@ -216,6 +216,7 @@ function currencyPicker(tab, cur, attrs) {
    与周期那格同形——按列键特判，不为此新造字段类型。 */
 function priceEditor(tab, it, td) {
   const box = cellPopShell(td, colLabel(tab, 'price'));
+  box.classList.add('pricepop');
   const cur = fxCode(it.currency);
   box.insertAdjacentHTML('beforeend', `<div class="fp-form">
     <input class="fp-q" type="number" step="any" data-price placeholder="金额" value="${esc(String(it.price ?? ''))}">

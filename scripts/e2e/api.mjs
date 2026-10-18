@@ -83,8 +83,8 @@ export default async function (t) {
      保持原值、extra 整体替换。全量替换时代"漏一键=清一列"的事故一族由此封口。 */
   const pa_item = await mk('subs', {
     name: 'PATCH 语义', status: 'Active', price: 12.5, currency: 'USD', cycle: 'monthly',
-    next_renewal: day(20), url: 'https://example.com', notes: '备注原样',
-    extra: { category: 'AI', payment_method: 'Visa' },
+    next_renewal: day(20), url: 'https://example.com',
+    extra: { category: 'AI', payment_method: 'Visa', notes: '备注原样' },
   });
   const pa_get = async () => (await (await fetch(APP + 'api/collections/subs/items')).json())
     .find(r => r.id === pa_item.id);
@@ -94,7 +94,7 @@ export default async function (t) {
   check('缺席的键保持原值（价格/币种/周期/到期日/网址/备注）',
     pa_after.name === '改过名' && pa_after.price === 12.5 && pa_after.currency === 'USD'
     && pa_after.cycle === 'monthly' && pa_after.next_renewal === pa_before.next_renewal
-    && pa_after.url === pa_before.url && pa_after.notes === '备注原样',
+    && pa_after.url === pa_before.url && pa_after.extra.notes === '备注原样',
     JSON.stringify(pa_after));
   check('extra 缺席时整份保持',
     JSON.stringify(pa_after.extra) === JSON.stringify(pa_before.extra), JSON.stringify(pa_after.extra));
@@ -191,7 +191,11 @@ export default async function (t) {
   check('被拒的请求一字未动', tv_after.price === 12.5 && tv_after.extra?.category === '甲' && tv_after.name === '类型契约',
     JSON.stringify([tv_after.price, tv_after.extra, tv_after.name]));
   check('PATCH 带非空 logo → 400', (await raw(`/api/items/${tv_item.id}`, 'PATCH', { logo: 'item-1-1.png' })).status === 400);
-  check('整行回读的 logo:null 不挡道', (await raw(`/api/items/${tv_item.id}`, 'PATCH', { logo: null, notes: '行' })).ok);
+  check('整行回读的 logo:null 不挡道', (await raw(`/api/items/${tv_item.id}`, 'PATCH', { logo: null, name: '行' })).ok);
+  // 备注已是 extra 列：照旧写顶层 notes 要明说，回 200 却什么都没写就是悄悄丢数据
+  const oldNotes = await raw(`/api/items/${tv_item.id}`, 'PATCH', { notes: '旧写法' });
+  check('顶层 notes → 400，错误里指出新写法', oldNotes.status === 400
+    && (await oldNotes.json()).error?.includes('extra.notes'), oldNotes.status);
   await fetch(`${APP}api/items/${tv_item.id}`, { method: 'DELETE' });
 
 

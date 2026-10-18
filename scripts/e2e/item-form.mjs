@@ -35,16 +35,17 @@ export default async function (t) {
 
   /* 12e. 整行 PUT：点格即编与 ⤢ 详情表单都走这条路，每个库都得能存回去。
      后端是全量替换语义，所以这里同时盯住"没在改的字段有没有被置空"。 */
-  for (const [key, mark] of [['subs', 'notes'], ['sims', 'notes'], ['vps', 'notes']]) {
+  for (const key of ['subs', 'sims', 'vps']) {
     const items = () => fetch(`${APP}api/collections/${key}/items`).then(r => r.json());
     const before = (await items())[0];
-    const res = await patch(`/api/items/${before.id}`, { ...before, [mark]: 'e2e 往返' });
+    const res = await patch(`/api/items/${before.id}`, { ...before, extra: { ...before.extra, notes: 'e2e 往返' } });
     check(`${key} 整行 PUT`, res.ok, res.ok ? '' : JSON.stringify(await res.json().catch(() => ({}))));
     const after = (await items()).find(x => x.id === before.id);
-    check(`${key} PUT 后字段落库`, after?.[mark] === 'e2e 往返');
+    check(`${key} PUT 后字段落库`, after?.extra?.notes === 'e2e 往返');
     check(`${key} PUT 未丢状态与周期`, after?.status === before.status && after?.cycle === before.cycle);
-    check(`${key} PUT 未丢 extra 域字段`,
-      JSON.stringify(after?.extra || {}) === JSON.stringify(before.extra || {}),
+    // 备注本身就在 extra 里：比的是除它之外的域字段
+    const others = x => JSON.stringify({ ...(x || {}), notes: undefined });
+    check(`${key} PUT 未丢 extra 域字段`, others(after?.extra) === others(before.extra),
       `前 ${JSON.stringify(before.extra)} 后 ${JSON.stringify(after?.extra)}`);
     check(`${key} 还原`, (await patch(`/api/items/${before.id}`, before)).ok); // 不给后续断言留脏数据
   }

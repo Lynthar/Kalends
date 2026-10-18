@@ -520,6 +520,9 @@ th.drop-after { box-shadow: inset -3px 0 0 var(--aqua); }
 .fp-form .fp-q { flex: 1; min-width: 0; }
 /* 就地编辑浮层 / 选项管理 / 新建列 */
 .cellpop, .optpop { min-width: 13rem; }
+/* 金额旁边是一列币种控件（下拉 + 新币种框，实宽约 150px）：不放宽，金额框只剩两三位数的地方 */
+.cellpop.pricepop { min-width: 19rem; }
+.pricepop [data-price] { min-width: 7rem; }
 .cellpop .mi {
   display: flex; align-items: center; gap: .5rem; width: 100%;
   border: 0; background: none; font: inherit; font-size: .85rem; color: var(--ink);

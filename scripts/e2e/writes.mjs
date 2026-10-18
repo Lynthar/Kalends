@@ -88,7 +88,7 @@ export default async function (t) {
   await settle();
   const a3 = await row('subs', A.id);
   check('表单保存没把上一次的改动写回旧值',
-    a3.extra.category === 'A3' && a3.notes === '表单改的', JSON.stringify([a3.extra, a3.notes]));
+    a3.extra.category === 'A3' && a3.extra.notes === '表单改的', JSON.stringify(a3.extra));
 
 
   /* 4. 续费：在途时按钮立刻变成「记账中…」、再点被拒；记成了但随后刷新失败时，提示说清已经记账，
@@ -175,7 +175,8 @@ export default async function (t) {
   await settle();
   const after2 = await row('vps', odd.id);
   check('只改一栏，其余原样（extra 没动的键也在）',
-    after2.notes === '只改这一栏' && plain({ ...after2, notes: before.notes }) === plain(before), plain(after2));
+    after2.extra.notes === '只改这一栏'
+    && plain({ ...after2, extra: { ...after2.extra, notes: before.extra.notes } }) === plain(before), plain(after2));
 
 
   /* 7. 就地编辑器保存失败（服务端 400）时浮层不关，用户填的东西还在。 */

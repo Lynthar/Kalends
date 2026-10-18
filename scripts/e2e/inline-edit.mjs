@@ -110,6 +110,10 @@ export default async function (t) {
     `!!document.querySelector('.cellpop [data-price]') && !!document.querySelector('.cellpop [data-cur]')`) === true);
   check('币种下拉里带着这一行的现值',
     await evl(`document.querySelector('.cellpop [data-cur]')?.value`) === 'USD');
+  // 旁边那列币种控件实宽约 150px：弹层不放宽，金额框只剩 53px，扣掉数字框的箭头连三位数都放不下
+  const amtW = await evl(`(() => { const i = document.querySelector('.cellpop [data-price]'), cs = getComputedStyle(i);
+    return Math.round(i.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)); })()`);
+  check('费用格的金额框够宽（≥ 90 px）', amtW >= 90, amtW);
   await evl(`closePop()`);
   // 详情表单里也是同一枚控件，且整行 PUT 不会把 currency 清掉
   const fx_curRow = (await (await fetch(APP + 'api/collections/subs/items')).json()).find(r => r.currency === 'USD');
@@ -215,13 +219,13 @@ export default async function (t) {
 
 
   /* 17.34 ② */
-  // ② 文本真列切成「多选」呈现后勾一下：存回去必须是字符串。写数组的话后端读不出来当成空——
+  // ② 文本列切成「多选」呈现后勾一下：存回去必须是字符串。写数组的话后端读不出来当成空——
   //    那一格的原值被静默清成 NULL，而界面只说「已保存」
   await evl(`(() => { views.subs.hiddenCols = []; views.subs.order = null;
     views.subs.types.notes = 'multi'; saveViews(); })()`);
   const subsForNotes = await (await fetch(APP + 'api/collections/subs/items')).json();
   const noteIt = subsForNotes.find(x => x.name === 'Netflix') || subsForNotes[0];
-  await patch(`/api/items/${noteIt.id}`, { notes: '甲, 乙' });
+  await patch(`/api/items/${noteIt.id}`, { extra: { ...noteIt.extra, notes: '甲, 乙' } });
   await evl(`switchTab('subs')`);
   check('切了呈现类型之后 loadAll 不崩', await evl(
     `loadAll().then(() => 'ok', e => 'ERR: ' + (e && e.message))`) === 'ok');
@@ -241,8 +245,8 @@ export default async function (t) {
   await evl(`[...document.querySelectorAll('.cellpop input[type=checkbox]')].find(i => i.value === '乙')?.click()`);
   await sleep(1200);
   const noteAfter = (await (await fetch(APP + 'api/collections/subs/items')).json()).find(x => x.id === noteIt.id);
-  check('文本真列存回去的是字符串，原值没被清成 NULL',
-    noteAfter?.notes === '甲', JSON.stringify(noteAfter?.notes));
+  check('文本列存回去的是字符串，原值没被清成 NULL',
+    noteAfter?.extra?.notes === '甲', JSON.stringify(noteAfter?.extra?.notes));
   await evl(`(() => { delete views.subs.types.notes; saveViews(); })()`);
 
 
