@@ -722,21 +722,47 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
             id
         ],
     )?;
-    // 换到期模型就把新锚点那侧的日期字段补进注册表（见 anchor_fields 的注释）。
-    // ON CONFLICT DO NOTHING：已注册过就保持用户改过的显示名与上表设置，幂等。
-    if anchor != cur["due_anchor"].as_str().unwrap_or_default() {
+    // 换到期模型：新锚点那侧的日期字段补进注册表（见 anchor_fields 的注释）并上表，旧侧撤下表；
+    // 已注册过的保留用户改过的显示名。旧侧的值留着，但续费不再推它，挂在表上就是一列过期数据。
+    let old_anchor = cur["due_anchor"].as_str().unwrap_or_default();
+    if anchor != old_anchor {
         let key = cur["key"].as_str().unwrap_or_default();
         for (k, fname, ftype, src, shown, fpos) in anchor_fields(&anchor) {
             tx.execute(
                 "INSERT INTO fields(id,tbl,key,name,ftype,src,shown,pos,builtin,options)
                  VALUES(?1,?2,?3,?4,?5,?6,?7,?8,1,'[]')
-                 ON CONFLICT(tbl,key) DO NOTHING",
+                 ON CONFLICT(tbl,key) DO UPDATE SET shown=excluded.shown",
                 params![db::next_id(&tx, "fields")?, key, k, fname, ftype, src, shown, fpos],
             )?;
         }
+        for (k, ..) in anchor_fields(old_anchor) {
+            tx.execute("UPDATE fields SET shown=0 WHERE tbl=?1 AND key=?2", params![key, k])?;
+        }
+        reanchor_items(&tx, id, old_anchor, &anchor)?;
     }
     tx.commit()?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// 换到期模型时把每个条目的锚点日期折到新侧，让切换前后的到期日一致（`engine::reanchor`）；
+/// 推不出的条目（买断、无周期、缺日期）不动，照旧由首页「算不出到期日」点名。调用方负责事务。
+fn reanchor_items(conn: &Connection, coll_id: i64, from: &str, to: &str) -> anyhow::Result<()> {
+    let col = if to == "next" { "next_renewal" } else { "last_renewed" };
+    let rows: Vec<Value> = conn
+        .prepare(&format!("SELECT {ITEM_COLS} FROM items WHERE collection_id=?1"))?
+        .query_map([coll_id], item_row)?
+        .collect::<rusqlite::Result<_>>()?;
+    for r in rows {
+        let (cycle, days) = (r["cycle"].as_str().unwrap_or(""), r["cycle_days"].as_i64());
+        let Some(d) = due_of(&r, from).and_then(|due| engine::reanchor(to, due, cycle, days)) else {
+            continue;
+        };
+        conn.execute(
+            &format!("UPDATE items SET {col}=?1,updated_at=datetime('now') WHERE id=?2 AND {col} IS NOT ?1"),
+            params![d.to_string(), r["id"].as_i64()],
+        )?;
+    }
+    Ok(())
 }
 
 // 库顺序：整份 id 序落成 pos，决定标签行的排列。
@@ -3163,6 +3189,78 @@ mod tests {
         assert_eq!(call(&r, "PUT", &path, Some(json!({ "due_anchor": "next" }))).await.0, StatusCode::OK);
         assert_eq!(date_fields(&r).await, ["last_renewed", "next_renewal"]);
         assert_eq!(call(&r, "PUT", "/api/collections/9999", Some(json!({ "name": "x" }))).await.0, StatusCode::NOT_FOUND);
+    }
+
+    /// 换到期模型前后到期日不变：锚点日期折到新侧，新侧的日期列上表、旧侧撤下表；
+    /// 在 next 下续过费再切回 last，不会退回切换前那个旧的上次续费日。推不出的条目不动。
+    #[tokio::test]
+    async fn switching_the_anchor_keeps_every_due_date() {
+        use std::collections::BTreeMap;
+        let r = routed(fresh(), std::path::Path::new("."));
+        let (_, c) = call(&r, "POST", "/api/collections", Some(json!({ "name": "我的库" }))).await;
+        let (id, key) = (c["id"].as_i64().unwrap(), c["key"].as_str().unwrap().to_string());
+        let (path, items) = (format!("/api/collections/{id}"), format!("/api/collections/{key}/items"));
+        let mut ids = BTreeMap::new();
+        for body in [
+            json!({ "name": "月付", "cycle": "monthly", "last_renewed": "2026-01-10" }),
+            json!({ "name": "按天", "cycle": "days", "cycle_days": 30, "last_renewed": "2026-01-10" }),
+            json!({ "name": "买断", "cycle": "lifetime", "last_renewed": "2026-01-10" }),
+            json!({ "name": "缺日期", "cycle": "monthly" }),
+        ] {
+            let name = body["name"].as_str().unwrap().to_string();
+            let (st, v) = call(&r, "POST", &items, Some(body)).await;
+            assert_eq!(st, StatusCode::OK, "{v}");
+            ids.insert(name, v["id"].as_i64().unwrap());
+        }
+        let rows = |r: &Router| {
+            let (r, items) = (r.clone(), items.clone());
+            async move {
+                let (_, v) = call(&r, "GET", &items, None).await;
+                let named = v.as_array().unwrap().iter().map(|x| (x["name"].as_str().unwrap().to_string(), x.clone()));
+                named.collect::<BTreeMap<_, _>>()
+            }
+        };
+        let dues = |rows: &BTreeMap<String, Value>| {
+            rows.iter().map(|(k, v)| (k.clone(), v["due"].clone())).collect::<BTreeMap<_, _>>()
+        };
+        let shown = |r: &Router| {
+            let (r, key) = (r.clone(), key.clone());
+            async move {
+                let (_, f) = call(&r, "GET", "/api/fields", None).await;
+                let anchors = ["last_renewed", "left", "next_renewal"];
+                let mine = f.as_array().unwrap().iter().filter(|f| f["tbl"] == key && anchors.contains(&f["key"].as_str().unwrap()));
+                mine.map(|f| (f["key"].as_str().unwrap().to_string(), f["shown"].as_bool().unwrap())).collect::<Vec<_>>()
+            }
+        };
+        let before = rows(&r).await;
+        assert_eq!(before["月付"]["due"], "2026-02-10");
+
+        assert_eq!(call(&r, "PUT", &path, Some(json!({ "due_anchor": "next" }))).await.0, StatusCode::OK);
+        let after = rows(&r).await;
+        assert_eq!(dues(&after), dues(&before));
+        assert_eq!(after["月付"]["next_renewal"], "2026-02-10");
+        assert!(after["买断"]["next_renewal"].is_null() && after["缺日期"]["next_renewal"].is_null());
+        let mut flags = shown(&r).await;
+        flags.sort();
+        assert_eq!(flags, [("last_renewed".into(), false), ("left".into(), false), ("next_renewal".into(), true)]);
+
+        // 在 next 下续一期只推下次到期，上次续费停在旧值；再添一条 last 表示不了的月末到期
+        let renew = format!("/api/items/{}/renew", ids["月付"]);
+        assert_eq!(call(&r, "POST", &renew, Some(json!({ "renewed_at": "2026-02-10" }))).await.0, StatusCode::OK);
+        let month_end = json!({ "name": "月末", "cycle": "monthly", "next_renewal": "2026-03-31" });
+        assert_eq!(call(&r, "POST", &items, Some(month_end)).await.0, StatusCode::OK);
+        let mid = rows(&r).await;
+        assert_eq!((&mid["月付"]["due"], &mid["月付"]["last_renewed"]), (&json!("2026-03-10"), &json!("2026-01-10")));
+
+        assert_eq!(call(&r, "PUT", &path, Some(json!({ "due_anchor": "last" }))).await.0, StatusCode::OK);
+        let back = rows(&r).await;
+        let mut want = dues(&mid);
+        want.insert("月末".into(), json!("2026-03-28"));
+        assert_eq!(dues(&back), want);
+        assert_eq!(back["月付"]["last_renewed"], "2026-02-10");
+        let mut flags = shown(&r).await;
+        flags.sort();
+        assert_eq!(flags, [("last_renewed".into(), true), ("left".into(), true), ("next_renewal".into(), false)]);
     }
 
     /// 取图标的整轮截止要管住每一次网络等待，不只在候选之间判：一个候选跟几跳慢速重定向，

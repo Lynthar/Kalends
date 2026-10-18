@@ -355,12 +355,15 @@ export default async function (t) {
   // 标签位置按钮：库顺序的单指针替代，与拖标签写同一个 /api/collections/order
   const collOrderNow = async () => (await (await fetch(APP + 'api/collections')).json()).map(c => c.key).join();
   const tOrder0 = await collOrderNow();
+  const orderPos = () => evl(`document.querySelector('#coll-order-pos').textContent`);
+  check('框里报出当前排第几', await orderPos() === '第 2 个，共 4 个', await orderPos());
   await evl(`document.querySelector('#coll-mv-r').click()`);
-  await sleep(900);
-  check('「后移 ▶」把库往右挪一位并落库', await collOrderNow() === tOrder0.replace('subs,sims', 'sims,subs'), await collOrderNow());
+  await waitFor(`document.querySelector('#coll-order-pos').textContent.startsWith('第 3')`);
+  check('「往右 ▶」把库往右挪一位并落库', await collOrderNow() === tOrder0.replace('subs,sims', 'sims,subs'), await collOrderNow());
+  check('挪完框里的位置跟着变', await orderPos() === '第 3 个，共 4 个', await orderPos());
   await evl(`document.querySelector('#coll-mv-l').click()`);
-  await sleep(900);
-  check('「◀ 前移」挪得回来', await collOrderNow() === tOrder0, await collOrderNow());
+  await waitFor(`document.querySelector('#coll-order-pos').textContent.startsWith('第 2')`);
+  check('「◀ 往左」挪得回来', await collOrderNow() === tOrder0, await collOrderNow());
   await evl(`document.querySelector('#dlg-coll').close()`);
   await sleep(200);
   check('预置库的标签也可拖动', await evl(`document.querySelector('.tab[data-tab="subs"]').draggable`) === true);
@@ -759,25 +762,47 @@ export default async function (t) {
 
   /* 17.29. 换库的到期模型：另一侧的日期字段此前从未注册过，切过去 due_from 就改读一个
      界面上根本造不出来的字段（字段面板只能建 extra 自定义列），整库到期日静默消失——
-     表格里旧的那列还显示着值，看着一切正常，时间线却空了。 */
+     表格里旧的那列还显示着值，看着一切正常，时间线却空了。现在切换把日期折到新侧，到期日不变。 */
   const acColl = await post('/api/collections', { name: '锚点切换', due_anchor: 'last' });
   const acItem = await mk(acColl.key, { name: '按上次续费算', status: 'Active', cycle: 'monthly', last_renewed: day(-5) });
-  const acKeys = async () => (await (await fetch(`${APP}api/fields`)).json())
-    .filter(f => f.tbl === acColl.key).map(f => f.key);
+  const acBare = await mk(acColl.key, { name: '没填日期', status: 'Active', cycle: 'monthly' });
+  const acFields = async () => (await (await fetch(`${APP}api/fields`)).json()).filter(f => f.tbl === acColl.key);
+  const acKeys = async () => (await acFields()).map(f => f.key);
+  const acDue = async () => (await (await fetch(APP + 'api/overview')).json()).upcoming
+    .find(u => u.kind === acColl.key && u.id === acItem.id)?.due;
   const k0 = await acKeys();
   check('last 锚点的库只播了上次续费日', k0.includes('last_renewed') && !k0.includes('next_renewal'), JSON.stringify(k0));
-  check('切换前算得出到期日',
-    (await (await fetch(APP + 'api/overview')).json()).upcoming.some(u => u.kind === acColl.key && u.id === acItem.id));
+  const acDue0 = await acDue();
+  check('切换前算得出到期日', !!acDue0);
 
-  await put(`/api/collections/${acColl.id}`, { due_anchor: 'next' });
+  // 走界面切：确认框的文案要拿得到列名（模板会改名），出错就根本切不过去
+  await evl(`loadAll()`);
+  await settle();
+  await evl(`(() => {
+    window.__confirmed = null;
+    window.__realConfirm = window.confirm;
+    window.confirm = m => { window.__confirmed = m; return true; };
+    openCollDialog(collOf('${acColl.key}'));
+  })()`);
+  await waitFor(`!!document.querySelector('#dlg-coll')?.open`);
+  await evl(`document.querySelector('#dlg-coll [data-c="due_anchor"]').value = 'next'`);
+  await evl(`document.querySelector('#form-coll button[type=submit]').click()`);
+  await waitFor(`!document.querySelector('#dlg-coll').open`);
+  await settle();
+  const acMsg = await evl(`(() => { window.confirm = window.__realConfirm; return window.__confirmed; })()`);
+  check('换到期模型前确认框说清写进哪列、撤下哪列',
+    !!acMsg?.includes('原样写进「下次到期」') && acMsg.includes('「上次续费」「剩余天数」撤下表格'), acMsg);
   const k1 = await acKeys();
   check('切成 next 之后下次到期日被补进字段注册表', k1.includes('next_renewal'), JSON.stringify(k1));
+  check('切换前后到期日不变', await acDue() === acDue0, `${await acDue()} vs ${acDue0}`);
+  const acShown = Object.fromEntries((await acFields())
+    .filter(f => ['last_renewed', 'left', 'next_renewal'].includes(f.key)).map(f => [f.key, f.shown]));
+  check('新侧的日期列上表、旧侧撤下表',
+    acShown.next_renewal === true && acShown.last_renewed === false && acShown.left === false, JSON.stringify(acShown));
   const acOv = await (await fetch(APP + 'api/overview')).json();
-  check('日期还没填时条目被点名，而不是从时间线上静默消失',
-    acOv.undated.some(x => x.kind === acColl.key && x.id === acItem.id && x.missing === '下次续费日'),
+  check('推不出到期日的条目照旧被点名，而不是从时间线上静默消失',
+    acOv.undated.some(x => x.kind === acColl.key && x.id === acBare.id && x.missing === '下次续费日'),
     JSON.stringify(acOv.undated));
-  await evl(`loadAll()`);
-  await sleep(800);
   check('新字段在详情表单里真的有一格可填', await evl(`(() => {
     const r = (state['${acColl.key}'] || []).find(x => x.id === ${acItem.id});
     if (!r) return 'no-row';
@@ -786,15 +811,15 @@ export default async function (t) {
     document.querySelector('#dlg-item').close();
     return has;
   })()`) === true);
+  // 在 next 下改过的下次到期，切回 last 照样不变（按天计，避开月末折不回原日的那几天）
   const acRow = (await (await fetch(`${APP}api/collections/${acColl.key}/items`)).json()).find(r => r.id === acItem.id);
-  await patch(`/api/items/${acItem.id}`, { ...acRow, next_renewal: day(9) });
-  check('填上之后到期日就回来了',
-    (await (await fetch(APP + 'api/overview')).json()).upcoming
-      .some(u => u.kind === acColl.key && u.id === acItem.id && u.due === day(9)));
+  await patch(`/api/items/${acItem.id}`, { ...acRow, cycle: 'days', cycle_days: 30, next_renewal: day(9) });
+  check('改了下次到期，到期日跟着走', await acDue() === day(9), await acDue());
+  await put(`/api/collections/${acColl.id}`, { due_anchor: 'last' });
+  check('切回 last 到期日仍不变', await acDue() === day(9), await acDue());
 
   // 算不出到期日时点名的必须是真正缺的那一项：last 锚点有两半成因（缺日期 / 缺周期），
   // 一律报「缺上次续费日」的话，用户打开条目看见日期填着，按提示无从下手
-  await put(`/api/collections/${acColl.id}`, { due_anchor: 'last' });
   const acRow2 = (await (await fetch(`${APP}api/collections/${acColl.key}/items`)).json()).find(r => r.id === acItem.id);
   await patch(`/api/items/${acItem.id}`, { ...acRow2, cycle: '', last_renewed: day(-5) });
   check('日期填着、周期空着时点名的是「周期」',

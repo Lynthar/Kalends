@@ -536,6 +536,8 @@ th.drop-after { box-shadow: inset -3px 0 0 var(--aqua); }
 .opt-add .fp-q { width: 100%; }
 /* 浮层里的一行说明；语义/上表这种成排的小勾选 */
 .fp-note { font-size: .72rem; color: var(--ink-2); line-height: 1.5; padding: .1rem 0 .35rem; }
+/* 表单格里的说明别继承字段名的粗体与字距 */
+.fgrid .fp-note { font-weight: normal; letter-spacing: normal; }
 .check.sem { font-size: .72rem !important; color: var(--ink-2) !important; gap: .25rem !important; white-space: nowrap; }
 /* 状态语义：一行放下状态胶囊 + 三个标记，别把状态名挤成省略号 */
 .sempop { min-width: 19rem; }
@@ -773,14 +775,18 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
   .grid .clip { max-width: 24rem; }
 }
 
-/* 新建库入口：与表标签同排，但读起来是动作不是某张表 */
 /* 库顺序：拖标签换位，落点标记与列序拖动同一套语言 */
 .tab.dragging { opacity: .45; }
 .tab.drop-before { box-shadow: inset 3px 0 0 var(--aqua); }
 .tab.drop-after { box-shadow: inset -3px 0 0 var(--aqua); }
-.tab.tab-add { color: var(--ink-2); opacity: .75; }
+/* ⚙ 库设置：与表标签同排，但读起来是动作不是某张表。行高与上下内边距收紧，放大了也不把标签行撑高 */
+.tab.tab-add {
+  color: var(--ink-2); opacity: .75;
+  font-size: 1.6rem; line-height: 1; letter-spacing: 0; padding: .2rem .55rem;
+}
 .tab.tab-add:hover { color: var(--aqua-deep); opacity: 1; }
 .tab.tab-add::after { display: none; }
+#coll-order-pos { align-self: center; }
 
 /* 金额里的原币小字：折算后主行是折算值，原币缩在后面（表格里另起一行，别处跟在后面） */
 .orig { color: var(--ink-2); font-size: .72rem; margin-left: .35rem; font-weight: 500; }

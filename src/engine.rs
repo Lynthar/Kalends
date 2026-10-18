@@ -9,29 +9,58 @@ pub fn today() -> NaiveDate {
     Local::now().date_naive()
 }
 
-/// 周期的封闭集，写入口只收这些（`lifetime` 是买断、没有下一期）。`advance_n` 的分支与它一一对应，单测钉着。
+/// 周期的封闭集，写入口只收这些（`lifetime` 是买断、没有下一期）。`step` 的分支与它一一对应，单测钉着。
 pub const CYCLES: &[&str] =
     &["weekly", "monthly", "quarterly", "semiannual", "annual", "biennial", "triennial", "days", "lifetime"];
+
+enum Step {
+    Months(u32),
+    Days(u64),
+}
+
+/// 一期有多长；lifetime、未知周期、自定义天数缺失或非正返回 None。
+fn step(cycle: &str, cycle_days: Option<i64>) -> Option<Step> {
+    Some(match cycle {
+        "weekly" => Step::Days(7),
+        "monthly" => Step::Months(1),
+        "quarterly" => Step::Months(3),
+        "semiannual" => Step::Months(6),
+        "annual" => Step::Months(12),
+        "biennial" => Step::Months(24),
+        "triennial" => Step::Months(36),
+        "days" => Step::Days(cycle_days.and_then(|d| u64::try_from(d).ok()).filter(|d| *d > 0)?),
+        _ => return None,
+    })
+}
+
+// 写入口只收四位年份；推过 9999 存下来是 `+10000-01-15`，ICS 也随之写出 9 位的 DTSTART
+fn four_digit(d: NaiveDate) -> Option<NaiveDate> {
+    (0..=9999).contains(&d.year()).then_some(d)
+}
 
 /// 从某个到期日按周期前进 n 期；lifetime、未知周期或结果年份超过 9999 返回 None。
 /// **跨多期必须一次算第 n 期，不能循环调用 `advance` n 次**：月加法钳到月末后
 /// 锚点即丢（1/31 迭代六次得 7/28，正解 7/31）。
 pub fn advance_n(date: NaiveDate, cycle: &str, cycle_days: Option<i64>, n: u32) -> Option<NaiveDate> {
-    // 写入口只收四位年份；推过 9999 存下来是 `+10000-01-15`，ICS 也随之写出 9 位的 DTSTART
-    let four_digit = |d: NaiveDate| (d.year() <= 9999).then_some(d);
-    let months = |m: u32| date.checked_add_months(Months::new(m * n)).and_then(four_digit);
-    let days = |d: u64| date.checked_add_days(Days::new(d * u64::from(n))).and_then(four_digit);
-    match cycle {
-        "weekly" => days(7),
-        "monthly" => months(1),
-        "quarterly" => months(3),
-        "semiannual" => months(6),
-        "annual" => months(12),
-        "biennial" => months(24),
-        "triennial" => months(36),
-        "days" => cycle_days.and_then(|d| u64::try_from(d).ok()).filter(|d| *d > 0).and_then(days),
-        _ => None,
+    match step(cycle, cycle_days)? {
+        Step::Months(m) => date.checked_add_months(Months::new(m * n)),
+        Step::Days(d) => date.checked_add_days(Days::new(d * u64::from(n))),
     }
+    .and_then(four_digit)
+}
+
+/// 换到期模型时，条目在新锚点 `to` 那侧写哪一天，才能让 `due_from` 算出同一个到期日 `due`；
+/// None＝推不出（无周期等），调用方不动这一格。`last` 表示不了的月末到期日（按月的 3/31：
+/// 上次续费再加一个月最多到 3/28）退到最近的更早一天——月减法钳到月末，提醒只会早不会晚。
+pub fn reanchor(to: &str, due: NaiveDate, cycle: &str, cycle_days: Option<i64>) -> Option<NaiveDate> {
+    if to == "next" {
+        return Some(due);
+    }
+    match step(cycle, cycle_days)? {
+        Step::Months(m) => due.checked_sub_months(Months::new(m)),
+        Step::Days(d) => due.checked_sub_days(Days::new(d)),
+    }
+    .and_then(four_digit)
 }
 
 /// 从某个到期日按周期前进一步。
@@ -741,6 +770,37 @@ mod tests {
         assert_eq!(advance(d("2026-01-01"), "lifetime", None), None);
         assert_eq!(advance(d("2026-01-01"), "", None), None);
         assert_eq!(advance(d("2026-01-01"), "fortnightly", None), None);
+    }
+
+    /// 换到期模型前后到期日不变：折到 `next` 原样照抄，折到 `last` 退一期再由 `due_from` 推回来；
+    /// `last` 表示不了的月末到期日退到最近的更早一天，推不出的返回 None。
+    #[test]
+    fn reanchoring_keeps_the_due_date() {
+        let back = |due: NaiveDate, cycle: &str, days: Option<i64>| {
+            let last = reanchor("last", due, cycle, days)?;
+            due_from("last", cycle, days, None, Some(&last.to_string()))
+        };
+        assert_eq!(reanchor("next", d("2026-03-31"), "monthly", None), Some(d("2026-03-31")));
+        assert_eq!(reanchor("last", d("2026-04-15"), "monthly", None), Some(d("2026-03-15")));
+        assert_eq!(back(d("2026-03-31"), "monthly", None), Some(d("2026-03-28")));
+        assert_eq!(back(d("2028-03-31"), "monthly", None), Some(d("2028-03-29")));
+        assert_eq!(back(d("2026-05-31"), "quarterly", None), Some(d("2026-05-28")));
+        assert_eq!(back(d("2028-02-29"), "annual", None), Some(d("2028-02-28")));
+        for (cycle, days) in [("lifetime", None), ("", None), ("days", None), ("days", Some(0))] {
+            assert_eq!(reanchor("last", d("2026-04-15"), cycle, days), None, "{cycle}");
+        }
+        // 两年逐日扫一遍（含闰年）：推回来从不晚于原到期日，28 号以内与按天的周期分毫不差
+        for c in CYCLES.iter().filter(|c| **c != "lifetime") {
+            let mut due = d("2027-01-01");
+            while due.year() < 2029 {
+                let got = back(due, c, Some(30)).unwrap();
+                assert!(got <= due, "{c} {due} → {got}");
+                if due.day() <= 28 || matches!(*c, "weekly" | "days") {
+                    assert_eq!(got, due, "{c}");
+                }
+                due = due.succ_opt().unwrap();
+            }
+        }
     }
 
     #[test]

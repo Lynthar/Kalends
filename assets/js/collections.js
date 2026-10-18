@@ -719,11 +719,13 @@ function collDialog() {
         <label><span>到期动作名称</span><input data-c="verb" placeholder="续费"></label>
       </div>
       <div id="coll-order-row" class="fgrid" hidden>
-        <div class="field span2" role="group" aria-labelledby="coll-order-label"><span id="coll-order-label">标签位置（拖不了标签时从这里挪）</span>
+        <div class="field span2" role="group" aria-labelledby="coll-order-label"><span id="coll-order-label">库的排列顺序</span>
           <span class="chips">
-            <button type="button" class="btn ghost" id="coll-mv-l">◀ 前移</button>
-            <button type="button" class="btn ghost" id="coll-mv-r">后移 ▶</button>
+            <button type="button" class="btn ghost" id="coll-mv-l">◀ 往左</button>
+            <button type="button" class="btn ghost" id="coll-mv-r">往右 ▶</button>
+            <span id="coll-order-pos"></span>
           </span>
+          <span class="fp-note">电脑上也可以直接拖动表格上方的库名。</span>
         </div>
       </div>
       <div id="coll-fields-box" hidden>
@@ -850,17 +852,25 @@ async function openCollDialog(c) {
   g('verb').value = c?.verb || '';
   collTpl = null;
   fillCollFields(c);
-  // 库顺序的单指针替代：与拖标签写同一个 /api/collections/order；到头/到尾就不动
+  // 库顺序的单指针替代：与拖标签写同一个 /api/collections/order；到头/到尾就不动。
+  // 标签行被遮罩挡着，挪完看不见效果，所以框里自己报当前排第几
   const orderRow = $('#coll-order-row');
   orderRow.hidden = !c;
   if (c) {
-    const shift = dir => {
+    const showPos = () => {
+      const order = colls().map(x => x.key);
+      $('#coll-order-pos').textContent = `第 ${order.indexOf(c.key) + 1} 个，共 ${order.length} 个`;
+    };
+    const shift = async dir => {
       const order = colls().map(x => x.key);
       const i = order.indexOf(c.key), j = i + dir;
       if (i < 0 || j < 0 || j >= order.length) return;
       [order[i], order[j]] = [order[j], order[i]];
-      putCollOrder(order);
+      await putCollOrder(order);
+      // 等写入期间框可能已换成别的库
+      if (editingColl === c) showPos();
     };
+    showPos();
     $('#coll-mv-l').onclick = () => shift(-1);
     $('#coll-mv-r').onclick = () => shift(1);
   }
@@ -899,11 +909,16 @@ document.addEventListener('submit', async e => {
     renew_from: g('renew_from'), verb: g('verb'),
   };
   if (!body.name) { toast('库名不能为空', true); return; }
-  // 换到期模型有后果：新锚点那侧的日期字段是空的，已有条目在填上之前算不出到期日
-  //（后端会把字段补进注册表，首页「算不出到期日」会点名它们）
+  // 换到期模型：后端把每个条目的日期折到新侧、到期日不变，新侧的日期列上表、旧侧撤下表（值留着）。
+  // 列名取注册表里的，模板会改名（「下次续费」「有效期至」……）
   if (editingColl && body.due_anchor !== editingColl.due_anchor) {
-    const to = body.due_anchor === 'next' ? '直接填下次到期日' : '记上次续费日，按周期推算';
-    if (!confirm(`把「${editingColl.name}」的到期日改成「${to}」？\n\n改了之后读的是另一个日期字段，已有条目在把它填上之前算不出到期日（会列在首页「算不出到期日」里）。改回来即可恢复。`)) return;
+    const col = (k, dflt) => `「${fieldOf(editingColl.key, k)?.name || dflt}」`;
+    const toNext = body.due_anchor === 'next';
+    const to = toNext ? '直接填下次到期日' : '记上次续费日，按周期推算';
+    const how = toNext
+      ? `每个条目的到期日原样写进${col('next_renewal', '下次到期')}，切换前后不变；${col('last_renewed', '上次续费')}${col('left', '剩余天数')}撤下表格，数据留着。`
+      : `${col('last_renewed', '上次续费')}按到期日往前推一个周期填好，切换前后到期日不变——只有按月、季、年付且在 29–31 号到期的，会提前到能对上的最近一天（如 3/31 → 3/28）。${col('next_renewal', '下次到期')}撤下表格，数据留着。`;
+    if (!confirm(`把「${editingColl.name}」的到期日改成「${to}」？\n\n${how}\n\n没填周期或日期的条目推不出到期日，会列在首页「算不出到期日」里。`)) return;
   }
   if (editingColl) {
     const id = editingColl.id;
