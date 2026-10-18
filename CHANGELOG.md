@@ -12,6 +12,8 @@ Release notes are taken from this file verbatim — each `## vX.Y.Z` section bec
 
 **Fixed**: toasts show above open dialogs; the price editor's amount box is wide enough to read; a settings-panel change that saved but failed to redraw is no longer reported as failed; backup rotation leaves files it didn't write alone.
 
+**Security**: rustls 0.23.46 and quinn-proto 0.11.19 clear RUSTSEC-2026-0338 to -0342 and -0346 to -0349; one of them let an unauthenticated ServerHello downgrade later connections to classical key exchange.
+
 **Upgrading**: one migration moves notes into each item's custom fields, after a snapshot lands in `backups/pre-migration-v22.db`. API clients must send notes as `extra.notes`; a top-level `notes` now gets a 400.
 
 ## v0.3.1
