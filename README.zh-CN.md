@@ -121,8 +121,8 @@ SMTP 一律直连。
 
 ## 文档
 
-- [用户指南](docs/user-guide.md) —— Docker Compose、Caddy 反代示例、裸机运行、恢复、
-  升级与回滚、通知排查。
+- [用户指南](docs/user-guide.md) —— 部署（Docker Compose、预编译二进制、源码）、
+  反代与远程访问、备份与恢复、升级与回滚、提醒没来时怎么查。
 
 ## 许可证
 

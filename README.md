@@ -149,9 +149,9 @@ requests. SMTP always connects directly.
 
 ## Documentation
 
-- [User guide](docs/user-guide.md) — Docker Compose, a Caddy reverse proxy
-  example, running on bare metal, restoring, upgrades and rollback,
-  troubleshooting notifications. Written in Chinese.
+- [User guide](docs/user-guide.md) — deploying (Docker Compose, release
+  binaries, source), reverse proxy and remote access, backup and restore,
+  upgrades and rollback, tracking down a missing reminder. Written in Chinese.
 
 ## License
 
