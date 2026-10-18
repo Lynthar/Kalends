@@ -83,6 +83,19 @@ const fieldOf = (tab, k) => state.fields.find(f => f.tbl === tab && f.key === k)
 // 改名/删除只对 extra 列开放，与后端一致。
 const inExtra = col => (col.src ? col.src === 'extra' : !!col.custom);
 
+const LOCK_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3.5" y="7.2" width="9" height="6.3" rx="1.4"/><path d="M5.6 7.2V5.4a2.4 2.4 0 0 1 4.8 0v1.8"/></svg>';
+const CALC_SVG = '<svg viewBox="0 0 16 16"><text x="4.2" y="12.6" font-size="13" font-style="italic" font-weight="600" fill="currentColor">ƒ</text></svg>';
+// 列的归属：表头标记、表头菜单与字段面板共用这一份，说法也只写在这里。
+// custom＝extra 列（可改名、可删）；calc＝算出来的（值不能编辑）；system＝引擎真列
+const COL_KINDS = {
+  custom: { tip: '自定义列：可以改名、删除' },
+  calc: { mark: CALC_SVG, tip: '自动算出：值不能编辑，不能改名、删除' },
+  system: { mark: LOCK_SVG, tip: '系统列：不能改名、删除' },
+};
+const colKind = col => (inExtra(col) ? 'custom' : col.src === 'calc' ? 'calc' : 'system');
+// 算出来的列在表头用 ƒ 顶替类型图标；其余照类型
+const headIcon = (tab, k) => (colKind(COLS[tab][k]) === 'calc' ? CALC_SVG : TYPES[colType(tab, k)].icon);
+
 async function fetchFields() {
   const fs = await api('/api/fields');
   for (const f of fs) {
@@ -277,8 +290,13 @@ function initHead(tab) {
     }
     const ic = document.createElement('span');
     ic.className = 'ticon';
-    ic.innerHTML = TYPES[colType(tab, th.dataset.k)].icon;
+    ic.innerHTML = headIcon(tab, th.dataset.k);
     th.prepend(ic);
+    // 只看表头就分得出哪些列归用户管：系统列挂锁、算出来的列是 ƒ、自定义列用水色
+    const kind = colKind(COLS[tab][th.dataset.k]);
+    th.classList.add(`th-${kind}`);
+    th.title = COL_KINDS[kind].tip;
+    if (kind === 'system') th.append(Object.assign(document.createElement('span'), { className: 'tlock', innerHTML: LOCK_SVG }));
     initColDrag(tab, th);
     initColResize(tab, th);
     th.onclick = () => openHeadMenu(tab, th); // Notion 式：点表头开属性菜单
@@ -388,7 +406,7 @@ function fitWidths(tab, thead, table) {
 }
 
 // 首次动宽先把当前渲染宽整表冻结成存储值（可见列，含操作列；fit 压缩过就是压缩后的值），
-// 避免切 fixed 布局时其余列跳动。拖宽与菜单步进共用这一步。
+// 避免切 fixed 布局时其余列跳动。
 function freezeWidths(tab) {
   const v = views[tab];
   const hid = v.hiddenCols || [];
@@ -400,7 +418,6 @@ function freezeWidths(tab) {
 
 // 右边框是硬边界：拖宽先吃容器空白，贴边后从被拖列右侧的数据列（显示序邻列优先，
 // 操作列除外）逐列压缩到 MIN_COLW，压无可压就停；拖窄整表收窄。
-// 这份基线拖宽与菜单步进共用，两条入口才不会各长出一套账。
 function widenBase(tab, th) {
   const v = views[tab];
   const hid = v.hiddenCols || [];
@@ -430,31 +447,6 @@ function applyWiden(tab, base, want) {
     v.widths[a.k] = a.w0 - take;
   }
   applyWidths(tab); // 残差列与表宽统一由它结算，右缘恒贴边
-}
-
-// 表头菜单的加宽/变窄（拖不了的场合走这里）：与拖宽同一套基线与结算
-function stepColWidth(tab, k, delta) {
-  const th = $(HEAD_SEL[tab])?.querySelector(`th[data-k="${k}"]`);
-  if (!th) return;
-  if (!Object.keys(views[tab].widths).length) freezeWidths(tab);
-  const base = widenBase(tab, th);
-  applyWiden(tab, base, base.startW + delta);
-  saveViews();
-}
-
-// 表头菜单的左移/右移（拖不了的场合走这里）：与拖动换位写同一份 views.order
-function shiftCol(tab, k, dir) {
-  const cur = (validOrder(tab) || colKeys(tab)).slice();
-  const hid = views[tab].hiddenCols || [];
-  const vis = cur.filter(x => !hid.includes(x));
-  const i = vis.indexOf(k);
-  const j = i + dir;
-  if (i < 0 || j < 0 || j >= vis.length) return;
-  const a = cur.indexOf(vis[i]), b = cur.indexOf(vis[j]);
-  [cur[a], cur[b]] = [cur[b], cur[a]];
-  views[tab].order = cur;
-  saveViews();
-  RENDER[tab]();
 }
 
 function initColResize(tab, th) {
@@ -657,6 +649,7 @@ function bindRowGutter(tab, tr, g) {
     key: id,
     onStart: () => { if (!tr.draggable) return false; closePop(); },
     onDrop: (from, after) => applyRowOrder(tab, moveRow(tab, from, id, after)),
+    touch: false, // 触屏上挪行走手柄菜单
   });
   tr.addEventListener('dragend', () => { tr.draggable = false; });
 }
@@ -845,7 +838,7 @@ function syncHeads(tab) {
       th.setAttribute('aria-sort', on ? (s.dir === 1 ? 'ascending' : 'descending') : 'none');
     }
     const ic = th.querySelector('.ticon');
-    if (ic) ic.innerHTML = TYPES[colType(tab, th.dataset.k)].icon; // 图标随有效类型
+    if (ic) ic.innerHTML = headIcon(tab, th.dataset.k); // 图标随有效类型
   });
 }
 

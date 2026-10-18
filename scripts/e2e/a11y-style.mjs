@@ -19,8 +19,15 @@ const SETTINGS_NOTE = `(() => {${CONTRAST}
   return { red: ink.join() === token('--coral-ink').join(), ratio: +ratio(ink, token('--surface')).toFixed(2) };
 })()`;
 
+// 自定义列的列名是水色小字：是 --aqua-ink，表头底与悬停底（--surface-2）上都要过 4.5
+const CUSTOM_HEAD = `(() => {${CONTRAST}
+  const ink = rgbOf(getComputedStyle(document.querySelector('.grid th.th-custom')).color);
+  return { aqua: ink.join() === token('--aqua-ink').join(),
+    ratios: ['--bg', '--surface', '--surface-2'].map(b => +ratio(ink, token(b)).toFixed(2)) };
+})()`;
+
 export default async function (t) {
-  const { sleep, fields, check, skip, send, evl, shot, waitFor } = t;
+  const { APP, sleep, fields, check, skip, send, evl, shot, waitFor, settle } = t;
   /* 17. 深色 */
   await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] });
   await sleep(400);
@@ -39,6 +46,9 @@ export default async function (t) {
   check('深色点名行在三种底上都过 4.5', darkNote.every(r => r >= 4.5), JSON.stringify(darkNote));
   const darkSetNote = await evl(SETTINGS_NOTE);
   check('深色设置框的坏配置原因是红字且过 4.5', darkSetNote.red && darkSetNote.ratio >= 4.5, JSON.stringify(darkSetNote));
+  const darkCustom = await evl(CUSTOM_HEAD);
+  check('深色自定义列名是水色且在三种底上都过 4.5', darkCustom.aqua && darkCustom.ratios.every(r => r >= 4.5),
+    JSON.stringify(darkCustom));
 
 
   await send('Emulation.setEmulatedMedia', { features: [] }); // 下面的对比度算的是浅色
@@ -185,6 +195,9 @@ export default async function (t) {
   check('浅色点名行在三种底上都过 4.5', lightNote.every(r => r >= 4.5), JSON.stringify(lightNote));
   const lightSetNote = await evl(SETTINGS_NOTE);
   check('浅色设置框的坏配置原因是红字且过 4.5', lightSetNote.red && lightSetNote.ratio >= 4.5, JSON.stringify(lightSetNote));
+  const lightCustom = await evl(CUSTOM_HEAD);
+  check('浅色自定义列名是水色且在三种底上都过 4.5', lightCustom.aqua && lightCustom.ratios.every(r => r >= 4.5),
+    JSON.stringify(lightCustom));
 
   /* 样式契约：深浅色下的原生控件、减弱动态、折叠区的键盘焦点、吸附格底色、窄屏居中、触屏命中区 */
   check('页面声明了 color-scheme，原生控件跟着深浅色走', await evl(
@@ -256,6 +269,85 @@ export default async function (t) {
     const big = b => b.w >= 24 && b.h >= 24 && b.op > 0;
     check('触屏上行首复选框、拖手与 ⤢ 常显且命中区 ≥ 24 px', big(touch.sel) && big(touch.grip) && big(touch.open), JSON.stringify(touch));
     check('触屏上拖手与复选框不重叠', touch.grip.r <= touch.sel.l || touch.sel.r <= touch.grip.l, JSON.stringify(touch));
+
+    // 手机浏览器不为触摸派发 HTML5 拖放：长按起手、跟手换位；没按够就滑开的是滚动，不换位
+    const touchDrag = async (from, to, hold) => {
+      const p = await evl(`(() => {
+        const a = document.querySelector('${from}'), b = document.querySelector('${to}');
+        a.scrollIntoView({ block: 'center', inline: 'nearest' });
+        const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+        // 落点取目标露在外面那部分的右侧：窄屏上它的右半截常被表格的横向滚动裁掉
+        const right = Math.min(rb.right, a.closest('.tablewrap, .tabs').getBoundingClientRect().right);
+        return { x0: ra.left + ra.width / 2, y0: ra.top + ra.height / 2, x1: rb.left + (right - rb.left) * 0.8, y1: rb.top + rb.height / 2 };
+      })()`);
+      const at = f => [{ x: Math.round(p.x0 + (p.x1 - p.x0) * f), y: Math.round(p.y0 + (p.y1 - p.y0) * f) }];
+      await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: at(0) });
+      if (hold) await sleep(700);
+      for (const f of [0.3, 0.6, 1]) await send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: at(f) });
+      await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await sleep(400);
+    };
+    const colsNow = () => evl(`[...document.querySelectorAll('#view-subs thead th')]
+      .filter(x => x.style.display !== 'none' && !x.classList.contains('ops')).map(x => x.dataset.k).join()`);
+    const c0 = await colsNow();
+    const orderSnap = await evl(`JSON.stringify(views.subs.order || null)`);
+    await evl(`window.__tmc = []; document.addEventListener('touchmove', e => __tmc.push(e.cancelable), { capture: true, passive: true })`);
+    await touchDrag('#view-subs th[data-k="status"]', '#view-subs th[data-k="category"]', true);
+    const c1 = await colsNow();
+    // 浏览器在手指按下那一刻就定了这串 touchmove 拦不拦得住：拦不住的话，拖列时表格跟着手指一起滚
+    const tmc = await evl(`__tmc`);
+    check('拖动中的 touchmove 拦得住（表格不跟着手指滚）', tmc.length > 0 && tmc.every(Boolean), JSON.stringify(tmc));
+    check('触屏长按拖表头能换列序', c0.indexOf('status') < c0.indexOf('category')
+      && c1.indexOf('status') > c1.indexOf('category'), `${c0} → ${c1}`);
+    check('长按拖完不顺手弹出表头菜单', await evl(`!document.querySelector('.thmenu')`) === true);
+    // order 为 null 时 applyColumns 不动表头，得显式写回默认列序
+    const restoreCols = `views.subs.order = ${orderSnap} || [...colKeys('subs')]; saveViews(); RENDER.subs()`;
+    await evl(restoreCols);
+    await sleep(200);
+    await touchDrag('#view-subs th[data-k="status"]', '#view-subs th[data-k="category"]', false);
+    check('触屏没长按就滑动不换列序', await colsNow() === c0, await colsNow());
+    await evl(`closePop()`);
+    // 一屏只露两三列：拖到表格右缘停住，表格自己往右滚，起手时看不见的列也够得着
+    const edge = await evl(`(() => {
+      const w = document.querySelector('#view-subs'), th = w.querySelector('th[data-k="status"]');
+      w.scrollLeft = 0;
+      th.scrollIntoView({ block: 'center', inline: 'nearest' });
+      const r = th.getBoundingClientRect(), wr = w.getBoundingClientRect();
+      return { x0: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), xe: Math.round(wr.right - 6) };
+    })()`);
+    const hidden0 = await evl(`(() => {
+      const wr = document.querySelector('#view-subs').getBoundingClientRect();
+      return [...document.querySelectorAll('#view-subs thead th[data-k]')].filter(x => x.getBoundingClientRect().left >= wr.right).map(x => x.dataset.k);
+    })()`);
+    await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: edge.x0, y: edge.y }] });
+    await sleep(700);
+    await send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: Math.round((edge.x0 + edge.xe) / 2), y: edge.y }] });
+    await send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: edge.xe, y: edge.y }] });
+    await sleep(1500);
+    // 滚过去以后，手指挪到一列起手时看不见、现在落在可视区中段的列上松手（离开两侧的自动滚动区）
+    const reach = await evl(`(() => {
+      const w = document.querySelector('#view-subs'), wr = w.getBoundingClientRect();
+      const mid = [...w.querySelectorAll('thead th[data-k]:not(.ops)')].map(x => [x.dataset.k, x.getBoundingClientRect()])
+        .find(([k, r]) => ${JSON.stringify(hidden0)}.includes(k) && r.left + r.width / 2 > wr.left + 48 && r.left + r.width / 2 < wr.right - 48
+          && document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)?.closest('th')?.dataset.k === k); // 左侧吸附的名称列会盖住一段
+      return { scrolled: w.scrollLeft, k: mid?.[0], x: mid ? Math.round(mid[1].left + mid[1].width / 2) : 0 };
+    })()`);
+    await send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: reach.x, y: edge.y }] });
+    await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await sleep(400);
+    const c2 = (await colsNow()).split(',');
+    check('拖到表格右缘会自动滚动，够得着起手时看不见的列', reach.scrolled > 0 && hidden0.includes(reach.k)
+      && Math.abs(c2.indexOf('status') - c2.indexOf(reach.k)) === 1, JSON.stringify({ hidden0, reach, c2 }));
+    await evl(`${restoreCols}; document.querySelector('#view-subs').scrollLeft = 0`);
+    await sleep(200);
+
+    const collOrder = async () => (await (await fetch(APP + 'api/collections')).json()).map(c => c.key).join();
+    const t0 = await collOrder();
+    await touchDrag('.tab[data-tab="subs"]', '.tab[data-tab="sims"]', true);
+    await settle();
+    check('触屏长按拖库标签能换库序并落库', await collOrder() === t0.replace('subs,sims', 'sims,subs'), `${t0} → ${await collOrder()}`);
+    await evl(`putCollOrder(${JSON.stringify(t0.split(','))})`);
+    await settle();
     await evl(`(() => { const t = document.querySelector('#toast'); clearTimeout(t._h); t.hidden = true;
       document.querySelector('#view-subs').scrollIntoView(); })()`);
     await sleep(300);

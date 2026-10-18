@@ -130,7 +130,7 @@ function ensureCollDom(c) {
     btn.className = 'tab';
     btn.type = 'button';
     btn.dataset.tab = key;
-    $('#coll-settings').before(btn);
+    $('.tabbar .tabs').append(btn);
   }
   // 预置库的标签写在 index.html 里、不走上面的新建分支：事件一律在这儿按 wired 绑一次。
   //（右键开库设置已撤：不看文档发现不了，而齿轮就在旁边，同一件事不留两个入口）
@@ -179,8 +179,8 @@ function ensureCollDom(c) {
 function syncColls() {
   const keys = new Set(colls().map(c => c.key));
   for (const c of colls()) ensureCollDom(c);
-  // 标签依次挪到 ⚙ 前面 = 按库序排好（已存在的标签不会自己归位）
-  for (const c of colls()) $('#coll-settings').before(document.querySelector(`.tab[data-tab="${c.key}"]`));
+  // 标签依次挪到行尾 = 按库序排好（已存在的标签不会自己归位）
+  for (const c of colls()) $('.tabbar .tabs').append(document.querySelector(`.tab[data-tab="${c.key}"]`));
   // 库被删掉了就连标签带容器一起撤；三个预置库的容器写在 index.html 里，删库时同样该撤
   document.querySelectorAll('.tablewrap[data-tab]').forEach(w => {
     const k = w.dataset.tab;
@@ -718,20 +718,11 @@ function collDialog() {
         </select></label>
         <label><span>到期动作名称</span><input data-c="verb" placeholder="续费"></label>
       </div>
-      <div id="coll-order-row" class="fgrid" hidden>
-        <div class="field span2" role="group" aria-labelledby="coll-order-label"><span id="coll-order-label">库的排列顺序</span>
-          <span class="chips">
-            <button type="button" class="btn ghost" id="coll-mv-l">◀ 往左</button>
-            <button type="button" class="btn ghost" id="coll-mv-r">往右 ▶</button>
-            <span id="coll-order-pos"></span>
-          </span>
-          <span class="fp-note">电脑上也可以直接拖动表格上方的库名。</span>
-        </div>
-      </div>
       <div id="coll-fields-box" hidden>
         <div class="fp-note">字段是这个库自己的属性：拖动调序、关掉「上表」都<b>跟着账本走、所有设备一致</b>。
           列宽 / 列序 / 隐藏 / 排序 / 筛选是每台设备各自记的，改这里会把本机那份列序覆写作废。</div>
         <div id="coll-fields" class="fpanel"></div>
+        <button type="button" class="btn ghost" id="coll-reset-widths" hidden>还原列宽（仅本机）</button>
       </div>
       <footer>
         <button type="button" class="btn ghost" id="coll-del" hidden>删除本库</button>
@@ -792,16 +783,17 @@ function fillCollFields(c) {
   fs.forEach((f, idx) => {
     const row = document.createElement('div');
     row.className = 'opt-row';
-    row.draggable = true; // ↑↓ 是拖不了的场合（触摸屏）的同功能替代
+    row.draggable = true; // ↑↓ 是拖动的同功能替代（触屏要长按才拖得动）
     // 名称列不给关：它是行的唯一入口，且关掉会让表头与行的字段集对不上
     const locked = f.key === entryKey(c.key);
-    row.innerHTML = `<span class="fp-v">${esc(f.name || f.key)}</span>
+    const kind = colKind(f);
+    row.innerHTML = `<span class="fp-v fp-${kind}">${esc(f.name || f.key)}</span>
       <button type="button" class="btn link" data-up title="上移">↑</button>
       <button type="button" class="btn link" data-dn title="下移">↓</button>
       <label class="check sem"${locked ? ' title="名称列承载详情入口，不能撤下表格"' : ''}><input type="checkbox"${f.shown || locked ? ' checked' : ''}${locked ? ' disabled' : ''}><span>上表</span></label>
-      ${f.src === 'extra'
+      ${kind === 'custom'
         ? '<button type="button" class="btn link fp-del" data-del title="删除此列">✕</button>'
-        : '<span class="fp-del"></span>'}`;
+        : `<span class="fp-del fp-mark" title="${COL_KINDS[kind].tip}">${COL_KINDS[kind].mark}</span>`}`;
     const move = dir => {
       const j = idx + dir;
       if (j < 0 || j >= fs.length) return;
@@ -852,28 +844,16 @@ async function openCollDialog(c) {
   g('verb').value = c?.verb || '';
   collTpl = null;
   fillCollFields(c);
-  // 库顺序的单指针替代：与拖标签写同一个 /api/collections/order；到头/到尾就不动。
-  // 标签行被遮罩挡着，挪完看不见效果，所以框里自己报当前排第几
-  const orderRow = $('#coll-order-row');
-  orderRow.hidden = !c;
-  if (c) {
-    const showPos = () => {
-      const order = colls().map(x => x.key);
-      $('#coll-order-pos').textContent = `第 ${order.indexOf(c.key) + 1} 个，共 ${order.length} 个`;
-    };
-    const shift = async dir => {
-      const order = colls().map(x => x.key);
-      const i = order.indexOf(c.key), j = i + dir;
-      if (i < 0 || j < 0 || j >= order.length) return;
-      [order[i], order[j]] = [order[j], order[i]];
-      await putCollOrder(order);
-      // 等写入期间框可能已换成别的库
-      if (editingColl === c) showPos();
-    };
-    showPos();
-    $('#coll-mv-l').onclick = () => shift(-1);
-    $('#coll-mv-r').onclick = () => shift(1);
-  }
+  // 列宽是这台设备对整张表记的，拖不出「还原」：调过宽才给这个按钮，点了当场生效
+  const resetW = $('#coll-reset-widths');
+  resetW.hidden = !c || !Object.keys(views[c.key]?.widths || {}).length;
+  resetW.onclick = () => {
+    views[c.key].widths = {};
+    saveViews();
+    applyWidths(c.key);
+    resetW.hidden = true;
+    toast('列宽已还原');
+  };
   const tplRow = $('#coll-tpl-row');
   tplRow.hidden = true;
   if (!c) {

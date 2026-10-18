@@ -1,4 +1,4 @@
-// 库：自建库、建库模板、库设置（库序、字段序与上表、状态语义）、哪些列删得掉、移列与调宽、续费起算、换到期模型、删光也不崩（放最后）。
+// 库：自建库、建库模板、库设置（库序、字段序与上表、状态语义）、哪些列删得掉、续费起算、换到期模型、删光也不崩（放最后）。
 export default async function (t) {
   const { APP, sleep, post, put, patch, raw, mk, items, fields, check, today, day, send, evl, shot, consoleMsgs, menuClick, thWidthSum, tableW, evlSafe, settle, waitFor, sql, confirmRenew } = t;
   /* 12g. 自建库：新建 → 默认字段集 → 表头/行由字段生成 → 语义驱动的续费按钮 → 删库 */
@@ -226,11 +226,6 @@ export default async function (t) {
   await evl(`openCollDialog(collOf('${DK}'))`);
   await sleep(500);
   check('改已有库时不显示模板选择器', await evl(`document.querySelector('#coll-tpl-row').hidden`) === true);
-  // 同理：点「标签位置」那行说明不能把当前库前移一位并落库
-  const orderBefore = await evl(`colls().map(c => c.key).join()`);
-  await evl(`document.querySelector('#coll-order-row > * > span:first-child').click()`);
-  await settle();
-  check('点「标签位置」那行说明不挪库序', await evl(`colls().map(c => c.key).join()`) === orderBefore);
   await evl(`document.querySelector('#dlg-coll').close()`);
   await sleep(150);
   check('删掉模板建的两个库',
@@ -352,18 +347,6 @@ export default async function (t) {
     const others = rows.filter(r => r !== nameRow);
     return !!nameRow?.querySelector('input')?.disabled && others.every(r => !r.querySelector('input').disabled);
   })()`) === true);
-  // 标签位置按钮：库顺序的单指针替代，与拖标签写同一个 /api/collections/order
-  const collOrderNow = async () => (await (await fetch(APP + 'api/collections')).json()).map(c => c.key).join();
-  const tOrder0 = await collOrderNow();
-  const orderPos = () => evl(`document.querySelector('#coll-order-pos').textContent`);
-  check('框里报出当前排第几', await orderPos() === '第 2 个，共 4 个', await orderPos());
-  await evl(`document.querySelector('#coll-mv-r').click()`);
-  await waitFor(`document.querySelector('#coll-order-pos').textContent.startsWith('第 3')`);
-  check('「往右 ▶」把库往右挪一位并落库', await collOrderNow() === tOrder0.replace('subs,sims', 'sims,subs'), await collOrderNow());
-  check('挪完框里的位置跟着变', await orderPos() === '第 3 个，共 4 个', await orderPos());
-  await evl(`document.querySelector('#coll-mv-l').click()`);
-  await waitFor(`document.querySelector('#coll-order-pos').textContent.startsWith('第 2')`);
-  check('「◀ 往左」挪得回来', await collOrderNow() === tOrder0, await collOrderNow());
   await evl(`document.querySelector('#dlg-coll').close()`);
   await sleep(200);
   check('预置库的标签也可拖动', await evl(`document.querySelector('.tab[data-tab="subs"]').draggable`) === true);
@@ -578,33 +561,6 @@ export default async function (t) {
   await sleep(300);
 
 
-  /* 12g2. 移列与调宽子菜单：列序/列宽的单指针替代（WCAG 2.5.7）。写入必须与拖动同一套：
-     列序进 views.order、调宽走拖宽的基线与结算，右边框硬边界那套法则不因入口而异。 */
-  const visCols = () => evl(`[...document.querySelectorAll('#view-subs th')]
-    .filter(t => t.style.display !== 'none' && !t.classList.contains('ops')).map(t => t.dataset.k).join()`);
-  const cBefore = await visCols();
-  check('表头菜单有移列与调宽入口', await menuClick(`#view-subs th[data-k="status"]`, '移列与调宽'));
-  await evl(`[...document.querySelectorAll('.thmenu .mi')].find(b => b.textContent.includes('右移一列')).click()`);
-  await sleep(400);
-  const cAfter = await visCols();
-  check('右移一列换了显示序', cAfter !== cBefore && cAfter.indexOf('status') > cBefore.indexOf('status'), `${cBefore} → ${cAfter}`);
-  await evl(`[...document.querySelectorAll('.thmenu .mi')].find(b => b.textContent.includes('左移一列')).click()`);
-  await sleep(400);
-  check('左移一列挪得回来', await visCols() === cBefore, await visCols());
-  const wSnap = await evl(`JSON.stringify(views.subs.widths)`);
-  const wOfStatus = () => evl(`Math.round(document.querySelector('#view-subs th[data-k="status"]').getBoundingClientRect().width)`);
-  const wMenu0 = await wOfStatus();
-  await evl(`[...document.querySelectorAll('.thmenu .mi')].find(b => b.textContent.includes('加宽此列')).click()`);
-  await sleep(400);
-  check('菜单加宽 +60px', Math.abs(await wOfStatus() - wMenu0 - 60) <= 3, `${wMenu0} → ${await wOfStatus()}`);
-  check('菜单加宽后表宽=列宽和', Math.abs(await tableW() - await thWidthSum()) <= 2, `table=${await tableW()} sum=${await thWidthSum()}`);
-  await evl(`[...document.querySelectorAll('.thmenu .mi')].find(b => b.textContent.includes('变窄此列')).click()`);
-  await sleep(400);
-  check('菜单变窄挪得回来', Math.abs(await wOfStatus() - wMenu0) <= 3, `${await wOfStatus()}`);
-  await evl(`closePop()`);
-  await evl(`views.subs.widths = JSON.parse('${wSnap}'); saveViews(); applyWidths('subs')`);
-  await sleep(200);
-
   // 负向：引擎真列与算出来的列不给这两项，删了没有意义（后端也只认 src='extra'）
   const mCol = await thMenuOf('subs', 'price');
   check('引擎真列（价格）没有删除列', !mCol.includes('删除列'), mCol);
@@ -612,6 +568,23 @@ export default async function (t) {
   const vpsCalc = delFs.find(f => f.tbl === 'vps' && f.src === 'calc' && f.shown);
   const mCalc = await thMenuOf('vps', vpsCalc.key);
   check(`算出来的列（${vpsCalc.name}）没有删除列`, !mCalc.includes('删除列'), mCalc);
+  // 只看表头就分得出列的归属：系统列挂锁、算出来的列是 ƒ、自定义列换色；菜单里留一行说明为什么没有那两项
+  check('系统列的表头菜单说明了为什么不能改名、删除', mCol.includes('系统列：不能改名、删除'), mCol);
+  check('算出来的列的表头菜单同样说明', mCalc.includes('自动算出：值不能编辑'), mCalc);
+  const headKinds = await evl(`(() => {
+    const th = (tab, k) => document.querySelector('.tablewrap[data-tab="' + tab + '"] th[data-k="' + k + '"]');
+    const desc = t => ({ kind: [...t.classList].find(c => c.startsWith('th-')), lock: !!t.querySelector('.tlock'),
+      icon: t.querySelector('.ticon').textContent, title: t.title, color: getComputedStyle(t).color });
+    return { sys: desc(th('subs', 'price')), custom: desc(th('subs', '${seededExtra.key}')), calc: desc(th('vps', '${vpsCalc.key}')) };
+  })()`);
+  check('系统列表头挂锁、悬停说明不能改名删除',
+    headKinds.sys.kind === 'th-system' && headKinds.sys.lock && headKinds.sys.title === '系统列：不能改名、删除',
+    JSON.stringify(headKinds.sys));
+  check('算出来的列表头是 ƒ、不挂锁',
+    headKinds.calc.kind === 'th-calc' && headKinds.calc.icon === 'ƒ' && !headKinds.calc.lock, JSON.stringify(headKinds.calc));
+  check('自定义列表头不挂锁、换了颜色',
+    headKinds.custom.kind === 'th-custom' && !headKinds.custom.lock && headKinds.custom.color !== headKinds.sys.color,
+    JSON.stringify(headKinds));
   check('后端同样拒绝删非 extra 列',
     (await fetch(`${APP}api/fields/${delFs.find(f => f.tbl === 'subs' && f.key === 'price').id}`,
       { method: 'DELETE' })).status === 404);

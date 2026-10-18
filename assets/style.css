@@ -14,6 +14,7 @@
   --coral: #e8543a;
   --coral-soft: #ffe4db;
   --coral-ink: #bf3f27; /* 点名行这类小字的珊瑚色：--coral 对 bg 只有 3.4:1，e2e 现算对比度 */
+  --aqua-ink: #05786b; /* 自定义列列名这类水色小字：--aqua-deep 对 surface-2 只有 4.44:1，e2e 现算对比度 */
   --toast-bg: linear-gradient(135deg, var(--aqua), var(--aqua-deep));
   --toast-err-bg: linear-gradient(135deg, var(--coral), #c93d24);
   --honey: #eda412;
@@ -39,6 +40,7 @@
     --coral: #ff7a5c;
     --coral-soft: #3d1d1566;
     --coral-ink: #ff7a5c;
+    --aqua-ink: #12a795;
     /* toast 是白字：深色下的亮水色渐变上只有 2–3:1，换深一档的底（e2e 现算对比度） */
     --toast-bg: linear-gradient(135deg, #11806f, #0c655b);
     --toast-err-bg: linear-gradient(135deg, #c4432b, #9e321d);
@@ -291,6 +293,10 @@ main { max-width: 1400px; margin: 0 auto; padding: .6rem 1.4rem 3rem; }
 .grid .clip { max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ticon { display: inline-block; width: 14px; height: 14px; margin-right: .34rem; vertical-align: -2px; opacity: .75; }
 .ticon svg { width: 14px; height: 14px; display: block; }
+/* 列的归属（table.js COL_KINDS）：系统列名后挂锁，自定义列名与表尾 ＋ 同为水色 */
+.tlock { display: inline-block; width: 11px; height: 11px; margin-left: .25rem; vertical-align: -1px; opacity: .75; }
+.tlock svg { width: 11px; height: 11px; display: block; }
+.grid th.th-custom, .opt-row .fp-custom { color: var(--aqua-ink); }
 /* 状态胶囊（Notion status 式圆点胶囊，语义定色）：on 在用 / plan 计划中 / cmp 比价 / warn 预结束 */
 .st {
   font-size: .76rem; font-weight: 500; border: 0;
@@ -359,6 +365,7 @@ main { max-width: 1400px; margin: 0 auto; padding: .6rem 1.4rem 3rem; }
 .thmenu .ticon { flex: none; margin: 0 .1rem 0 .05rem; }
 .thmenu .mi:disabled { cursor: default; } /* 类型固定的列：类型行只作说明 */
 .thmenu .mi:disabled:hover { background: none; }
+.thmenu .mi-note { color: var(--ink-2); } /* 说明行（系统列为什么没有改名/删除），不是可点的项 */
 
 /* 列排序 / 列筛选 / 列宽与列序拖动 */
 .grid th { position: relative; user-select: none; }
@@ -544,11 +551,14 @@ th.drop-after { box-shadow: inset -3px 0 0 var(--aqua); }
 .sempop .opt-row { gap: .4rem; cursor: default; }
 /* 库设置里的字段面板：拖动调序 + 上不上表 */
 .fpanel { max-height: 15rem; overflow: auto; border: 1px solid var(--line); border-radius: .55rem; padding: .3rem .55rem; }
+#coll-reset-widths { margin-top: .55rem; }
 .fpanel .opt-row { font-size: .8rem; }
 /* 删除钮只给删得掉的行（extra 列、没人用的状态值），其余留一个同宽空位，后面几列才排在同一竖线上 */
 .fpanel .fp-del, .sempop .fp-del { flex: none; width: 1.15rem; text-align: center; padding: 0; }
+.fpanel .fp-mark { color: var(--ink-2); opacity: .75; }
+.fpanel .fp-mark svg { width: 12px; height: 12px; display: inline-block; vertical-align: -2px; }
 .addcol {
-  border: 0; background: none; cursor: pointer; color: var(--ink-2); font: inherit;
+  border: 0; background: none; cursor: pointer; color: var(--aqua-ink); font: inherit;
   font-size: .95rem; padding: 0 .2rem; border-radius: 6px; line-height: 1.3;
   transition: color .15s, background .15s;
 }
@@ -769,6 +779,9 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
   .masthead { gap: .8rem; }
   .panel { padding: .95rem 1rem 1.1rem; border-radius: 16px; }
   .searchbox, .searchbox.slim { width: 100%; }
+  /* ⚙ 和搜索框同一行：搜索框吃掉剩下的宽度，别把 ⚙ 挤到单独一行 */
+  .tab-actions { width: 100%; margin-left: 0; }
+  .tab-actions .searchbox.slim { flex: 1; width: auto; min-width: 0; }
   .filterpop { max-width: 84vw; }
 }
 @media (min-width: 1200px) {
@@ -776,17 +789,18 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
 }
 
 /* 库顺序：拖标签换位，落点标记与列序拖动同一套语言 */
+.tab, .grid th { -webkit-touch-callout: none; } /* 触屏长按是拖动起手，别弹系统气泡 */
 .tab.dragging { opacity: .45; }
 .tab.drop-before { box-shadow: inset 3px 0 0 var(--aqua); }
 .tab.drop-after { box-shadow: inset -3px 0 0 var(--aqua); }
-/* ⚙ 库设置：与表标签同排，但读起来是动作不是某张表。行高与上下内边距收紧，放大了也不把标签行撑高 */
-.tab.tab-add {
-  color: var(--ink-2); opacity: .75;
-  font-size: 1.6rem; line-height: 1; letter-spacing: 0; padding: .2rem .55rem;
+/* ⚙ 库设置：住在搜索框左边，跟它上下居中。行高压到 1，放大了也不把这一行撑高 */
+.coll-gear {
+  border: 0; background: none; cursor: pointer; color: var(--ink-2); opacity: .75;
+  font-size: 1.6rem; line-height: 1; padding: .1rem .3rem; border-radius: 8px;
+  transition: color .15s, opacity .15s;
 }
-.tab.tab-add:hover { color: var(--aqua-deep); opacity: 1; }
-.tab.tab-add::after { display: none; }
-#coll-order-pos { align-self: center; }
+.coll-gear:hover { color: var(--aqua-deep); opacity: 1; }
+.coll-gear:focus-visible { opacity: 1; outline: 2.5px solid var(--aqua); outline-offset: 2px; }
 
 /* 金额里的原币小字：折算后主行是折算值，原币缩在后面（表格里另起一行，别处跟在后面） */
 .orig { color: var(--ink-2); font-size: .72rem; margin-left: .35rem; font-weight: 500; }

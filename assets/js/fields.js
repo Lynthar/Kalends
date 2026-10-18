@@ -134,7 +134,7 @@ function openOptionsPop(tab, k, anchor) {
     const x = o.v;
     const row = document.createElement('div');
     row.className = 'opt-row';
-    row.draggable = true; // 手动拖动排序；↑↓ 是拖不了的场合（触摸屏）的同功能替代
+    row.draggable = true; // 手动拖动排序；↑↓ 是同功能替代（触屏要长按才拖得动）
     row.innerHTML = `<button type="button" class="cdot t${o.c ?? tagHash(x)}" data-color title="颜色"></button>
       <span class="fp-v">${tagFor(tab, k, x)}</span>
       <button type="button" class="btn link" data-up title="上移">↑</button>
@@ -278,36 +278,6 @@ function openRenameColPop(tab, k, th) {
   inp.select();
 }
 
-// 移列与调宽子菜单：列序/列宽的单指针替代（拖不了的场合从这里走），与拖动写同一套
-// views——shiftCol/stepColWidth 都在 table.js。项保持打开可连点，到边/到顶就没动作。
-function openMovePop(tab, th) {
-  closePop();
-  popKey = 'move:' + tab + ':' + th.dataset.k;
-  const k = th.dataset.k;
-  popEl = document.createElement('div');
-  popEl.className = 'thmenu';
-  popEl.innerHTML = '<div class="tm-title">移列与调宽（仅本机）</div>';
-  const acts = [
-    ['←', '左移一列', () => shiftCol(tab, k, -1)],
-    ['→', '右移一列', () => shiftCol(tab, k, 1)],
-    ['＋', '加宽此列', () => stepColWidth(tab, k, 60)],
-    ['－', '变窄此列', () => stepColWidth(tab, k, -60)],
-  ];
-  // 还原列宽住在这儿（主菜单塞不下第五项，e2e 钉着整份可见）；还原完项就消失，顺手关弹层
-  if (Object.keys(views[tab].widths || {}).length) {
-    acts.push(['⟺', '还原列宽（整表）', () => { views[tab].widths = {}; saveViews(); applyWidths(tab); closePop(); }]);
-  }
-  for (const [ic, t, act] of acts) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'mi';
-    b.innerHTML = `<span class="mic">${ic}</span>${t}`;
-    b.onclick = act;
-    popEl.appendChild(b);
-  }
-  placePop(popEl, th);
-}
-
 // 类型子菜单：文本值列可在 文本/单选/多选 呈现间切换（数据库字段本身不变）
 function openTypeMenu(tab, th) {
   closePop();
@@ -336,7 +306,7 @@ function openTypeMenu(tab, th) {
   placePop(popEl, th);
 }
 
-/* Notion 式表头属性菜单：类型 / 排序 / 筛选 / 移列与调宽 / 隐藏列 */
+/* Notion 式表头属性菜单：类型 / 排序 / 筛选 / 隐藏列（列序列宽靠拖，整表还原在库设置里） */
 function openHeadMenu(tab, th) {
   const id = 'menu:' + tab + ':' + th.dataset.k;
   if (popKey === id) { closePop(); return; }
@@ -367,9 +337,6 @@ function openHeadMenu(tab, th) {
     items.push({ ic: '＋', t: '新增状态值…', act: () => openAddStatusPop(tab, k, th), keepPop: true });
     items.push({ ic: '◐', t: '状态语义…', act: () => openStatusSemPop(tab, k, th), keepPop: true });
   }
-  // 列序与列宽的单指针替代（WCAG 2.5.7）走子菜单：直铺四项会撑破菜单的 max-height
-  //（上一回「删除列/重命名列」就是这么把末项挤进滚动条的，e2e 钉着整份可见）。
-  items.push({ ic: '⇄', t: '移列与调宽…', act: () => openMovePop(tab, th), keepPop: true });
   // 详情入口那一列（名称列）不给隐藏：⤢ 与子行折叠钮都长在这一格里，撤掉整表就没了
   // 全表单入口。后端 PUT /api/fields/{id} 同样拒绝 shown=0，两边都要守。
   if (k !== entryKey(tab)) {
@@ -380,15 +347,18 @@ function openHeadMenu(tab, th) {
     } });
   }
   // 值挂在 extra 里的列都归用户管（判据用 src 不用 builtin，与后端一致）；
-  // 引擎真列与算出来的列没有改名/删除这两项。
-  if (inExtra(COLS[tab][k])) {
+  // 引擎真列与算出来的列没有改名/删除，只留一行说明，别让人以为是找错了地方
+  const kind = colKind(COLS[tab][k]);
+  items.push({ sep: 1 });
+  if (kind === 'custom') {
     const fid = fieldOf(tab, k)?.id;
-    items.push({ sep: 1 });
     items.push({ ic: '✎', t: '重命名列', act: () => openRenameColPop(tab, k, th), keepPop: true });
     items.push({ ic: '✕', t: '删除列', act: async () => {
       if (!confirm(`删除列「${th.dataset.label}」？该列在所有行的值将被清除，不可撤销。`)) return;
       await fieldCall(`/api/fields/${fid}`, 'DELETE', {}, { refresh: () => reloadAfterColumnDrop(tab) });
     } });
+  } else {
+    items.push({ ticon: COL_KINDS[kind].mark, t: COL_KINDS[kind].tip, inert: true, note: true });
   }
   popEl = document.createElement('div');
   popEl.className = 'thmenu';
@@ -398,7 +368,7 @@ function openHeadMenu(tab, th) {
     const b = document.createElement('button');
     b.type = 'button';
     if (it.inert) b.disabled = true;
-    b.className = 'mi';
+    b.className = it.note ? 'mi mi-note' : 'mi';
     b.innerHTML = `<span class="${it.ticon ? 'ticon' : 'mic'}">${it.ticon || it.svg || esc(it.ic)}</span>${esc(it.t)}${it.on ? '<span class="mon">✓</span>' : ''}`;
     b.onclick = () => {
       if (it.keepPop) { it.act(); return; } // 筛选/类型项自己接管弹层

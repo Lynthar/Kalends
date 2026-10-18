@@ -163,6 +163,107 @@ function clearDndMarks() {
   }
 }
 
+// 元素 → 它在 reorderDnD 登记的身份与落点处置；触屏路径靠它从手指下的元素找回落点
+const dndTargets = new WeakMap();
+
+function markDrop(el, axis, x, y) {
+  const r = el.getBoundingClientRect();
+  const after = axis === 'x' ? x > r.left + r.width / 2 : y > r.top + r.height / 2;
+  el.classList.toggle('drop-after', after);
+  el.classList.toggle('drop-before', !after);
+}
+
+/* 手机浏览器不为触摸派发 HTML5 拖放：长按起手、跟手标落点、松手换位。没按够就滑开的照旧是滚动或点击：
+   起手前不拦 touchmove，拦了第一下这一整个手势就再也滚不动。但 touchmove 监听必须一开始就以非被动挂上——
+   手指按下那一刻元素上没有它，浏览器就把这一串 touchmove 定成拦不住的，拖动时表格跟着手指一起滚 */
+const LONG_PRESS_MS = 500;
+const PRESS_SLOP = 8;
+const EDGE_PX = 32;
+
+// 沿轴向能滚的最近祖先：手机上表格一屏只露两三列，拖到边上得自己滚过去才够得着后面的列
+function scrollerOf(el, axis) {
+  for (let p = el.parentElement; p && p !== document.body; p = p.parentElement) {
+    const cs = getComputedStyle(p);
+    const can = axis === 'x' ? /auto|scroll/.test(cs.overflowX) && p.scrollWidth > p.clientWidth
+      : /auto|scroll/.test(cs.overflowY) && p.scrollHeight > p.clientHeight;
+    if (can) return p;
+  }
+  return null;
+}
+
+function touchDnD(el, { group, axis, key, onStart }) {
+  let p = null; // 这一次按压：{ x0, y0, live, over, last, timer, raf }
+  const retarget = (x, y) => {
+    let hit = document.elementFromPoint(x, y);
+    while (hit && !(dndTargets.get(hit)?.group === group && dndTargets.get(hit).key !== key)) hit = hit.parentElement;
+    if (p.over && p.over !== hit) p.over.classList.remove('drop-before', 'drop-after');
+    p.over = hit;
+    if (hit) markDrop(hit, dndTargets.get(hit).axis, x, y);
+  };
+  // 手指停在滚动区边缘就一直滚，越贴边越快；滚完按原地重新找落点
+  const edgeScroll = () => {
+    const box = scrollerOf(el, axis);
+    if (box && p.last) {
+      const r = box.getBoundingClientRect();
+      const [at, lo, hi] = axis === 'x' ? [p.last.x, r.left, r.right] : [p.last.y, r.top, r.bottom];
+      const d = at < lo + EDGE_PX ? at - (lo + EDGE_PX) : at > hi - EDGE_PX ? at - (hi - EDGE_PX) : 0;
+      if (d) {
+        const step = Math.sign(d) * Math.min(12, 2 + Math.abs(d) / 3);
+        if (axis === 'x') box.scrollLeft += step; else box.scrollTop += step;
+        retarget(p.last.x, p.last.y);
+      }
+    }
+    p.raf = requestAnimationFrame(edgeScroll);
+  };
+  const done = () => {
+    if (!p) return;
+    clearTimeout(p.timer);
+    cancelAnimationFrame(p.raf);
+    if (p.live) { dndFrom = null; clearDndMarks(); }
+    p = null;
+  };
+  // 长按会招来系统菜单（Android 的 contextmenu），按住期间一律压掉
+  el.addEventListener('contextmenu', e => { if (p) e.preventDefault(); });
+  el.addEventListener('touchstart', e => {
+    done();
+    if (e.touches.length !== 1 || dndFrom) return;
+    const t = e.touches[0];
+    const press = p = { x0: t.clientX, y0: t.clientY, live: false, over: null, last: null, raf: 0 };
+    press.timer = setTimeout(() => {
+      if (p !== press) return;
+      if (dndFrom || onStart?.(e) === false) { done(); return; }
+      press.live = true;
+      dndFrom = { group, key };
+      el.classList.add('dragging');
+      press.raf = requestAnimationFrame(edgeScroll);
+    }, LONG_PRESS_MS);
+  }, { passive: true });
+  el.addEventListener('touchmove', e => {
+    if (!p) return;
+    const t = e.touches[0];
+    if (!p.live) {
+      if (Math.hypot(t.clientX - p.x0, t.clientY - p.y0) > PRESS_SLOP) done();
+      return;
+    }
+    e.preventDefault();
+    p.last = { x: t.clientX, y: t.clientY };
+    retarget(p.last.x, p.last.y);
+  }, { passive: false });
+  el.addEventListener('touchend', () => {
+    if (!p) return;
+    const { live, over } = p;
+    const after = !!over?.classList.contains('drop-after');
+    done();
+    if (!live) return;
+    // 长按松手后浏览器可能补一次 click：吞掉，别顺手开出表头菜单或切了标签
+    const swallow = ev => { ev.stopImmediatePropagation(); ev.preventDefault(); };
+    el.addEventListener('click', swallow, true);
+    setTimeout(() => el.removeEventListener('click', swallow, true), 350);
+    if (over) dndTargets.get(over).onDrop(key, after);
+  });
+  el.addEventListener('touchcancel', done);
+}
+
 /**
  * @param {Element} el 参与换位的元素；`draggable` 由调用方自己置（行拖动是按住手柄才开）
  * @param {object} o
@@ -172,9 +273,12 @@ function clearDndMarks() {
  * @param {*} o.key 本元素在组内的身份，原样交回 onDrop
  * @param {(e:DragEvent)=>*} [o.onStart] 起手钩子，**返回 false 即取消这次拖动**
  * @param {(from:*, after:boolean)=>void} o.onDrop 落点处置：把 from 放到本元素前/后
+ * @param {boolean} [o.touch=true] 触屏长按拖动。表格行要关掉：每行挂一个非被动 touchmove，
+ *   整张表在手机上的滚动都得等主线程
  */
-function reorderDnD(el, { group, axis, key, onDrop, onStart }) {
+function reorderDnD(el, { group, axis, key, onDrop, onStart, touch = true }) {
   const ok = f => f != null && f.group === group && f.key !== key;
+  dndTargets.set(el, { group, axis, key, onDrop });
   el.addEventListener('dragstart', e => {
     if (onStart?.(e) === false) { e.preventDefault(); return; }
     dndFrom = { group, key };
@@ -185,11 +289,9 @@ function reorderDnD(el, { group, axis, key, onDrop, onStart }) {
     if (!ok(dndFrom)) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
-    const r = el.getBoundingClientRect();
-    const after = axis === 'x' ? e.clientX > r.left + r.width / 2 : e.clientY > r.top + r.height / 2;
-    el.classList.toggle('drop-after', after);
-    el.classList.toggle('drop-before', !after);
+    markDrop(el, axis, e.clientX, e.clientY);
   });
+  if (touch) touchDnD(el, { group, axis, key, onStart });
   el.addEventListener('dragleave', () => el.classList.remove('drop-before', 'drop-after'));
   el.addEventListener('drop', e => {
     e.preventDefault();

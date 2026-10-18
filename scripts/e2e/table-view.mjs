@@ -472,22 +472,31 @@ export default async function (t) {
     document.querySelector('#view-subs thead th[data-k="notes"]').click();
     const txt = [...document.querySelectorAll('.thmenu .mi')].map(x => x.textContent).join('|');
     closePop();
-    return txt.includes('隐藏此列（仅本机）') && txt.includes('移列与调宽…');
+    return txt.includes('隐藏此列（仅本机）');
   })()`) === true);
-  // 还原列宽住进了移列与调宽子菜单（主菜单塞不下第五项，上方钉着整份可见），
-  // 且只在真有手动列宽时出现——先把前提造出来，否则这条断言没有区分度
-  check('还原列宽在子菜单里且只在有手动列宽时出现', await evl(`(() => {
-    views.subs.widths = { ...views.subs.widths, notes: 180 };
-    openMovePop('subs', document.querySelector('#view-subs thead th[data-k="notes"]'));
-    const withW = [...document.querySelectorAll('.thmenu .mi')].map(x => x.textContent).join('|');
+  // 列序列宽都靠拖，只有整表「还原列宽」拖不出来：它在库设置里、不在每列的菜单里，
+  // 且只在真有手动列宽时出现——先把前提造出来，否则这条断言没有区分度；点了要真的清掉
+  await evl(`views.subs.widths = {}; saveViews(); applyWidths('subs')`);
+  await evl(`openCollDialog(collOf('subs'))`);
+  await waitFor(`document.querySelector('#dlg-coll')?.open`);
+  const rwNone = await evl(`document.querySelector('#coll-reset-widths').hidden`);
+  await evl(`document.querySelector('#dlg-coll').close()`);
+  await evl(`views.subs.widths = { notes: 180 }; saveViews(); applyWidths('subs')`);
+  await evl(`openCollDialog(collOf('subs'))`);
+  await waitFor(`document.querySelector('#dlg-coll')?.open`);
+  const rwShown = await evl(`!document.querySelector('#coll-reset-widths').hidden`);
+  await evl(`document.querySelector('#coll-reset-widths').click()`);
+  const rwAfter = await evl(`({ left: Object.keys(views.subs.widths).length, hidden: document.querySelector('#coll-reset-widths').hidden })`);
+  await evl(`document.querySelector('#dlg-coll').close()`);
+  const menuTxt = await evl(`(() => {
+    openHeadMenu('subs', document.querySelector('#view-subs thead th[data-k="notes"]'));
+    const t = [...document.querySelectorAll('.thmenu .mi')].map(x => x.textContent).join('|');
     closePop();
-    views.subs.widths = {};
-    saveViews();
-    openMovePop('subs', document.querySelector('#view-subs thead th[data-k="notes"]'));
-    const noW = [...document.querySelectorAll('.thmenu .mi')].map(x => x.textContent).join('|');
-    closePop();
-    return withW.includes('还原列宽') && !noW.includes('还原列宽');
-  })()`) === true);
+    return t;
+  })()`);
+  check('库设置里的还原列宽只在调过列宽时出现，点了就清掉', rwNone && rwShown && rwAfter.left === 0 && rwAfter.hidden,
+    JSON.stringify({ rwNone, rwShown, rwAfter }));
+  check('表头菜单里不再有还原列宽', !menuTxt.includes('还原列宽'), menuTxt);
 
   /* 筛选谓词按类型表声明的筛选族分派：新加一种 filter:'num' 的类型，菜单出数字操作符，谓词也得按数字比 */
   check('声明 filter:num 的新类型按数字筛选，不走文本「包含」', await evl(`(() => {
