@@ -211,7 +211,8 @@ function leftBar(it) {
     // 状态）。照旧画进度条就是「剩 37 天 / 31」配一根空槽——直接说清本期哪天起算
     if (total > 0 && left > total) return esc(`剩 ${left} 天（本期 ${it.last_renewed} 起）`);
     if (total > 0) {
-      const pct = Math.min(100, Math.max(0, (total - left) / total * 100));
+      // 条画的是还剩多少（与标签同向），随日子过去变短；超期就空
+      const pct = Math.min(100, Math.max(0, left / total * 100));
       const lbl = left < 0 ? `已超期 ${-left} 天` : `剩 ${left} 天 / ${total}`;
       return `<div class="bar"><div class="track"><div class="fill" style="width:${pct}%"></div></div><div class="lbl">${lbl}</div></div>`;
     }

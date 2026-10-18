@@ -786,6 +786,14 @@ export default async function (t) {
     .replace(/\s+/g, ' ');
   check('本期还没开始时不画进度条，改说清本期哪天起算',
     acLeft.includes('剩 35 天') && acLeft.includes(day(5)) && !acLeft.includes('/ 30'), acLeft);
+  // 条的长度是剩余占比、与标签同向：Ultra 剩 80 / 90 该接近满，Giffgaff 剩 6 / 181 只剩一点。
+  // 画成已过占比（修前的样子）两者正好倒过来：Ultra 11%、Giffgaff 97%
+  const acFill = async name => {
+    const row = (await items('sims')).find(r => r.name.includes(name));
+    return parseFloat(await evl(`document.querySelector('#sims-body tr[data-id="${row.id}"] .fill')?.style.width || '-1'`));
+  };
+  const [acUltra, acGiff] = [await acFill('Ultra'), await acFill('Giffgaff')];
+  check('剩余天数的进度条画的是还剩多少', acUltra > 85 && acUltra < 92 && acGiff > 2 && acGiff < 5, `Ultra ${acUltra}% / Giffgaff ${acGiff}%`);
   // 拍在该看的状态下：表格在页面下半，不滚过去截出来的是首页那一屏
   await evl(`document.querySelector('#sims-body tr[data-id="${acItem.id}"]')?.scrollIntoView({ block: 'center' })`);
   await sleep(400);
