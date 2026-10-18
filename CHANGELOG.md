@@ -2,6 +2,12 @@
 
 Release notes are taken from this file verbatim — each `## vX.Y.Z` section becomes that release's body.
 
+## v0.4.1
+
+**Fixed**: the "days left" bar now shrinks with the days that remain, the same direction as its label. It used to fill up as the period elapsed, so 88 of 92 days left showed a sliver and 40 of 1096 an almost full bar.
+
+**Upgrading**: no schema change.
+
 ## v0.4.0
 
 **One due date.** Every item stores its next due date and nothing else; the "last renewal plus cycle" model and the per-library due-date setting are gone. Libraries that used it have each date carried over one cycle. "Last renewed" is now a read-only computed column (the start of the current period) and, like "days left", exists in every library, hidden unless it was already on the table. Month-end billing days no longer drift: a 31st renewed through February comes back to the 31st in March instead of sticking at the 28th. Renewing an item that has no date yet counts one cycle from the day you paid.
