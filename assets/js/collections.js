@@ -708,15 +708,15 @@ function collDialog() {
         </div>
         <label><span>库名</span><input data-c="name" required></label>
         <label><span>图标（emoji，可空）</span><input data-c="icon" maxlength="16"></label>
-        <label><span>到期模型</span><select data-c="due_anchor">
-          <option value="last">上次续费 + 周期</option>
-          <option value="next">直接记下次到期日</option>
+        <label><span>到期日怎么记</span><select data-c="due_anchor">
+          <option value="last">记上次续费日，按周期推算</option>
+          <option value="next">直接填下次到期日</option>
         </select></label>
-        <label><span>续费起算</span><select data-c="renew_from">
-          <option value="schedule">按原定到期日（账单日不变）</option>
-          <option value="today">从付款当天重新计时</option>
+        <label><span>续费后从哪天算</span><select data-c="renew_from">
+          <option value="schedule">沿用原账单日</option>
+          <option value="today">从付款当天重新算</option>
         </select></label>
-        <label><span>到期动作说法</span><input data-c="verb" placeholder="续费"></label>
+        <label><span>到期动作名称</span><input data-c="verb" placeholder="续费"></label>
       </div>
       <div id="coll-order-row" class="fgrid" hidden>
         <div class="field span2" role="group" aria-labelledby="coll-order-label"><span id="coll-order-label">标签位置（拖不了标签时从这里挪）</span>
@@ -902,8 +902,8 @@ document.addEventListener('submit', async e => {
   // 换到期模型有后果：新锚点那侧的日期字段是空的，已有条目在填上之前算不出到期日
   //（后端会把字段补进注册表，首页「算不出到期日」会点名它们）
   if (editingColl && body.due_anchor !== editingColl.due_anchor) {
-    const to = body.due_anchor === 'next' ? '直接记下次到期日' : '上次续费 + 周期';
-    if (!confirm(`把「${editingColl.name}」的到期模型改成「${to}」？\n\n新模型读的是另一个日期字段，已有条目在把它填上之前算不出到期日（会列在首页「算不出到期日」里）。改回来即可恢复。`)) return;
+    const to = body.due_anchor === 'next' ? '直接填下次到期日' : '记上次续费日，按周期推算';
+    if (!confirm(`把「${editingColl.name}」的到期日改成「${to}」？\n\n改了之后读的是另一个日期字段，已有条目在把它填上之前算不出到期日（会列在首页「算不出到期日」里）。改回来即可恢复。`)) return;
   }
   if (editingColl) {
     const id = editingColl.id;
