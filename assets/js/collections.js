@@ -37,6 +37,7 @@ function fieldRaw(f, r) {
   if (f.src === 'col') return r[f.key];
   if (f.src === 'extra') return (r.extra || {})[f.key];
   if (f.key === 'left') return r.days_left;
+  if (f.key === 'last_renewed') return r.last_renewed; // 本期起始日，服务端算（engine::period_start）
   if (f.ftype === 'tpl') return tplText(f, r);
   return null;
 }
@@ -276,7 +277,8 @@ function renderColl(key) {
       return `<td${ts.td ? ` class="${ts.td}"` : ''}${ts.title ? ` title="${esc(v ?? '')}"` : ''}>${cellVal(key, f.key, v)}</td>`;
     }).join('');
     const sem = semOf(key, it.status);
-    const canRenew = sem.timeline && (c.due_anchor === 'last' || it.next_renewal);
+    // 没填到期日的也能记：后端从付款日推一期，正是给新条目补日期的路（engine::renew_to）
+    const canRenew = sem.timeline;
     tr.innerHTML = `${tds}<td class="ops">
         ${canRenew ? `<button class="btn link" data-renew type="button">已${esc(c.verb || '续费')}</button>` : ''}
       </td>`;
@@ -708,10 +710,6 @@ function collDialog() {
         </div>
         <label><span>库名</span><input data-c="name" required></label>
         <label><span>图标（emoji，可空）</span><input data-c="icon" maxlength="16"></label>
-        <label><span>到期日怎么记</span><select data-c="due_anchor">
-          <option value="last">记上次续费日，按周期推算</option>
-          <option value="next">直接填下次到期日</option>
-        </select></label>
         <label><span>续费后从哪天算</span><select data-c="renew_from">
           <option value="schedule">沿用原账单日</option>
           <option value="today">从付款当天重新算</option>
@@ -736,7 +734,7 @@ function collDialog() {
 }
 
 /* 建库模板：字段集由后端播（见 collections::TEMPLATES），前端只管挑和预填。
-   挑中的模板会覆盖库名/图标/到期模型/动作说法——库名除外：用户自己改过就不覆盖。 */
+   挑中的模板会覆盖库名/图标/续费起算/动作说法——库名除外：用户自己改过就不覆盖。 */
 let collTemplates = null;
 let collTpl = null;
 
@@ -759,7 +757,6 @@ function pickTpl(d, t) {
   if (!cur || cur === collTpl?.label) g('name').value = t.fields.length ? t.label : '';
   collTpl = t;
   g('icon').value = t.icon || '';
-  g('due_anchor').value = t.due_anchor;
   g('renew_from').value = t.renew_from || 'schedule';
   g('verb').value = t.verb || '';
   $('#coll-tpl-desc').textContent = t.fields.length ? `${t.desc} · 预置字段：${t.fields.join(' · ')}` : t.desc;
@@ -839,7 +836,6 @@ async function openCollDialog(c) {
   const g = k => d.querySelector(`[data-c="${k}"]`);
   g('name').value = c?.name || '';
   g('icon').value = c?.icon || '';
-  g('due_anchor').value = c?.due_anchor || 'last';
   g('renew_from').value = c?.renew_from || 'schedule';
   g('verb').value = c?.verb || '';
   collTpl = null;
@@ -884,22 +880,8 @@ document.addEventListener('submit', async e => {
   e.preventDefault();
   const d = $('#dlg-coll');
   const g = k => d.querySelector(`[data-c="${k}"]`).value.trim();
-  const body = {
-    name: g('name'), icon: g('icon'), due_anchor: g('due_anchor'),
-    renew_from: g('renew_from'), verb: g('verb'),
-  };
+  const body = { name: g('name'), icon: g('icon'), renew_from: g('renew_from'), verb: g('verb') };
   if (!body.name) { toast('库名不能为空', true); return; }
-  // 换到期模型：后端把每个条目的日期折到新侧、到期日不变，新侧的日期列上表、旧侧撤下表（值留着）。
-  // 列名取注册表里的，模板会改名（「下次续费」「有效期至」……）
-  if (editingColl && body.due_anchor !== editingColl.due_anchor) {
-    const col = (k, dflt) => `「${fieldOf(editingColl.key, k)?.name || dflt}」`;
-    const toNext = body.due_anchor === 'next';
-    const to = toNext ? '直接填下次到期日' : '记上次续费日，按周期推算';
-    const how = toNext
-      ? `每个条目的到期日原样写进${col('next_renewal', '下次到期')}，切换前后不变；${col('last_renewed', '上次续费')}${col('left', '剩余天数')}撤下表格，数据留着。`
-      : `${col('last_renewed', '上次续费')}按到期日往前推一个周期填好，切换前后到期日不变——只有按月、季、年付且在 29–31 号到期的，会提前到能对上的最近一天（如 3/31 → 3/28）。${col('next_renewal', '下次到期')}撤下表格，数据留着。`;
-    if (!confirm(`把「${editingColl.name}」的到期日改成「${to}」？\n\n${how}\n\n没填周期或日期的条目推不出到期日，会列在首页「算不出到期日」里。`)) return;
-  }
   if (editingColl) {
     const id = editingColl.id;
     if (await write(`coll:${id}`, () => api(`/api/collections/${id}`, { method: 'PUT', body: JSON.stringify(body) }),

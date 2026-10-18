@@ -21,11 +21,13 @@ UPDATE collections SET note_field = 'c950' WHERE key = 'books';
 -- 模拟用户自定义过的规格模板：0016 的「改过就不动」防线要在这上面验
 UPDATE fields SET config = '{"tpl":"{cores}C/{ram_gb}G"}' WHERE tbl = 'vps' AND key = 'spec';
 
--- 备注三种形态（0023 搬进 extra）：extra 已有值、extra 为 NULL、备注是空串（不搬、extra 原样）
+-- 备注三种形态（0023 搬进 extra）：extra 已有值、extra 为 NULL、备注是空串（不搬、extra 原样）；
+-- ExampleBox 的 1/31 月付给 0024 的月末折算当样本
 INSERT INTO items(id, collection_id, name, status, price, currency, cycle, cycle_days, next_renewal, last_renewed, extra, pos, notes) VALUES
   (101, 1, 'Example Plus',    'Active', 11.99, 'USD', 'monthly', NULL, '2026-09-01', NULL,         '{"c1":"月付","payment_method":"PayPal"}', 1, '每月对账'),
   (102, 2, 'ExampleTel',      'Active', NULL,  NULL,  'days',    90,   NULL,         '2026-07-01', '{"phone_number":"+44 7700 900456","c900":"已删列的残值"}', 1, NULL),
   (103, 3, 'ExampleHost',     'Active', 5.5,   'USD', 'annual',  NULL, NULL,         '2026-05-20', '{"product":"VPS-Basic","cores":2}',       1, ''),
+  (108, 3, 'ExampleBox',      'Active', 3,     'EUR', 'monthly', NULL, NULL,         '2026-01-31', '{"product":"Box"}',                       2, NULL),
   (104, 4, 'Example Almanac', 'Active', NULL,  NULL,  NULL,      NULL, '2026-12-31', NULL,         NULL,                                      1, '纸本'),
   (105, 5, 'example.com',     'Active', 10,    'USD', 'annual',  NULL, '2027-03-01', NULL,         '{"auto_renew":"开","registrar":"ExampleReg"}', 1, NULL),
   (106, 5, 'example.org',     'Active', 10,    'USD', 'annual',  NULL, '2027-04-01', NULL,         '{"auto_renew":"关"}',                     2, NULL),

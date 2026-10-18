@@ -2,6 +2,12 @@
 
 Release notes are taken from this file verbatim — each `## vX.Y.Z` section becomes that release's body.
 
+## v0.4.0
+
+**One due date.** Every item stores its next due date and nothing else; the "last renewal plus cycle" model and the per-library due-date setting are gone. Libraries that used it have each date carried over one cycle. "Last renewed" is now a read-only computed column (the start of the current period) and, like "days left", exists in every library, hidden unless it was already on the table. Month-end billing days no longer drift: a 31st renewed through February comes back to the 31st in March instead of sticking at the 28th. Renewing an item that has no date yet counts one cycle from the day you paid.
+
+**Upgrading**: one migration, after a snapshot lands in `backups/pre-migration-v23.db`. Items in a "last renewal" library whose cycle cannot be advanced (lifetime, none, or custom days without a count) lose their date and are listed on the home page. API: collection writes carrying `due_anchor` get a 400; `last_renewed` is read-only (sending a different value gets a 400); items carry a read-only `billing_day`; the renew response is `{ "due": ... }` only.
+
 ## v0.3.2
 
 **New**: an item can renew itself. Turn on auto-renew and, the day after a billing date passes, that period is booked in the ledger (marked automatic) and the item moves on; periods already overdue when you turn it on still need one manual renewal. "Renewed" asks which day you paid, so logging a SIM top-up late no longer pushes its window back. Status values no item uses can be dropped.

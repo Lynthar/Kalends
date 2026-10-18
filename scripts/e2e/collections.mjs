@@ -1,14 +1,14 @@
-// 库：自建库、建库模板、库设置（库序、字段序与上表、状态语义）、哪些列删得掉、续费起算、换到期模型、删光也不崩（放最后）。
+// 库：自建库、建库模板、库设置（库序、字段序与上表、状态语义）、哪些列删得掉、续费起算、单一到期日与账单日、删光也不崩（放最后）。
 export default async function (t) {
   const { APP, sleep, post, put, patch, raw, mk, items, fields, check, today, day, send, evl, shot, consoleMsgs, menuClick, thWidthSum, tableW, evlSafe, settle, waitFor, sql, confirmRenew } = t;
   /* 12g. 自建库：新建 → 默认字段集 → 表头/行由字段生成 → 语义驱动的续费按钮 → 删库 */
-  const nc = await post('/api/collections', { name: '域名', icon: '🌐', due_anchor: 'next' });
+  const nc = await post('/api/collections', { name: '域名', icon: '🌐' });
   check('新建库返回库键', /^k\d+$/.test(nc.key || ''), JSON.stringify(nc));
   const NK = nc.key;
   const ncf = (await (await fetch(`${APP}api/fields`)).json()).filter(f => f.tbl === NK);
   check('新库播了默认字段集', ncf.length >= 8 && ncf.some(f => f.key === 'status'), ncf.map(f => f.key));
-  check('新库到期字段随模型给 next_renewal',
-    ncf.some(f => f.key === 'next_renewal') && !ncf.some(f => f.key === 'last_renewed'));
+  check('新库注册了可填的下次到期与算出来的上次续费',
+    ncf.some(f => f.key === 'next_renewal' && f.src === 'col') && ncf.some(f => f.key === 'last_renewed' && f.src === 'calc'));
   await post(`/api/collections/${NK}/items`, {
     name: 'lynthar.com', status: 'Active', price: 12.5, currency: 'USD',
     cycle: 'annual', next_renewal: day(9), extra: {},
@@ -153,8 +153,7 @@ export default async function (t) {
 
   const dc = await post('/api/collections', { name: '我的证件', template: 'docs' });
   const DK = dc.key;
-  check('模板带来库属性（到期模型 / 图标 / 动作说法）',
-    dc.due_anchor === 'next' && dc.icon === '🪪' && dc.verb === '换证', JSON.stringify(dc));
+  check('模板带来库属性（图标 / 动作说法）', dc.icon === '🪪' && dc.verb === '换证', JSON.stringify(dc));
   const ic = await post('/api/collections', { name: '我的保单', template: 'insurance' });
   check('模板带来名称格小字字段', ic.subline === 'policy_no' && ic.verb === '续保', JSON.stringify(ic));
 
@@ -210,10 +209,10 @@ export default async function (t) {
   await shot('23-coll-templates');
   await evl(`[...document.querySelectorAll('#coll-tpl .chip')].find(b => b.textContent.includes('域名')).click()`);
   await sleep(250);
-  check('挑模板预填库名 / 图标 / 到期模型 / 动作说法', await evl(`(() => {
+  check('挑模板预填库名 / 图标 / 续费起算 / 动作说法', await evl(`(() => {
     const d = document.querySelector('#dlg-coll');
     const g = k => d.querySelector('[data-c="' + k + '"]').value;
-    return g('name') === '域名' && g('icon') === '🌐' && g('due_anchor') === 'next' && g('verb') === '续费';
+    return g('name') === '域名' && g('icon') === '🌐' && g('renew_from') === 'schedule' && g('verb') === '续费';
   })()`) === true);
   check('说明里列出模板预置的字段', await evl(`document.querySelector('#coll-tpl-desc').textContent.includes('注册商')`) === true);
   // 「模板」二字只是说明：套着按钮的 label 被点时会激活第一颗按钮，把挑好的模板重置成空白、覆盖库名
@@ -245,7 +244,7 @@ export default async function (t) {
 
   const sc = await post('/api/collections', { name: '第二份订阅', template: 'subs' });
   const SK = sc.key;
-  check('订阅模板：到期模型与图标', sc.due_anchor === 'next' && sc.icon === '🔁', JSON.stringify(sc));
+  check('订阅模板：图标', sc.icon === '🔁', JSON.stringify(sc));
   check('订阅模板不写死动作说法（NULL 时前后端都回落成「续费」）', !sc.verb, JSON.stringify(sc));
   const scf = (await (await fetch(`${APP}api/fields`)).json()).filter(f => f.tbl === SK);
   const sfby = k => scf.find(f => f.key === k);
@@ -269,7 +268,7 @@ export default async function (t) {
   check('VPS 模板把商家做成名称列', vfby('name').name === '商家');
 
   await post(`/api/collections/${VK}/items`, {
-    name: '某商家', status: 'Active', cycle: 'annual', last_renewed: day(-30),
+    name: '某商家', status: 'Active', cycle: 'annual', next_renewal: day(335),
     extra: { product: '小鸡', cores: 2, ram_gb: 4, storage_gb: 40, storage_type: 'NVMe' },
   });
   await evl(`loadAll()`);
@@ -357,7 +356,7 @@ export default async function (t) {
   await sleep(600);
   check('库设置浮层出现字段面板',
     await evl(`!document.querySelector('#coll-fields-box').hidden
-      && document.querySelectorAll('#coll-fields .opt-row').length === 11`) === true);
+      && document.querySelectorAll('#coll-fields .opt-row').length === 13`) === true);
   const fb = await evl(`[...document.querySelectorAll('#coll-fields .opt-row .fp-v')].map(e => e.textContent)`);
   await evl(`(() => {
     const rows = [...document.querySelectorAll('#coll-fields .opt-row')];
@@ -703,13 +702,13 @@ export default async function (t) {
 
   // 同一份数据喂给两个库：30 天一期、欠了三期多。差别只在库的续费起算方式上。
   // 用天数周期是为了不在断言里再复刻一遍日历加法——月末钳位那类边界由 cargo test 守着
-  const rfSeed = { status: 'Active', cycle: 'days', cycle_days: 30, last_renewed: day(-100) };
+  const rfSeed = { status: 'Active', cycle: 'days', cycle_days: 30, next_renewal: day(-70) };
   const rfVps = await mk('vps', { name: '账单日机器', price: 9, currency: 'USD', ...rfSeed, extra: { purpose: '任务' } });
   const rfSim = await mk('sims', { name: '保号测试卡', ...rfSeed, extra: { keepalive_action: '充值' } });
 
   const rfResp = await post(`/api/items/${rfVps.id}/renew`, {});
   const rfVpsAfter = (await (await fetch(APP + 'api/collections/vps/items')).json()).find(r => r.id === rfVps.id);
-  check('按日程续费：锚点落在刚付的那一期，不是今天',
+  check('按日程续费：本期从刚付的那一期起，不是今天',
     rfVpsAfter.last_renewed === day(-10), `落在 ${rfVpsAfter.last_renewed}，今天是 ${today}`);
   check('按日程续费：到期日回到原本的账单日',
     rfResp.due === day(20), JSON.stringify(rfResp));
@@ -741,89 +740,57 @@ export default async function (t) {
   await sleep(700);
 
 
-  /* 17.29. 换库的到期模型：另一侧的日期字段此前从未注册过，切过去 due_from 就改读一个
-     界面上根本造不出来的字段（字段面板只能建 extra 自定义列），整库到期日静默消失——
-     表格里旧的那列还显示着值，看着一切正常，时间线却空了。现在切换把日期折到新侧，到期日不变。 */
-  const acColl = await post('/api/collections', { name: '锚点切换', due_anchor: 'last' });
-  const acItem = await mk(acColl.key, { name: '按上次续费算', status: 'Active', cycle: 'monthly', last_renewed: day(-5) });
+  /* 17.29. 到期日只有一种记法。推不出到期日的条目照旧被点名；没填日期的点「已续费」从付款日起算；
+     月末账单日跨多次续费不漂移（账单日由引擎记在条目上，手改到期日即作废）；旧客户端带 due_anchor 被拒；
+     提前续费时「剩余天数」说清本期哪天起。 */
+  const acColl = await post('/api/collections', { name: '单一到期日' });
+  check('建库不再接受 due_anchor', !(await raw('/api/collections', 'POST', { name: 'x', due_anchor: 'last' })).ok);
+  check('改库不再接受 due_anchor', !(await put(`/api/collections/${acColl.id}`, { due_anchor: 'next' })).ok);
+  const acFields = (await fields()).filter(f => f.tbl === acColl.key);
+  const acF = k => acFields.find(f => f.key === k);
+  check('新库三列日期：下次到期可填上表，上次续费 / 剩余天数算出、缺省不上表',
+    acF('next_renewal')?.src === 'col' && acF('next_renewal').shown
+    && acF('last_renewed')?.src === 'calc' && !acF('last_renewed').shown
+    && acF('left')?.src === 'calc' && !acF('left').shown,
+    JSON.stringify(acFields.map(f => [f.key, f.src, f.shown])));
   const acBare = await mk(acColl.key, { name: '没填日期', status: 'Active', cycle: 'monthly' });
-  const acFields = async () => (await (await fetch(`${APP}api/fields`)).json()).filter(f => f.tbl === acColl.key);
-  const acKeys = async () => (await acFields()).map(f => f.key);
-  const acDue = async () => (await (await fetch(APP + 'api/overview')).json()).upcoming
-    .find(u => u.kind === acColl.key && u.id === acItem.id)?.due;
-  const k0 = await acKeys();
-  check('last 锚点的库只播了上次续费日', k0.includes('last_renewed') && !k0.includes('next_renewal'), JSON.stringify(k0));
-  const acDue0 = await acDue();
-  check('切换前算得出到期日', !!acDue0);
-
-  // 走界面切：确认框的文案要拿得到列名（模板会改名），出错就根本切不过去
-  await evl(`loadAll()`);
-  await settle();
-  await evl(`(() => {
-    window.__confirmed = null;
-    window.__realConfirm = window.confirm;
-    window.confirm = m => { window.__confirmed = m; return true; };
-    openCollDialog(collOf('${acColl.key}'));
-  })()`);
-  await waitFor(`!!document.querySelector('#dlg-coll')?.open`);
-  await evl(`document.querySelector('#dlg-coll [data-c="due_anchor"]').value = 'next'`);
-  await evl(`document.querySelector('#form-coll button[type=submit]').click()`);
-  await waitFor(`!document.querySelector('#dlg-coll').open`);
-  await settle();
-  const acMsg = await evl(`(() => { window.confirm = window.__realConfirm; return window.__confirmed; })()`);
-  check('换到期模型前确认框说清写进哪列、撤下哪列',
-    !!acMsg?.includes('原样写进「下次到期」') && acMsg.includes('「上次续费」「剩余天数」撤下表格'), acMsg);
-  const k1 = await acKeys();
-  check('切成 next 之后下次到期日被补进字段注册表', k1.includes('next_renewal'), JSON.stringify(k1));
-  check('切换前后到期日不变', await acDue() === acDue0, `${await acDue()} vs ${acDue0}`);
-  const acShown = Object.fromEntries((await acFields())
-    .filter(f => ['last_renewed', 'left', 'next_renewal'].includes(f.key)).map(f => [f.key, f.shown]));
-  check('新侧的日期列上表、旧侧撤下表',
-    acShown.next_renewal === true && acShown.last_renewed === false && acShown.left === false, JSON.stringify(acShown));
   const acOv = await (await fetch(APP + 'api/overview')).json();
-  check('推不出到期日的条目照旧被点名，而不是从时间线上静默消失',
-    acOv.undated.some(x => x.kind === acColl.key && x.id === acBare.id && x.missing === '下次续费日'),
-    JSON.stringify(acOv.undated));
-  check('新字段在详情表单里真的有一格可填', await evl(`(() => {
-    const r = (state['${acColl.key}'] || []).find(x => x.id === ${acItem.id});
-    if (!r) return 'no-row';
-    openItemDialog('${acColl.key}', r);
-    const has = !!document.querySelector('#item-fields [data-f="next_renewal"]');
-    document.querySelector('#dlg-item').close();
-    return has;
-  })()`) === true);
-  // 在 next 下改过的下次到期，切回 last 照样不变（按天计，避开月末折不回原日的那几天）
-  const acRow = (await (await fetch(`${APP}api/collections/${acColl.key}/items`)).json()).find(r => r.id === acItem.id);
-  await patch(`/api/items/${acItem.id}`, { ...acRow, cycle: 'days', cycle_days: 30, next_renewal: day(9) });
-  check('改了下次到期，到期日跟着走', await acDue() === day(9), await acDue());
-  await put(`/api/collections/${acColl.id}`, { due_anchor: 'last' });
-  check('切回 last 到期日仍不变', await acDue() === day(9), await acDue());
-
-  // 算不出到期日时点名的必须是真正缺的那一项：last 锚点有两半成因（缺日期 / 缺周期），
-  // 一律报「缺上次续费日」的话，用户打开条目看见日期填着，按提示无从下手
-  const acRow2 = (await (await fetch(`${APP}api/collections/${acColl.key}/items`)).json()).find(r => r.id === acItem.id);
-  await patch(`/api/items/${acItem.id}`, { ...acRow2, cycle: '', last_renewed: day(-5) });
-  check('日期填着、周期空着时点名的是「周期」',
-    (await (await fetch(APP + 'api/overview')).json()).undated
-      .find(x => x.kind === acColl.key && x.id === acItem.id)?.missing === '周期');
-
-  // 提前续费（按日程续费会产生「未来的 last_renewed」，0017 之前不可能出现的合法状态）：
-  // 本期还没开始，照旧画进度条就是「剩 35 天 / 30」配一根空槽，看着像算错了
-  await patch(`/api/items/${acItem.id}`, { ...acRow2, cycle: 'days', cycle_days: 30, last_renewed: day(5) });
+  check('推不出到期日的条目被点名，而不是从时间线上静默消失',
+    acOv.undated.some(x => x.kind === acColl.key && x.id === acBare.id && x.missing === '到期日'), JSON.stringify(acOv.undated));
+  const acFirst = await post(`/api/items/${acBare.id}/renew`, { renewed_at: day(-3) });
+  check('没填日期的条目点「已续费」从付款日起算一期', !!acFirst.due, JSON.stringify(acFirst));
+  const acEnd = await mk(acColl.key, { name: '月末', status: 'Active', cycle: 'monthly', next_renewal: '2026-01-31' });
+  const acRow = async () => (await items(acColl.key)).find(r => r.id === acEnd.id);
+  const acR1 = await post(`/api/items/${acEnd.id}/renew`, { renewed_at: '2026-01-31' });
+  check('续费钳到 2/28 时把账单日 31 记在条目上', acR1.due === '2026-02-28' && (await acRow()).billing_day === 31, JSON.stringify(await acRow()));
+  check('上次续费（本期起始）靠账单日退回 1/31', (await acRow()).last_renewed === '2026-01-31', (await acRow()).last_renewed);
+  const acR2 = await post(`/api/items/${acEnd.id}/renew`, { renewed_at: '2026-02-28' });
+  check('再续一次回到 3/31，不漂移成 3/28', acR2.due === '2026-03-31' && (await acRow()).billing_day === null, JSON.stringify(await acRow()));
+  await post(`/api/items/${acEnd.id}/renew`, { renewed_at: '2026-03-31' });
+  check('4/30 又挂上账单日', (await acRow()).due === '2026-04-30' && (await acRow()).billing_day === 31);
+  await patch(`/api/items/${acEnd.id}`, { next_renewal: '2026-05-15' });
+  check('手改到期日以手填为准，账单日作废', (await acRow()).due === '2026-05-15' && (await acRow()).billing_day === null);
+  check('上次续费是算出来的：写别的值被拒', !(await patch(`/api/items/${acEnd.id}`, { last_renewed: '2026-01-01' })).ok);
+  check('整行回读再 PATCH（带着算出来的上次续费）照常放行',
+    (await patch(`/api/items/${acEnd.id}`, { ...(await acRow()), name: '月末·改名' })).ok && (await acRow()).name === '月末·改名');
+  await fetch(`${APP}api/collections/${acColl.id}`, { method: 'DELETE' });
+  // 提前续费（按日程续费会产生「未来的本期起始」）：本期还没开始，照旧画进度条就是「剩 35 天 / 30」配一根空槽，
+  // 看着像算错了。SIM 库的剩余天数缺省就在表上
+  const acItem = await mk('sims', { name: '提前保了号', status: 'Active', cycle: 'days', cycle_days: 30, next_renewal: day(35) });
   await evl(`loadAll()`);
   await sleep(800);
-  await evl(`switchTab('${acColl.key}')`);
+  await evl(`switchTab('sims')`);
   await sleep(400);
   const acLeft = (await evl(
-    `document.querySelector('#${acColl.key}-body tr[data-id="${acItem.id}"] td[data-k="left"]')?.textContent || ''`))
+    `document.querySelector('#sims-body tr[data-id="${acItem.id}"] td[data-k="left"]')?.textContent || ''`))
     .replace(/\s+/g, ' ');
   check('本期还没开始时不画进度条，改说清本期哪天起算',
     acLeft.includes('剩 35 天') && acLeft.includes(day(5)) && !acLeft.includes('/ 30'), acLeft);
   // 拍在该看的状态下：表格在页面下半，不滚过去截出来的是首页那一屏
-  await evl(`document.querySelector('#${acColl.key}-body tr[data-id="${acItem.id}"]')?.scrollIntoView({ block: 'center' })`);
+  await evl(`document.querySelector('#sims-body tr[data-id="${acItem.id}"]')?.scrollIntoView({ block: 'center' })`);
   await sleep(400);
   await shot('25-early-renew-left');
-  await fetch(`${APP}api/collections/${acColl.id}`, { method: 'DELETE' });
+  await fetch(`${APP}api/items/${acItem.id}`, { method: 'DELETE' });
   await evl(`loadAll()`);
   await sleep(700);
 

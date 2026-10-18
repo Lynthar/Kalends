@@ -12,29 +12,35 @@
 
 </div>
 
-Self-hosted renewal tracker — subscriptions, SIM keep-alives, VPS boxes. One Rust binary, one SQLite file.
+Self-hosted subscription renewal tracker — subscriptions, SIM keep-alives, VPS boxes, anything with a next date. One Rust binary, one SQLite file.
 
 English | [简体中文](README.zh-CN.md)
 
-Everything with a next date goes on one timeline: subscriptions, the prepaid SIM
-you have to top up every 181 days to keep the number, VPS boxes, domains,
-insurance, documents that expire.
+Everything with a next date goes on one timeline: in-app purchases, phone plans,
+VPS boxes, domains, insurance, documents that expire.
 
-I built it to replace a handful of Notion databases: online-only, sluggish past a
-few hundred rows, and with no way to say whether a status counts as spending. The
-data model keeps the same shape — libraries with typed columns — but it comes out
-as one binary plus one SQLite file, no accounts, nothing phoning home. It can run
-on a NAS for months without attention.
+I built it to replace a Notion database. I had been tracking these subscriptions
+in Notion because that is where I already lived, but it has a few drawbacks: it
+only works online, some of what goes in is private and I would rather not have it
+leak, and date arithmetic and parts of the display are limited and awkward. So I
+made my own.
+The tool keeps the same shape for the data — libraries with typed columns — but
+it comes out as one binary plus one SQLite file, no accounts, nothing phoning
+home except the notifications you set up yourself. It can run on a NAS for
+months without attention. You can also put it on a VPS, if there is nothing
+private in the library.
 
 ## Features
 
 - **Seven library templates** — subscriptions, SIM cards, VPS instances,
   domains, insurance, documents, and a blank one. Columns are typed, and the
   type drives sorting, filtering and how a cell renders.
-- **Two ways to express a due date.** Store the next one directly, or store the
-  last renewal and a cycle and let it work the date out. Cycles run from weekly
-  to three-yearly, plus lifetime and an arbitrary number of days — so a 181-day
-  SIM keep-alive is an ordinary setting, not a special case.
+- **One due date per item.** You write the next due date; "last renewed" (the
+  start of the current period) and "days left" are worked out from it. Cycles
+  run from weekly to three-yearly, plus lifetime and an arbitrary number of days
+  — so a 181-day SIM keep-alive is an ordinary setting, not a special case. A
+  billing day on the 29th–31st does not drift: a short month clamps to its last
+  day and the next month comes back to the original day.
 - **Renewing is one click.** Marking an item renewed moves its date forward and
   writes a ledger entry; if you log it late, set the day you actually paid. Each
   library decides where the next period starts: the billing schedule (a VPS
@@ -134,14 +140,12 @@ requests. SMTP always connects directly.
 ## Limitations
 
 - **Single user, deliberately.** No accounts, no permissions. The optional PIN
-  keeps a curious housemate out and nothing more. Two browser tabs left open on
-  stale data can overwrite each other.
-- **Not meant to face the internet.** Put it behind Tailscale or a VPN rather
-  than a public port and a PIN.
+  just keeps a curious housemate out. Two browser tabs left open on stale data
+  can overwrite each other.
 - **The database has to be on local disk.** SQLite locking over SMB or NFS isn't
   reliable; don't put your only copy of the data there.
-- **The interface is Chinese only.** There's no i18n layer, so the UI and the
-  output of `restore` are in Chinese.
+- **The interface is Chinese only, for now.** There's no i18n layer, so the UI
+  and the output of `restore` are in Chinese.
 - **Everything loads up front.** Search is a substring match in the browser over
   names, notes and custom columns, and every entry is drawn at once, with no
   pagination or virtual scrolling. A personal ledger won't notice; tens of

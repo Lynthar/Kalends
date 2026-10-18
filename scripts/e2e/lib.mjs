@@ -96,17 +96,25 @@ export async function calendar() {
 
 // 每个套件都从这份假数据起步；断言里的行数、天数与名字都按它算
 export async function seed(day) {
+  // 按月的周期用日历加法算到期日（与 engine::step_n 同一钳位规则），别拿天数凑
+  const plusMonths = (iso, m) => {
+    const [y, mo, d] = iso.split('-').map(Number);
+    const t = new Date(Date.UTC(y, mo - 1 + m, 1));
+    const last = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 1, 0)).getUTCDate();
+    t.setUTCDate(Math.min(d, last));
+    return t.toISOString().slice(0, 10);
+  };
   await mk('subs', { name: 'Netflix', status: 'Active', price: 15.49, currency: 'USD', cycle: 'monthly', next_renewal: day(3), extra: { category: 'Streaming', payment_method: 'Visa' } });
   await mk('subs', { name: 'ChatGPT Plus', status: 'Active', price: 20, currency: 'USD', cycle: 'monthly', next_renewal: day(45), extra: { category: 'AI', payment_method: 'Master' } });
   await mk('subs', { name: 'iCloud+', status: 'Active', price: 6, currency: 'CNY', cycle: 'monthly', next_renewal: day(10), extra: { category: 'CloudSvc', payment_method: '支付宝' } });
   const mj = await mk('subs', { name: 'Midjourney', status: 'Deferred', extra: { category: 'AI' } });
   await mk('subs', { name: 'Basic Plan', status: 'Active', price: 96, currency: 'USD', cycle: 'annual', next_renewal: day(200), parent_id: mj.id, extra: { category: 'AI', payment_method: 'Visa' } });
   await mk('subs', { name: '旧订阅', status: 'Ended', extra: { category: 'News' } });
-  await mk('sims', { name: '🇬🇧 Giffgaff', status: 'Active', cycle: 'days', cycle_days: 181, last_renewed: day(-175), extra: { forms: ['SIM'], keepalive_action: '发一条短信' } });
-  await mk('sims', { name: '🇺🇸 Ultra', status: 'Active', cycle: 'days', cycle_days: 90, last_renewed: day(-10), extra: { forms: ['eSIM', 'VOIP'], keepalive_action: '充值 $5' } });
-  await mk('vps', { name: 'HostA', status: 'Active', price: 25, currency: 'USD', cycle: 'annual', last_renewed: day(-334), extra: { product: 'VPS-1', purpose: '代理出口', locations: ['东京'], routes: ['CN2 GIA'], cores: 1, ram_gb: 1, storage_gb: 20, storage_type: 'SSD' } });
-  await mk('vps', { name: 'HostB', status: 'Ending', price: 48, currency: 'USD', cycle: 'annual', last_renewed: day(-304), extra: { purpose: '建站', locations: ['洛杉矶'], routes: ['9929'], cores: 2, ram_gb: 4, storage_gb: 60 } });
-  await mk('vps', { name: 'HostC', status: 'Active', price: 320, currency: 'CNY', cycle: 'triennial', last_renewed: day(-60), extra: { purpose: '任务', locations: ['香港', '东京'], routes: ['CMI'], cores: 4, ram_gb: 8, storage_gb: 100 } });
+  await mk('sims', { name: '🇬🇧 Giffgaff', status: 'Active', cycle: 'days', cycle_days: 181, next_renewal: day(6), extra: { forms: ['SIM'], keepalive_action: '发一条短信' } });
+  await mk('sims', { name: '🇺🇸 Ultra', status: 'Active', cycle: 'days', cycle_days: 90, next_renewal: day(80), extra: { forms: ['eSIM', 'VOIP'], keepalive_action: '充值 $5' } });
+  await mk('vps', { name: 'HostA', status: 'Active', price: 25, currency: 'USD', cycle: 'annual', next_renewal: plusMonths(day(-334), 12), extra: { product: 'VPS-1', purpose: '代理出口', locations: ['东京'], routes: ['CN2 GIA'], cores: 1, ram_gb: 1, storage_gb: 20, storage_type: 'SSD' } });
+  await mk('vps', { name: 'HostB', status: 'Ending', price: 48, currency: 'USD', cycle: 'annual', next_renewal: plusMonths(day(-304), 12), extra: { purpose: '建站', locations: ['洛杉矶'], routes: ['9929'], cores: 2, ram_gb: 4, storage_gb: 60 } });
+  await mk('vps', { name: 'HostC', status: 'Active', price: 320, currency: 'CNY', cycle: 'triennial', next_renewal: plusMonths(day(-60), 36), extra: { purpose: '任务', locations: ['香港', '东京'], routes: ['CMI'], cores: 4, ram_gb: 8, storage_gb: 100 } });
   await put('/api/settings', { 'ui.upcoming_days': '30' });
 }
 

@@ -17,11 +17,17 @@ use serde_json::{json, Value};
 use crate::api::{bad, extra_json, extra_str, f, i, missing, s, safe_name, ApiError, R};
 use crate::{db, engine, App};
 
-const ANCHORS: &[&str] = &["next", "last"];
-
-/// 续费之后从哪天起算：`schedule` 按原定日程（账单日不动）、`today` 从操作当天重新计时。
-/// 与 `due_anchor` 正交，语义见 `engine::renew_to`。
+/// 续费之后从哪天起算：`schedule` 按原定日程（账单日不动）、`today` 从付款当天重新计时，见 `engine::renew_to`。
 const RENEW_FROMS: &[&str] = &["schedule", "today"];
+
+/// 到期日只有一种记法（直接存下次到期日）。请求还带着 `due_anchor` 的是没升级的客户端，
+/// 静默忽略会让它以为改成了。
+fn no_due_anchor(b: &Value) -> anyhow::Result<()> {
+    if b.get("due_anchor").is_some() {
+        return Err(bad("到期模型只剩一种（直接存下次到期日），不再接受 due_anchor"));
+    }
+    Ok(())
+}
 
 pub fn router() -> Router<App> {
     Router::new()
@@ -42,8 +48,7 @@ pub fn router() -> Router<App> {
 
 /* ── 库 ─────────────────────────────────────────────────────────── */
 
-const COLL_COLS: &str =
-    "id,key,name,icon,due_anchor,subtitle,subline,verb,note_field,pos,builtin,renew_from";
+const COLL_COLS: &str = "id,key,name,icon,subtitle,subline,verb,note_field,pos,builtin,renew_from";
 
 fn coll_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -51,14 +56,13 @@ fn coll_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "key": r.get::<_, String>(1)?,
         "name": r.get::<_, String>(2)?,
         "icon": r.get::<_, Option<String>>(3)?,
-        "due_anchor": r.get::<_, String>(4)?,
-        "subtitle": r.get::<_, Option<String>>(5)?,
-        "subline": r.get::<_, Option<String>>(6)?,
-        "verb": r.get::<_, Option<String>>(7)?,
-        "note_field": r.get::<_, Option<String>>(8)?,
-        "pos": r.get::<_, i64>(9)?,
-        "builtin": r.get::<_, i64>(10)? != 0,
-        "renew_from": r.get::<_, String>(11)?,
+        "subtitle": r.get::<_, Option<String>>(4)?,
+        "subline": r.get::<_, Option<String>>(5)?,
+        "verb": r.get::<_, Option<String>>(6)?,
+        "note_field": r.get::<_, Option<String>>(7)?,
+        "pos": r.get::<_, i64>(8)?,
+        "builtin": r.get::<_, i64>(9)? != 0,
+        "renew_from": r.get::<_, String>(10)?,
     }))
 }
 
@@ -82,14 +86,6 @@ fn coll_id(conn: &Connection, key: &str) -> anyhow::Result<i64> {
         .ok_or_else(|| missing(format!("库不存在：{key}")))
 }
 
-fn anchor_of(conn: &Connection, id: i64) -> anyhow::Result<String> {
-    Ok(conn.query_row(
-        "SELECT due_anchor FROM collections WHERE id=?1",
-        [id],
-        |r| r.get(0),
-    )?)
-}
-
 /// 新库的键：k<历史用过的最大编号 + 1>。**不能拿 rowid 派生**：SQLite 会复用删掉的
 /// id，而删库按设计保留台账与通知日志的 kind 字符串——新库会捡到旧库的 kind，凭空
 /// 继承旧账、通知去重也会误判。编号要越过所有"曾经用过"的痕迹，不只是现存的库。
@@ -109,18 +105,13 @@ fn next_coll_key(conn: &Connection) -> rusqlite::Result<String> {
 
 async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
     // 传错类型的键会被 `s()` 当成缺席、静默落回模板值——先把形状卡住
-    crate::api::check_shape(&b, &["template", "name", "due_anchor", "renew_from", "icon", "verb"], &[], &[])?;
+    crate::api::check_shape(&b, &["template", "name", "renew_from", "icon", "verb"], &[], &[])?;
+    no_due_anchor(&b)?;
     let tpl = match s(&b, "template") {
         Some(id) => Some(template(&id).ok_or_else(|| bad(format!("未知模板：{id}")))?),
         None => None,
     };
     let name = s(&b, "name").ok_or_else(|| bad("库名不能为空"))?;
-    let anchor = s(&b, "due_anchor")
-        .or_else(|| tpl.map(|t| t.anchor.to_string()))
-        .unwrap_or_else(|| "last".into());
-    if !ANCHORS.contains(&anchor.as_str()) {
-        return Err(bad(format!("未知的到期模型：{anchor}")).into());
-    }
     let renew_from = s(&b, "renew_from")
         .or_else(|| tpl.map(|t| t.renew_from.to_string()))
         .unwrap_or_else(|| TPL.renew_from.into());
@@ -142,13 +133,12 @@ async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
     // 空壳库，界面上是张点不动的空表
     let tx = conn.unchecked_transaction()?;
     tx.execute(
-        "INSERT INTO collections(key,name,icon,due_anchor,subtitle,subline,verb,note_field,pos,builtin,renew_from)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,0,?10)",
+        "INSERT INTO collections(key,name,icon,subtitle,subline,verb,note_field,pos,builtin,renew_from)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0,?9)",
         params![
             key,
             name,
             take("icon", tpl.and_then(|t| opt(t.icon))),
-            anchor,
             tpl.and_then(|t| opt(t.subtitle)),
             tpl.and_then(|t| opt(t.subline)),
             take("verb", tpl.and_then(|t| opt(t.verb))),
@@ -158,7 +148,7 @@ async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
         ],
     )?;
     let id = tx.last_insert_rowid();
-    seed_fields(&tx, &key, &anchor, tpl)?;
+    seed_fields(&tx, &key, tpl)?;
     let row = tx.query_row(
         &format!("SELECT {COLL_COLS} FROM collections WHERE id=?1"),
         [id],
@@ -201,9 +191,7 @@ struct Template {
     label: &'static str,
     icon: &'static str,
     desc: &'static str,
-    anchor: &'static str,
-    /// 续费之后从哪天起算，与 anchor 正交。默认 `schedule`（账单日不动）；
-    /// 只有保号这类"窗口从操作当天重新计时"的才写 `today`
+    /// 续费之后从哪天起算。默认 `schedule`（账单日不动）；只有保号这类"窗口从付款当天重新计时"的才写 `today`
     renew_from: &'static str,
     verb: &'static str,
     /// 名称格下方小字取哪个字段（不进日历标题，那是 subtitle）
@@ -227,7 +215,6 @@ const TPL: Template = Template {
     label: "",
     icon: "",
     desc: "",
-    anchor: "last",
     renew_from: "schedule",
     verb: "",
     subline: "",
@@ -253,7 +240,6 @@ const TEMPLATES: &[Template] = &[
         label: "订阅",
         icon: "🔁",
         desc: "会员与服务的周期续费",
-        anchor: "next",
         status: RENEWAL_STATUS_VOCAB,
         base: &[("price", "价格", 1), ("next_renewal", "下次续费", 1)],
         extra: &[
@@ -295,6 +281,8 @@ const TEMPLATES: &[Template] = &[
         base: &[
             ("price", "", 0),
             ("cycle", "", 0),
+            ("last_renewed", "", 1),
+            ("left", "", 1),
             ("notes", "", 0),
             ("url", "", 0),
         ],
@@ -330,7 +318,7 @@ const TEMPLATES: &[Template] = &[
         subline: "product",
         // 商家是条目名，产品名拼进到期时间线与日历标题
         subtitle: "product",
-        base: &[("name", "商家", 1), ("cycle", "", 0), ("notes", "", 0)],
+        base: &[("name", "商家", 1), ("cycle", "", 0), ("last_renewed", "", 1), ("left", "", 1), ("notes", "", 0)],
         extra: &[
             Field {
                 key: "locations",
@@ -427,7 +415,6 @@ const TEMPLATES: &[Template] = &[
         label: "域名",
         icon: "🌐",
         desc: "域名注册与到期",
-        anchor: "next",
         verb: "续费",
         base: &[("next_renewal", "到期日", 1)],
         extra: &[
@@ -458,7 +445,6 @@ const TEMPLATES: &[Template] = &[
         label: "保险",
         icon: "🛡️",
         desc: "保单与续保日",
-        anchor: "next",
         verb: "续保",
         subline: "policy_no",
         base: &[("next_renewal", "保单到期", 1)],
@@ -503,7 +489,6 @@ const TEMPLATES: &[Template] = &[
         label: "证件",
         icon: "🪪",
         desc: "护照签证等有效期",
-        anchor: "next",
         verb: "换证",
         // 证件多半没有周期费用：费用与周期退进详情表单，不占表格列位
         base: &[
@@ -554,7 +539,6 @@ async fn templates() -> R {
                 "label": t.label,
                 "icon": t.icon,
                 "desc": t.desc,
-                "due_anchor": t.anchor,
                 "renew_from": t.renew_from,
                 "verb": t.verb,
                 // 域字段的显示名，供选择器预览；含只进详情表单（shown=0）的那些
@@ -580,44 +564,27 @@ const RENEWAL_STATUS_VOCAB: &str = r#"[{"v":"Active","spend":1,"alert":1,"timeli
 /// (键, 显示名, 类型, 数据源, 默认上表, 序)
 type FieldDef = (&'static str, &'static str, &'static str, &'static str, i64, i64);
 
-/// 到期模型决定注册哪一侧的日期字段。建库播种与**事后切换到期模型**共用这一份：
-/// 切换那条路非补不可——否则 `due_from` 改读一个界面上根本造不出来的字段，
-/// 整库到期日静默消失（旧列还显示着值，看着一切正常，时间线却空了）。
-fn anchor_fields(anchor: &str) -> &'static [FieldDef] {
-    if anchor == "next" {
-        &[("next_renewal", "下次到期", "date", "col", 1, 40)]
-    } else {
-        &[
-            ("last_renewed", "上次续费", "date", "col", 1, 40),
-            ("left", "剩余天数", "num", "calc", 1, 41),
-        ]
-    }
-}
-
 /// 每个库都有的通用字段（模板的 `base` 只能调整这些）。序号留了空档，模板的域字段插在 10 段。
-fn generic_defs(anchor: &str) -> Vec<FieldDef> {
-    let mut defs: Vec<FieldDef> = vec![
+/// 日期只有「下次到期」一列可填；「上次续费」（本期起始日）与「剩余天数」是算出来的，缺省不上表。
+fn generic_defs() -> Vec<FieldDef> {
+    vec![
         ("name", "名称", "text", "col", 1, 1),
         ("status", "状态", "status", "col", 1, 2),
         // 币种不再是自己一列：它并进费用格里，跟着金额一起填（见 fx.rs / 迁移 0013）
         ("price", "费用", "num", "col", 1, 30),
         ("cycle", "周期", "sel", "col", 1, 32),
-    ];
-    defs.extend_from_slice(anchor_fields(anchor));
-    // 备注不被引擎读，是一列普通的自定义列（src='extra'、builtin=0，与模板的域字段同权）
-    defs.push(("notes", "备注", "text", "extra", 1, 50));
-    defs.push(("cycle_days", "周期天数", "num", "col", 0, 60));
-    defs.push(("url", "链接", "text", "col", 0, 61));
-    defs
+        ("next_renewal", "下次到期", "date", "col", 1, 40),
+        ("last_renewed", "上次续费", "date", "calc", 0, 41),
+        ("left", "剩余天数", "num", "calc", 0, 42),
+        // 备注不被引擎读，是一列普通的自定义列（src='extra'、builtin=0，与模板的域字段同权）
+        ("notes", "备注", "text", "extra", 1, 50),
+        ("cycle_days", "周期天数", "num", "col", 0, 60),
+        ("url", "链接", "text", "col", 0, 61),
+    ]
 }
 
-fn seed_fields(
-    conn: &Connection,
-    key: &str,
-    anchor: &str,
-    tpl: Option<&Template>,
-) -> anyhow::Result<()> {
-    let mut defs = generic_defs(anchor);
+fn seed_fields(conn: &Connection, key: &str, tpl: Option<&Template>) -> anyhow::Result<()> {
+    let mut defs = generic_defs();
     for (k, name, shown) in tpl.map_or(&[][..], |t| t.base) {
         let Some(d) = defs.iter_mut().find(|d| d.0 == *k) else {
             continue;
@@ -674,10 +641,11 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
     // 传错类型的键会被 `pick`/`take` 当成缺席、静默保持原值——先把形状卡住
     crate::api::check_shape(
         &b,
-        &["name", "icon", "due_anchor", "renew_from", "subtitle", "subline", "verb", "note_field"],
+        &["name", "icon", "renew_from", "subtitle", "subline", "verb", "note_field"],
         &["pos"],
         &[],
     )?;
+    no_due_anchor(&b)?;
     let conn = app.db.lock().unwrap();
     let cur = conn
         .query_row(
@@ -689,10 +657,6 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
         .ok_or_else(|| missing("库不存在"))?;
     // 逐字段合并：只改传来的键，其余保留
     let pick = |k: &str| -> Option<String> { s(&b, k) };
-    let anchor = pick("due_anchor").unwrap_or_else(|| cur["due_anchor"].as_str().unwrap().into());
-    if !ANCHORS.contains(&anchor.as_str()) {
-        return Err(bad(format!("未知的到期模型：{anchor}")).into());
-    }
     let renew_from =
         pick("renew_from").unwrap_or_else(|| cur["renew_from"].as_str().unwrap().into());
     if !RENEW_FROMS.contains(&renew_from.as_str()) {
@@ -711,64 +675,12 @@ async fn update(State(app): State<App>, Path(id): Path<i64>, Json(b): Json<Value
         }
     };
     let pos = i(&b, "pos").unwrap_or_else(|| cur["pos"].as_i64().unwrap());
-    let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "UPDATE collections SET name=?1,icon=?2,due_anchor=?3,subtitle=?4,subline=?5,
-         verb=?6,note_field=?7,pos=?8,renew_from=?9 WHERE id=?10",
-        params![
-            name,
-            take("icon"),
-            anchor,
-            take("subtitle"),
-            take("subline"),
-            take("verb"),
-            take("note_field"),
-            pos,
-            renew_from,
-            id
-        ],
+    conn.execute(
+        "UPDATE collections SET name=?1,icon=?2,subtitle=?3,subline=?4,verb=?5,note_field=?6,pos=?7,renew_from=?8
+         WHERE id=?9",
+        params![name, take("icon"), take("subtitle"), take("subline"), take("verb"), take("note_field"), pos, renew_from, id],
     )?;
-    // 换到期模型：新锚点那侧的日期字段补进注册表（见 anchor_fields 的注释）并上表，旧侧撤下表；
-    // 已注册过的保留用户改过的显示名。旧侧的值留着，但续费不再推它，挂在表上就是一列过期数据。
-    let old_anchor = cur["due_anchor"].as_str().unwrap_or_default();
-    if anchor != old_anchor {
-        let key = cur["key"].as_str().unwrap_or_default();
-        for (k, fname, ftype, src, shown, fpos) in anchor_fields(&anchor) {
-            tx.execute(
-                "INSERT INTO fields(id,tbl,key,name,ftype,src,shown,pos,builtin,options)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,1,'[]')
-                 ON CONFLICT(tbl,key) DO UPDATE SET shown=excluded.shown",
-                params![db::next_id(&tx, "fields")?, key, k, fname, ftype, src, shown, fpos],
-            )?;
-        }
-        for (k, ..) in anchor_fields(old_anchor) {
-            tx.execute("UPDATE fields SET shown=0 WHERE tbl=?1 AND key=?2", params![key, k])?;
-        }
-        reanchor_items(&tx, id, old_anchor, &anchor)?;
-    }
-    tx.commit()?;
     Ok(Json(json!({ "ok": true })))
-}
-
-/// 换到期模型时把每个条目的锚点日期折到新侧，让切换前后的到期日一致（`engine::reanchor`）；
-/// 推不出的条目（买断、无周期、缺日期）不动，照旧由首页「算不出到期日」点名。调用方负责事务。
-fn reanchor_items(conn: &Connection, coll_id: i64, from: &str, to: &str) -> anyhow::Result<()> {
-    let col = if to == "next" { "next_renewal" } else { "last_renewed" };
-    let rows: Vec<Value> = conn
-        .prepare(&format!("SELECT {ITEM_COLS} FROM items WHERE collection_id=?1"))?
-        .query_map([coll_id], item_row)?
-        .collect::<rusqlite::Result<_>>()?;
-    for r in rows {
-        let (cycle, days) = (r["cycle"].as_str().unwrap_or(""), r["cycle_days"].as_i64());
-        let Some(d) = due_of(&r, from).and_then(|due| engine::reanchor(to, due, cycle, days)) else {
-            continue;
-        };
-        conn.execute(
-            &format!("UPDATE items SET {col}=?1,updated_at=datetime('now') WHERE id=?2 AND {col} IS NOT ?1"),
-            params![d.to_string(), r["id"].as_i64()],
-        )?;
-    }
-    Ok(())
 }
 
 // 库顺序：整份 id 序落成 pos，决定标签行的排列。
@@ -816,7 +728,7 @@ async fn remove(State(app): State<App>, Path(id): Path<i64>) -> R {
 // 后加的列一律追加在末尾，不必动 item_row 里既有的下标。pos 不在 WRITE_COLS 里：
 // 手动序只由 /items/order 改，整行 PATCH 碰不到它。
 const ITEM_COLS: &str = "id,collection_id,name,parent_id,status,price,currency,cycle,cycle_days,\
-                         next_renewal,last_renewed,url,logo,extra,created_at,updated_at,pos,auto_renew";
+                         next_renewal,billing_day,url,logo,extra,created_at,updated_at,pos,auto_renew";
 
 pub fn item_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -830,7 +742,7 @@ pub fn item_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "cycle": r.get::<_, Option<String>>(7)?,
         "cycle_days": crate::db::as_int(r.get_ref(8)?),
         "next_renewal": r.get::<_, Option<String>>(9)?,
-        "last_renewed": r.get::<_, Option<String>>(10)?,
+        "billing_day": engine::billing_day(r.get_ref(10)?),
         "url": r.get::<_, Option<String>>(11)?,
         "logo": r.get::<_, Option<String>>(12)?,
         "extra": extra_json(r.get::<_, Option<String>>(13)?),
@@ -841,10 +753,9 @@ pub fn item_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     }))
 }
 
-/// 一个库里的条目；带上按库到期模型算出的到期日与剩余天数。
+/// 一个库里的条目；带上算出来的到期日、剩余天数与本期起始日（`last_renewed`，只读）。
 pub fn items_of(conn: &Connection, key: &str) -> anyhow::Result<Vec<Value>> {
     let id = coll_id(conn, key)?;
-    let anchor = anchor_of(conn, id)?;
     // pos 为空的排在最后（迁移之前建的行不会有，理论上不该出现，出现了也别把它们藏起来）
     let mut stmt = conn.prepare(&format!(
         "SELECT {ITEM_COLS} FROM items WHERE collection_id=?1 ORDER BY pos IS NULL, pos, id"
@@ -854,22 +765,22 @@ pub fn items_of(conn: &Connection, key: &str) -> anyhow::Result<Vec<Value>> {
         .collect::<rusqlite::Result<_>>()?;
     let today = engine::today();
     for r in &mut rows {
-        let due = due_of(r, &anchor);
+        let due = due_of(r);
         r["due"] = json!(due.map(|d| d.to_string()));
         r["days_left"] = json!(due.map(|d| (d - today).num_days()));
+        r["last_renewed"] = json!(period_start_of(r).map(|d| d.to_string()));
     }
     Ok(rows)
 }
 
-/// 到期日：`due_anchor='next'` 直接读下次续费日，否则从上次续费按周期推一步。
-pub fn due_of(r: &Value, anchor: &str) -> Option<NaiveDate> {
-    engine::due_from(
-        anchor,
-        r["cycle"].as_str().unwrap_or(""),
-        r["cycle_days"].as_i64(),
-        r["next_renewal"].as_str(),
-        r["last_renewed"].as_str(),
-    )
+fn due_of(r: &Value) -> Option<NaiveDate> {
+    engine::due_from(r["cycle"].as_str().unwrap_or(""), r["next_renewal"].as_str())
+}
+
+/// 本期起始日（界面上的「上次续费」）：到期日往前退一期，账单日照顾月末钳位。
+fn period_start_of(r: &Value) -> Option<NaiveDate> {
+    let bd = r["billing_day"].as_u64().and_then(|d| u32::try_from(d).ok());
+    engine::period_start(due_of(r)?, r["cycle"].as_str().unwrap_or(""), r["cycle_days"].as_i64(), bd)
 }
 
 async fn items_list(State(app): State<App>, Path(key): Path<String>) -> R {
@@ -1041,8 +952,8 @@ fn normalize_item(conn: &Connection, coll: i64, b: &mut Value, cur: Option<&Valu
     if let Some(st) = b.get("status").and_then(Value::as_str) {
         b["status"] = json!(respell_status(conn, &key, st)?);
     }
-    // 这几个日期真列不看注册表：锚点另一侧那列与自动续费的开启日都不注册，照样被读、被导出
-    for k in ["next_renewal", "last_renewed", "auto_renew"] {
+    // 两个日期真列不看注册表：自动续费的开启日不注册，照样被读、被导出
+    for k in ["next_renewal", "auto_renew"] {
         if let Some(v) = b.get(k).and_then(Value::as_str) {
             b[k] = json!(normalize_shaped("date", v)?);
         }
@@ -1083,7 +994,6 @@ fn item_values(b: &Value) -> anyhow::Result<Vec<rusqlite::types::Value>> {
         s(b, "cycle").map_or(V::Null, V::from),
         i(b, "cycle_days").map_or(V::Null, V::from),
         s(b, "next_renewal").map_or(V::Null, V::from),
-        s(b, "last_renewed").map_or(V::Null, V::from),
         s(b, "url").map_or(V::Null, V::from),
         extra_str(b).map_or(V::Null, V::from),
         s(b, "auto_renew").map_or(V::Null, V::from),
@@ -1093,7 +1003,7 @@ fn item_values(b: &Value) -> anyhow::Result<Vec<rusqlite::types::Value>> {
 // logo 不在可写列里：文件名由服务端生成、删条目按行内名字删文件——放开它就能把 A 的
 // 文件名写进 B，删 B 时连 A 的图标一起删掉。上传/抓取/清除各有专用端点。
 const WRITE_COLS: &str = "name,parent_id,status,price,currency,cycle,cycle_days,\
-                          next_renewal,last_renewed,url,extra,auto_renew";
+                          next_renewal,url,extra,auto_renew";
 
 /// 条目写入口的类型校验：出现的键必须是它该有的类型（`api::check_shape`），logo 带非空值
 /// 直接拒——`null`/`""` 按「不在可写集」忽略，整行回读再 PATCH 回来的用法才过得去。
@@ -1107,10 +1017,20 @@ fn check_item_shape(b: &Value) -> anyhow::Result<()> {
     }
     crate::api::check_shape(
         b,
-        &["name", "status", "currency", "cycle", "next_renewal", "last_renewed", "url", "auto_renew"],
+        &["name", "status", "currency", "cycle", "next_renewal", "url", "auto_renew"],
         &["parent_id", "cycle_days"],
         &["price"],
     )
+}
+
+/// `last_renewed`（本期起始日）是算出来的，写入口不收。整行回读再 PATCH 的用法会把它连同 `next_renewal`
+/// 一起带回来，这种回声忽略；单独带着它、不带到期日，是还按旧模型把它当日期写的客户端，400 说清去处。
+fn check_computed_keys(b: &Value) -> anyhow::Result<()> {
+    let blank = |v: &Value| v.is_null() || v.as_str().is_some_and(|x| x.trim().is_empty());
+    if b.get("last_renewed").is_some_and(|v| !blank(v)) && b.get("next_renewal").is_none() {
+        return Err(bad("上次续费是算出来的（到期日往前一期）：改到期日 next_renewal，或记一笔续费"));
+    }
+    Ok(())
 }
 
 /// cycle='days' 缺天数就算不出到期日，周期还显示成 "Every 0 days"。判规范化之后的值；`cur` 是这一行的
@@ -1181,6 +1101,7 @@ fn check_extra_keys(conn: &Connection, coll: i64, b: &Value, cur: Option<&Value>
 
 pub fn insert_item(conn: &Connection, coll: i64, b: &Value) -> anyhow::Result<i64> {
     check_item_shape(b)?;
+    check_computed_keys(b)?;
     check_extra_keys(conn, coll, b, None)?;
     check_parent(conn, coll, None, i(b, "parent_id"))?;
     let mut b = b.clone();
@@ -1219,6 +1140,7 @@ pub fn update_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<()> 
         .optional()?
         .ok_or_else(|| missing("条目不存在"))?;
     check_item_shape(b)?;
+    check_computed_keys(b)?;
     let coll = cur["collection_id"].as_i64().unwrap_or_default();
     check_extra_keys(conn, coll, b, Some(&cur))?;
     // 规范化**只作用在这次请求带来的键上**，所以要赶在合并之前：拿合并后的整行去过校验，
@@ -1239,10 +1161,12 @@ pub fn update_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<()> 
         .enumerate()
         .map(|(n, (c, v))| (format!("{c}=?{},", n + 1), v))
         .unzip();
+    // 手填的到期日以手填那天为准：月末钳位记下的账单日随之作废（`engine::Moved`）
+    let reset = if incoming.get("next_renewal").is_some() { "billing_day=NULL," } else { "" };
     vals.push(rusqlite::types::Value::from(id));
     conn.execute(
         &format!(
-            "UPDATE items SET {}updated_at=datetime('now') WHERE id=?{}",
+            "UPDATE items SET {}{reset}updated_at=datetime('now') WHERE id=?{}",
             sets.concat(),
             vals.len()
         ),
@@ -1338,19 +1262,7 @@ async fn items_bulk_delete(State(app): State<App>, Json(b): Json<Value>) -> R {
     Ok(Json(json!({ "ok": true, "deleted": deleted })))
 }
 
-type RenewRow = (
-    String,
-    String,
-    String,
-    Option<f64>,
-    Option<String>,
-    Option<String>,
-    Option<i64>,
-    Option<String>,
-    Option<String>,
-    String,
-    String,
-);
+type RenewRow = (String, String, Option<f64>, Option<String>, Option<String>, Option<i64>, Option<String>, Option<u32>, String, String);
 
 /// 一笔续费的账面。金额与币种缺省取条目现值；`auto` 只由自动续费作业置位，接口不收。
 struct Payment {
@@ -1379,47 +1291,32 @@ pub fn renew_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<Value
     renew(conn, id, &Payment { paid_on, amount: f(b, "amount"), currency: paid_in, note: s(b, "note"), auto: false })
 }
 
-/// 记一笔续费：写台账并按库的到期模型推进日期。
-/// `anchor='next'` 推进 `next_renewal`（逾期则连推到付款日之后），`anchor='last'` 把上次续费推到付款日那一期。
+/// 记一笔续费：写台账并推进到期日（`engine::renew_to`），两件事同一事务。
 fn renew(conn: &Connection, id: i64, pay: &Payment) -> anyhow::Result<Value> {
     let paid_on = pay.paid_on;
     let row: Option<RenewRow> = conn
         .query_row(
-            "SELECT c.key, c.due_anchor, c.renew_from, i.price, i.currency,
-                    i.cycle, i.cycle_days, i.next_renewal, i.last_renewed, i.name, c.name
+            "SELECT c.key, c.renew_from, i.price, i.currency, i.cycle, i.cycle_days,
+                    i.next_renewal, i.billing_day, i.name, c.name
              FROM items i JOIN collections c ON c.id=i.collection_id WHERE i.id=?1",
             [id],
             |r| {
                 Ok((
                     r.get(0)?,
                     r.get(1)?,
-                    r.get(2)?,
-                    crate::db::as_real(r.get_ref(3)?),
+                    crate::db::as_real(r.get_ref(2)?),
+                    r.get(3)?,
                     r.get(4)?,
-                    r.get(5)?,
-                    crate::db::as_int(r.get_ref(6)?),
-                    r.get(7)?,
+                    crate::db::as_int(r.get_ref(5)?),
+                    r.get(6)?,
+                    engine::billing_day(r.get_ref(7)?),
                     r.get(8)?,
                     r.get(9)?,
-                    r.get(10)?,
                 ))
             },
         )
         .optional()?;
-    let Some((
-        key,
-        anchor,
-        renew_from,
-        price,
-        currency,
-        cycle,
-        cycle_days,
-        next,
-        last,
-        item_name,
-        coll_name,
-    )) = row
-    else {
+    let Some((key, renew_from, price, currency, cycle, cycle_days, next, billing_day, item_name, coll_name)) = row else {
         return Err(missing("条目不存在"));
     };
     // 记账与推日期是一件事：只落成一半的话，账记了而到期日没动，界面照旧显示逾期，
@@ -1442,51 +1339,23 @@ fn renew(conn: &Connection, id: i64, pay: &Payment) -> anyhow::Result<Value> {
             pay.auto,
         ],
     )?;
-    // 日期该落在哪天由 engine 那个纯函数说了算——四种组合都在那里，且有单测钉着
-    let day = |s: &Option<String>| {
-        s.as_deref()
-            .and_then(|v| NaiveDate::parse_from_str(v, "%Y-%m-%d").ok())
-    };
+    // 日期该落在哪天由 engine 那个纯函数说了算：两种起算、钳位记账单日、年份封顶都在那里，单测钉着
     let cy = cycle.as_deref().unwrap_or_default();
-    let moved = engine::renew_to(
-        &anchor,
-        &renew_from,
-        cy,
-        cycle_days,
-        day(&next),
-        day(&last),
-        paid_on,
-    );
-    let col = if anchor == "next" {
-        "next_renewal"
-    } else {
-        "last_renewed"
-    };
-    if let Some(d) = moved {
+    let due = engine::due_from(cy, next.as_deref());
+    let moved = engine::renew_to(&renew_from, cy, cycle_days, due, billing_day, paid_on);
+    if let Some(m) = moved {
         tx.execute(
-            &format!("UPDATE items SET {col}=?1,updated_at=datetime('now') WHERE id=?2"),
-            params![d.to_string(), id],
+            "UPDATE items SET next_renewal=?1,billing_day=?2,updated_at=datetime('now') WHERE id=?3",
+            params![m.due.to_string(), m.billing_day, id],
         )?;
     }
-    // 顺带回一个 due：界面据此如实报出"下次到期是哪天"。锚点被拽走过的人一眼能看见，
-    // 而算日期的仍然只有 engine 一处——前端自己再算一遍就又是两份会各说各话的实现
-    let moved = moved.map(|d| d.to_string());
-    let due = engine::due_from(
-        &anchor,
-        cy,
-        cycle_days,
-        if anchor == "next" { moved.as_deref() } else { None },
-        if anchor == "next" { None } else { moved.as_deref() },
-    );
     // 自动记的账必须真把到期日推过账单日：推不动（年份封顶之类）还落账的话，每一轮都会再记一笔
-    if pay.auto && due.is_none_or(|d| d <= paid_on) {
+    if pay.auto && moved.is_none_or(|m| m.due <= paid_on) {
         anyhow::bail!("自动续费推不动条目 {id}（账单日 {paid_on}），这笔没记");
     }
     tx.commit()?;
-    Ok(json!({
-        col: moved,
-        "due": due.map(|d| d.to_string()),
-    }))
+    // 回 due 让界面如实报"下次到期是哪天"，推不动就是 null（界面据此开表单让人填）；算日期的仍然只有 engine 一处
+    Ok(json!({ "due": moved.map(|m| m.due.to_string()) }))
 }
 
 /// 自动续费：归它管、账单日已过的条目逐期各记一笔（日期即各期账单日），追到今天为止；返回记了几笔。
@@ -2234,7 +2103,7 @@ mod tests {
     fn seeded_by_template(conn: &Connection, id: &str) -> Vec<Row> {
         let t = template(id).unwrap_or_else(|| panic!("模板 {id} 不存在"));
         let tbl = format!("tpl_{id}");
-        seed_fields(conn, &tbl, t.anchor, Some(t)).unwrap();
+        seed_fields(conn, &tbl, Some(t)).unwrap();
         fields_of(conn, &tbl)
     }
 
@@ -2282,28 +2151,18 @@ mod tests {
         let conn = crate::db::fresh_in_memory().unwrap();
         for id in ["subs", "sims", "vps"] {
             let t = template(id).unwrap();
-            let got: (String, String, String, String, String, String) = conn
+            let got: (String, String, String, String, String) = conn
                 .query_row(
-                    "SELECT due_anchor, renew_from, coalesce(subtitle,''), coalesce(subline,''),
+                    "SELECT renew_from, coalesce(subtitle,''), coalesce(subline,''),
                             coalesce(verb,''), coalesce(note_field,'')
                        FROM collections WHERE key=?1",
                     [id],
-                    |r| {
-                        Ok((
-                            r.get(0)?,
-                            r.get(1)?,
-                            r.get(2)?,
-                            r.get(3)?,
-                            r.get(4)?,
-                            r.get(5)?,
-                        ))
-                    },
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                 )
                 .unwrap();
             assert_eq!(
                 got,
                 (
-                    t.anchor.to_string(),
                     t.renew_from.to_string(),
                     t.subtitle.to_string(),
                     t.subline.to_string(),
@@ -2425,18 +2284,18 @@ mod tests {
     }
 
     /// 日期年份限 1..=9999（chrono 的 `%Y` 吃带符号与五位年，ICS 随之写出 9 位 DTSTART）。两个日期
-    /// 真列不论注册与否都按日期判：锚点另一侧那列不在注册表里，从前整条跳过校验。
+    /// 真列不论注册与否都按日期判：自动续费的开启日不在注册表里，从前整条跳过校验。
     #[test]
-    fn dates_have_four_digit_years_and_both_date_columns_are_always_checked() {
+    fn dates_have_four_digit_years_and_unregistered_date_columns_are_checked_too() {
         for bad_one in ["+12345-01-01", "0000-01-01", "-0001-01-01"] {
             assert!(normalize_shaped("date", bad_one).is_err(), "{bad_one} 不该放行");
         }
         assert_eq!(normalize_shaped("date", "0001-01-01").unwrap(), "0001-01-01");
         let conn = fresh();
         let subs = coll(&conn, "subs");
-        assert!(insert_item(&conn, subs, &json!({ "name": "A", "last_renewed": "去年" })).is_err());
-        let id = insert_item(&conn, subs, &json!({ "name": "A", "last_renewed": "2026-8-5" })).unwrap();
-        assert_eq!(one::<String>(&conn, "SELECT last_renewed FROM items WHERE id=?1", [id]), "2026-08-05");
+        assert!(insert_item(&conn, subs, &json!({ "name": "A", "auto_renew": "去年" })).is_err());
+        let id = insert_item(&conn, subs, &json!({ "name": "A", "auto_renew": "2026-8-5" })).unwrap();
+        assert_eq!(one::<String>(&conn, "SELECT auto_renew FROM items WHERE id=?1", [id]), "2026-08-05");
     }
 
     /// extra 的值按注册表的类型判：有形状的要是文本并规范化，数字列要是数，单选是文本，多选收文本或
@@ -2692,7 +2551,6 @@ mod tests {
         assert_eq!(keys, ["subs", "sims", "vps"]);
         for r in &rows {
             assert!(r["builtin"] == json!(true) && r["id"].is_i64() && r["pos"].is_i64(), "{r}");
-            assert!(ANCHORS.contains(&r["due_anchor"].as_str().unwrap()), "{r}");
             assert!(RENEW_FROMS.contains(&r["renew_from"].as_str().unwrap()), "{r}");
         }
     }
@@ -2707,12 +2565,12 @@ mod tests {
         for t in TEMPLATES {
             assert!(!t.id.is_empty() && ids.insert(t.id), "模板 id 重复或为空：{}", t.id);
             assert!(!t.label.is_empty() && !t.desc.is_empty(), "{}：选择器要显示 label 与 desc", t.id);
-            assert!(ANCHORS.contains(&t.anchor) && RENEW_FROMS.contains(&t.renew_from), "{}", t.id);
+            assert!(RENEW_FROMS.contains(&t.renew_from), "{}", t.id);
             let tbl = format!("chk_{}", t.id);
-            seed_fields(&conn, &tbl, t.anchor, Some(t)).unwrap();
-            let generic: Vec<&str> = generic_defs(t.anchor).iter().map(|d| d.0).collect();
+            seed_fields(&conn, &tbl, Some(t)).unwrap();
+            let generic: Vec<&str> = generic_defs().iter().map(|d| d.0).collect();
             for (k, name, shown) in t.base {
-                assert!(generic.contains(k), "{}：base 调整了这个到期模型不会播下的字段 {k}", t.id);
+                assert!(generic.contains(k), "{}：base 调整了通用字段里没有的键 {k}", t.id);
                 let (got_name, got_shown): (String, i64) = conn
                     .query_row("SELECT name, shown FROM fields WHERE tbl=?1 AND key=?2", params![tbl, k], |r| {
                         Ok((r.get(0)?, r.get(1)?))
@@ -2748,16 +2606,16 @@ mod tests {
     #[test]
     fn seeded_status_vocabularies_carry_their_semantics() {
         let conn = fresh();
-        let vocab = |tpl: &str, anchor: &str| -> Vec<Value> {
+        let vocab = |tpl: &str| -> Vec<Value> {
             let tbl = format!("v_{tpl}");
-            seed_fields(&conn, &tbl, anchor, template(tpl)).unwrap();
+            seed_fields(&conn, &tbl, template(tpl)).unwrap();
             let options: String = one(&conn, "SELECT options FROM fields WHERE tbl=?1 AND key='status'", [&tbl]);
             serde_json::from_str(&options).unwrap()
         };
         let vals = |opts: &[Value]| opts.iter().map(|o| o["v"].as_str().unwrap().to_string()).collect::<Vec<_>>();
-        let blank = vocab("blank", "last");
+        let blank = vocab("blank");
         assert_eq!(vals(&blank), ["Active", "Planned", "Ending", "Ended"]);
-        let subs = vocab("subs", "next");
+        let subs = vocab("subs");
         assert_eq!(vals(&subs), ["Active", "Planned", "Deferred", "Unused", "Ending", "Ended"]);
         let sem = |opts: &[Value], v: &str| {
             let o = opts.iter().find(|o| o["v"] == v).unwrap();
@@ -2800,7 +2658,7 @@ mod tests {
         let due = (engine::today() + chrono::Days::new(5)).to_string();
         let ok = insert_item(&conn, coll(&conn, "subs"), &json!({ "name": "好", "status": "Active", "price": 5, "currency": "USD", "cycle": "monthly", "next_renewal": due })).unwrap();
         let price = insert_item(&conn, coll(&conn, "subs"), &json!({ "name": "坏价", "status": "Active", "currency": "USD", "cycle": "monthly", "next_renewal": due })).unwrap();
-        let days = insert_item(&conn, coll(&conn, "sims"), &json!({ "name": "坏天数", "status": "Active", "cycle": "days", "cycle_days": 30, "last_renewed": due })).unwrap();
+        let days = insert_item(&conn, coll(&conn, "sims"), &json!({ "name": "坏天数", "status": "Active", "cycle": "days", "cycle_days": 30, "next_renewal": due })).unwrap();
         conn.execute("UPDATE items SET price='12,50' WHERE id=?1", [price]).unwrap();
         conn.execute("UPDATE items SET cycle_days=1.5 WHERE id=?1", [days]).unwrap();
 
@@ -2808,8 +2666,9 @@ mod tests {
         assert!(ups.iter().any(|u| u["id"] == ok) && ups.iter().any(|u| u["id"] == price));
         let gaps = engine::uncounted(&conn).unwrap();
         assert!(gaps.iter().any(|g| g["id"] == price && g["missing"] == "金额"), "{gaps:?}");
-        let und = engine::undated(&conn).unwrap();
-        assert!(und.iter().any(|u| u["id"] == days && u["missing"] == "周期天数"), "{und:?}");
+        // 到期日是存着的，天数读不出只让它推不动：仍在时间线上、不进点名清单
+        assert!(ups.iter().any(|u| u["id"] == days));
+        assert!(engine::undated(&conn).unwrap().iter().all(|u| u["id"] != days));
         assert!(items_of(&conn, "subs").unwrap().iter().any(|r| r["id"] == price && r["price"].is_null()));
         renew_item(&conn, price, &json!({})).unwrap();
 
@@ -2843,26 +2702,26 @@ mod tests {
         }
     }
 
-    /// 一个库的条目带上按它的到期模型算出的 `due` 与 `days_left`：`next` 直接读下次续费日，
-    /// `last` 从上次续费按周期推；算不出的给 null 而不是丢行；库不存在是错误。
+    /// 一个库的条目带上算出来的 `due`、`days_left` 与本期起始日 `last_renewed`（到期日往前一期）；
+    /// 算不出的给 null 而不是丢行；没周期就没有本期起始；库不存在是错误。
     #[test]
-    fn items_carry_due_and_days_left_by_the_collection_anchor() {
+    fn items_carry_due_days_left_and_period_start() {
         let conn = fresh();
         let today = engine::today();
         let (subs, sims) = (coll(&conn, "subs"), coll(&conn, "sims"));
         let in3 = (today + chrono::Days::new(3)).to_string();
         insert_item(&conn, subs, &json!({ "name": "A", "next_renewal": in3 })).unwrap();
-        let ago10 = (today - chrono::Days::new(10)).to_string();
-        insert_item(&conn, sims, &json!({ "name": "S", "cycle": "days", "cycle_days": 30, "last_renewed": ago10 })).unwrap();
+        let (ago10, in20) = ((today - chrono::Days::new(10)).to_string(), (today + chrono::Days::new(20)).to_string());
+        insert_item(&conn, sims, &json!({ "name": "S", "cycle": "days", "cycle_days": 30, "next_renewal": in20 })).unwrap();
         insert_item(&conn, sims, &json!({ "name": "无日期" })).unwrap();
         let find = |rows: &[Value], name: &str| rows.iter().find(|r| r["name"] == name).cloned().unwrap();
         let a = find(&items_of(&conn, "subs").unwrap(), "A");
-        assert_eq!((a["due"].clone(), a["days_left"].clone()), (json!(in3), json!(3)));
+        assert_eq!((a["due"].clone(), a["days_left"].clone(), a["last_renewed"].clone()), (json!(in3), json!(3), Value::Null));
         let sims_rows = items_of(&conn, "sims").unwrap();
         let s = find(&sims_rows, "S");
-        assert_eq!((s["due"].clone(), s["days_left"].clone()), (json!((today + chrono::Days::new(20)).to_string()), json!(20)));
+        assert_eq!((s["due"].clone(), s["days_left"].clone(), s["last_renewed"].clone()), (json!(in20), json!(20), json!(ago10)));
         let none = find(&sims_rows, "无日期");
-        assert!(none["due"].is_null() && none["days_left"].is_null(), "{none}");
+        assert!(none["due"].is_null() && none["days_left"].is_null() && none["last_renewed"].is_null(), "{none}");
         assert!(items_of(&conn, "nope").is_err());
     }
 
@@ -2883,10 +2742,10 @@ mod tests {
         delete_item(&app, &conn, id).unwrap();
     }
 
-    /// 续费＝写一笔台账 + 按库的到期模型推日期，响应回 due 让界面如实报"下次到期"。
-    /// 台账默认取条目的金额与币种、当场钉进条目名与库名；`last` 锚点 + `today` 起算把上次续费记成今天。
+    /// 续费＝写一笔台账 + 推到期日，响应回 due 让界面如实报"下次到期"。
+    /// 台账默认取条目的金额与币种、当场钉进条目名与库名；`today` 起算的库本期从充值当天起。
     #[test]
-    fn renewing_writes_the_ledger_and_moves_the_anchor_date() {
+    fn renewing_writes_the_ledger_and_moves_the_due_date() {
         let conn = fresh();
         let today = engine::today();
         let subs = coll(&conn, "subs");
@@ -2898,8 +2757,8 @@ mod tests {
         )
         .unwrap();
         let out = renew_item(&conn, id, &json!({ "note": "刷卡" })).unwrap();
-        let next = engine::advance(due, "monthly", None).unwrap().to_string();
-        assert_eq!(out, json!({ "next_renewal": next, "due": next }));
+        let next = engine::advance(due, "monthly", None, None).unwrap().to_string();
+        assert_eq!(out, json!({ "due": next }));
         assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE id=?1", [id]), next);
         let ledger: (String, Option<f64>, String, String, String, String) = conn
             .query_row(
@@ -2914,16 +2773,17 @@ mod tests {
         renew_item(&conn, id, &json!({ "amount": 12 })).unwrap();
         assert_eq!(one::<Option<f64>>(&conn, "SELECT amount FROM renewal_ledger WHERE item_id=?1 ORDER BY id DESC LIMIT 1", [id]), Some(12.0));
 
-        // SIM 保号：上次续费记成今天，窗口从今天重算
+        // SIM 保号：窗口从今天重算，本期起始就是今天
         let sim = insert_item(
             &conn,
             coll(&conn, "sims"),
-            &json!({ "name": "SIM", "cycle": "days", "cycle_days": 30, "last_renewed": "2026-01-01" }),
+            &json!({ "name": "SIM", "cycle": "days", "cycle_days": 30, "next_renewal": "2026-01-31" }),
         )
         .unwrap();
         let out = renew_item(&conn, sim, &json!({})).unwrap();
-        assert_eq!(out["last_renewed"], json!(today.to_string()));
         assert_eq!(out["due"], json!((today + chrono::Days::new(30)).to_string()));
+        let row = items_of(&conn, "sims").unwrap().into_iter().find(|r| r["id"] == sim).unwrap();
+        assert_eq!(row["last_renewed"], json!(today.to_string()));
         assert!(renew_item(&conn, 9999, &json!({})).is_err());
     }
 
@@ -2936,7 +2796,7 @@ mod tests {
         let sim = insert_item(
             &conn,
             coll(&conn, "sims"),
-            &json!({ "name": "SIM", "cycle": "days", "cycle_days": 30, "last_renewed": "2026-01-01" }),
+            &json!({ "name": "SIM", "cycle": "days", "cycle_days": 30, "next_renewal": "2026-01-31" }),
         )
         .unwrap();
         let ledger = |conn: &Connection| one::<i64>(conn, "SELECT count(*) FROM renewal_ledger WHERE item_id=?1", [sim]);
@@ -2945,19 +2805,20 @@ mod tests {
             assert!(renew_item(&conn, sim, &json!({ "renewed_at": bad })).is_err(), "{bad}");
         }
         assert_eq!(ledger(&conn), 0, "被拒的续费记了账");
-        assert_eq!(one::<String>(&conn, "SELECT last_renewed FROM items WHERE id=?1", [sim]), "2026-01-01");
+        assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE id=?1", [sim]), "2026-01-31");
 
         let out = renew_item(&conn, sim, &json!({ "renewed_at": paid.to_string() })).unwrap();
-        assert_eq!(out["last_renewed"], json!(paid.to_string()));
         assert_eq!(out["due"], json!((paid + chrono::Days::new(30)).to_string()));
+        let row = items_of(&conn, "sims").unwrap().into_iter().find(|r| r["id"] == sim).unwrap();
+        assert_eq!(row["last_renewed"], json!(paid.to_string()), "本期从实际付款那天起");
         assert_eq!(one::<String>(&conn, "SELECT renewed_at FROM renewal_ledger WHERE item_id=?1", [sim]), paid.to_string());
         // 空串按缺省处理，记成今天
         renew_item(&conn, sim, &json!({ "renewed_at": "" })).unwrap();
-        assert_eq!(one::<String>(&conn, "SELECT last_renewed FROM items WHERE id=?1", [sim]), today.to_string());
+        assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE id=?1", [sim]), (today + chrono::Days::new(30)).to_string());
     }
 
     /// 自动续费：账单日过了才记、逐期各记一笔（日期即账单日，金额币种取条目现值），追到今天为止；
-    /// 当天的、开启前就逾期的、状态不计支出的、买断的、没开的一概不动；三种锚点 / 起算各自落对日期。
+    /// 当天的、开启前就逾期的、状态不计支出的、买断的、没开的一概不动；两种起算各自落对日期。
     #[test]
     fn auto_renewal_books_each_billing_day_that_has_passed() {
         let conn = fresh();
@@ -2974,9 +2835,9 @@ mod tests {
         let manual = sub("没开", "Active", "monthly", "2026-05-01", None);
         let lifetime = sub("买断", "Active", "lifetime", "2026-05-01", Some("2026-01-01"));
         let vps = mk("vps", json!({ "name": "VPS", "status": "Active", "cycle": "annual",
-                                    "last_renewed": "2025-06-01", "auto_renew": "2026-01-01" }));
+                                    "next_renewal": "2026-06-01", "auto_renew": "2026-01-01" }));
         let sim = mk("sims", json!({ "name": "SIM", "status": "Active", "cycle": "days", "cycle_days": 30,
-                                     "last_renewed": "2026-05-01", "auto_renew": "2026-05-01" }));
+                                     "next_renewal": "2026-05-31", "auto_renew": "2026-05-01" }));
 
         assert_eq!(auto_renew(&conn, today).unwrap(), 5);
         let books = |id: i64| -> Vec<(String, Option<f64>, Option<String>, bool)> {
@@ -2996,9 +2857,9 @@ mod tests {
         }
         // VPS 按账单日（schedule）、SIM 从付款日（today）起算——付款日就是账单日，两者落在同一天
         assert_eq!(books(vps), [("2026-06-01".to_string(), None, None, true)]);
-        assert_eq!(one::<String>(&conn, "SELECT last_renewed FROM items WHERE id=?1", [vps]), "2026-06-01");
+        assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE id=?1", [vps]), "2027-06-01");
         assert_eq!(books(sim), [("2026-05-31".to_string(), None, None, true)]);
-        assert_eq!(one::<String>(&conn, "SELECT last_renewed FROM items WHERE id=?1", [sim]), "2026-05-31");
+        assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE id=?1", [sim]), "2026-06-30");
         // 追平之后再跑一轮什么都不记
         assert_eq!(auto_renew(&conn, today).unwrap(), 0);
         // 手点的续费永远不是自动的，请求体里带 auto 也一样
@@ -3133,7 +2994,7 @@ mod tests {
         assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
-    /// 建库：到期模型与续费起算方式只认已知值；键由服务端编；模板值只在请求压根没提这个键时兜底，
+    /// 建库：续费起算方式只认已知值、`due_anchor` 一律拒；键由服务端编；模板值只在请求压根没提这个键时兜底，
     /// 留空的属性落成 null 而不是 ""（空串 verb 会把「续费」回落顶掉）。
     #[tokio::test]
     async fn creating_a_collection_validates_the_model_and_fills_from_the_template() {
@@ -3149,40 +3010,42 @@ mod tests {
         let (st, c) = call(&r, "POST", "/api/collections", Some(json!({ "name": "我的库" }))).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(c["key"], json!("k1"));
-        assert_eq!((c["due_anchor"].clone(), c["renew_from"].clone()), (json!("last"), json!("schedule")));
+        assert_eq!(c["renew_from"], json!("schedule"));
+        assert!(c.get("due_anchor").is_none(), "{c}");
         assert!(c["icon"].is_null() && c["verb"].is_null() && c["subtitle"].is_null(), "{c}");
         let (st, d) = call(&r, "POST", "/api/collections", Some(json!({ "name": "证件", "template": "docs", "icon": "" }))).await;
         assert_eq!(st, StatusCode::OK);
-        assert_eq!((d["key"].clone(), d["due_anchor"].clone(), d["verb"].clone()), (json!("k2"), json!("next"), json!("换证")));
+        assert_eq!((d["key"].clone(), d["verb"].clone()), (json!("k2"), json!("换证")));
         assert!(d["icon"].is_null(), "界面清空图标传的 \"\" 不该被模板顶回来：{d}");
     }
 
-    /// 改库：同一套取值校验；换到期模型时把新锚点那侧的日期字段补进注册表，重复切换幂等。
+    /// 改库：同一套取值校验，`due_anchor` 一律拒；新库三列日期字段都注册、只有「下次到期」可填且上表。
     #[tokio::test]
-    async fn updating_a_collection_registers_the_other_anchors_date_field() {
+    async fn updating_a_collection_validates_and_refuses_the_old_anchor_key() {
         let r = routed(fresh(), std::path::Path::new("."));
         let (_, c) = call(&r, "POST", "/api/collections", Some(json!({ "name": "我的库" }))).await;
         let (id, key) = (c["id"].as_i64().unwrap(), c["key"].as_str().unwrap().to_string());
-        let date_fields = |r: &Router| {
-            let (r, key) = (r.clone(), key.clone());
-            async move {
-                let (_, fields) = call(&r, "GET", "/api/fields", None).await;
-                let mut keys: Vec<String> = fields
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter(|f| f["tbl"] == key && f["ftype"] == "date")
-                    .map(|f| f["key"].as_str().unwrap().to_string())
-                    .collect();
-                keys.sort();
-                keys
-            }
-        };
-        assert_eq!(date_fields(&r).await, ["last_renewed"]);
+        let (_, fields) = call(&r, "GET", "/api/fields", None).await;
+        let mut dates: Vec<(String, String, bool)> = fields
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["tbl"] == key && ["next_renewal", "last_renewed", "left"].contains(&f["key"].as_str().unwrap()))
+            .map(|f| (f["key"].as_str().unwrap().to_string(), f["src"].as_str().unwrap().to_string(), f["shown"].as_bool().unwrap()))
+            .collect();
+        dates.sort();
+        assert_eq!(
+            dates,
+            [
+                ("last_renewed".into(), "calc".into(), false),
+                ("left".into(), "calc".into(), false),
+                ("next_renewal".into(), "col".into(), true)
+            ]
+        );
         let path = format!("/api/collections/{id}");
         // 空名与建库同判：当缺席处理会静默留着原名、回 200
         for bad_body in [
-            json!({ "due_anchor": "weird" }),
+            json!({ "due_anchor": "next" }),
             json!({ "renew_from": "x" }),
             json!({ "name": "" }),
             json!({ "name": "  " }),
@@ -3190,83 +3053,55 @@ mod tests {
         ] {
             assert_eq!(call(&r, "PUT", &path, Some(bad_body.clone())).await.0, StatusCode::BAD_REQUEST, "{bad_body}");
         }
-        assert_eq!(call(&r, "PUT", &path, Some(json!({ "due_anchor": "next" }))).await.0, StatusCode::OK);
-        assert_eq!(date_fields(&r).await, ["last_renewed", "next_renewal"]);
-        assert_eq!(call(&r, "PUT", &path, Some(json!({ "due_anchor": "next" }))).await.0, StatusCode::OK);
-        assert_eq!(date_fields(&r).await, ["last_renewed", "next_renewal"]);
+        assert_eq!(call(&r, "PUT", &path, Some(json!({ "renew_from": "today" }))).await.0, StatusCode::OK);
         assert_eq!(call(&r, "PUT", "/api/collections/9999", Some(json!({ "name": "x" }))).await.0, StatusCode::NOT_FOUND);
     }
 
-    /// 换到期模型前后到期日不变：锚点日期折到新侧，新侧的日期列上表、旧侧撤下表；
-    /// 在 next 下续过费再切回 last，不会退回切换前那个旧的上次续费日。推不出的条目不动。
-    #[tokio::test]
-    async fn switching_the_anchor_keeps_every_due_date() {
-        use std::collections::BTreeMap;
-        let r = routed(fresh(), std::path::Path::new("."));
-        let (_, c) = call(&r, "POST", "/api/collections", Some(json!({ "name": "我的库" }))).await;
-        let (id, key) = (c["id"].as_i64().unwrap(), c["key"].as_str().unwrap().to_string());
-        let (path, items) = (format!("/api/collections/{id}"), format!("/api/collections/{key}/items"));
-        let mut ids = BTreeMap::new();
-        for body in [
-            json!({ "name": "月付", "cycle": "monthly", "last_renewed": "2026-01-10" }),
-            json!({ "name": "按天", "cycle": "days", "cycle_days": 30, "last_renewed": "2026-01-10" }),
-            json!({ "name": "买断", "cycle": "lifetime", "last_renewed": "2026-01-10" }),
-            json!({ "name": "缺日期", "cycle": "monthly" }),
-        ] {
-            let name = body["name"].as_str().unwrap().to_string();
-            let (st, v) = call(&r, "POST", &items, Some(body)).await;
-            assert_eq!(st, StatusCode::OK, "{v}");
-            ids.insert(name, v["id"].as_i64().unwrap());
-        }
-        let rows = |r: &Router| {
-            let (r, items) = (r.clone(), items.clone());
-            async move {
-                let (_, v) = call(&r, "GET", &items, None).await;
-                let named = v.as_array().unwrap().iter().map(|x| (x["name"].as_str().unwrap().to_string(), x.clone()));
-                named.collect::<BTreeMap<_, _>>()
-            }
+    /// 账单日只由引擎写：续费钳到月末时记下、推回原日时清掉、手改到期日时作废；条目 JSON 带着它只读。
+    #[test]
+    fn the_billing_day_is_set_by_renewals_and_cleared_by_hand_edits() {
+        let conn = fresh();
+        let subs = coll(&conn, "subs");
+        let id = insert_item(&conn, subs, &json!({ "name": "月末", "cycle": "monthly", "next_renewal": "2026-01-31" })).unwrap();
+        let state = || {
+            (
+                one::<String>(&conn, "SELECT next_renewal FROM items WHERE id=?1", [id]),
+                one::<Option<i64>>(&conn, "SELECT billing_day FROM items WHERE id=?1", [id]),
+            )
         };
-        let dues = |rows: &BTreeMap<String, Value>| {
-            rows.iter().map(|(k, v)| (k.clone(), v["due"].clone())).collect::<BTreeMap<_, _>>()
-        };
-        let shown = |r: &Router| {
-            let (r, key) = (r.clone(), key.clone());
-            async move {
-                let (_, f) = call(&r, "GET", "/api/fields", None).await;
-                let anchors = ["last_renewed", "left", "next_renewal"];
-                let mine = f.as_array().unwrap().iter().filter(|f| f["tbl"] == key && anchors.contains(&f["key"].as_str().unwrap()));
-                mine.map(|f| (f["key"].as_str().unwrap().to_string(), f["shown"].as_bool().unwrap())).collect::<Vec<_>>()
-            }
-        };
-        let before = rows(&r).await;
-        assert_eq!(before["月付"]["due"], "2026-02-10");
+        assert_eq!(state(), ("2026-01-31".into(), None));
+        renew_item(&conn, id, &json!({ "renewed_at": "2026-01-31" })).unwrap();
+        assert_eq!(state(), ("2026-02-28".into(), Some(31)));
+        let row = items_of(&conn, "subs").unwrap().into_iter().find(|r| r["id"] == id).unwrap();
+        assert_eq!((row["billing_day"].clone(), row["last_renewed"].clone()), (json!(31), json!("2026-01-31")));
+        renew_item(&conn, id, &json!({ "renewed_at": "2026-02-28" })).unwrap();
+        assert_eq!(state(), ("2026-03-31".into(), None), "带着账单日推回 31 号，不是 3/28");
+        renew_item(&conn, id, &json!({ "renewed_at": "2026-03-31" })).unwrap();
+        assert_eq!(state(), ("2026-04-30".into(), Some(31)));
+        // 改别的字段不碰它；手填到期日以手填那天为准
+        update_item(&conn, id, &json!({ "extra": { "notes": "x" } })).unwrap();
+        assert_eq!(state().1, Some(31));
+        update_item(&conn, id, &json!({ "next_renewal": "2026-05-15" })).unwrap();
+        assert_eq!(state(), ("2026-05-15".into(), None));
+    }
 
-        assert_eq!(call(&r, "PUT", &path, Some(json!({ "due_anchor": "next" }))).await.0, StatusCode::OK);
-        let after = rows(&r).await;
-        assert_eq!(dues(&after), dues(&before));
-        assert_eq!(after["月付"]["next_renewal"], "2026-02-10");
-        assert!(after["买断"]["next_renewal"].is_null() && after["缺日期"]["next_renewal"].is_null());
-        let mut flags = shown(&r).await;
-        flags.sort();
-        assert_eq!(flags, [("last_renewed".into(), false), ("left".into(), false), ("next_renewal".into(), true)]);
-
-        // 在 next 下续一期只推下次到期，上次续费停在旧值；再添一条 last 表示不了的月末到期
-        let renew = format!("/api/items/{}/renew", ids["月付"]);
-        assert_eq!(call(&r, "POST", &renew, Some(json!({ "renewed_at": "2026-02-10" }))).await.0, StatusCode::OK);
-        let month_end = json!({ "name": "月末", "cycle": "monthly", "next_renewal": "2026-03-31" });
-        assert_eq!(call(&r, "POST", &items, Some(month_end)).await.0, StatusCode::OK);
-        let mid = rows(&r).await;
-        assert_eq!((&mid["月付"]["due"], &mid["月付"]["last_renewed"]), (&json!("2026-03-10"), &json!("2026-01-10")));
-
-        assert_eq!(call(&r, "PUT", &path, Some(json!({ "due_anchor": "last" }))).await.0, StatusCode::OK);
-        let back = rows(&r).await;
-        let mut want = dues(&mid);
-        want.insert("月末".into(), json!("2026-03-28"));
-        assert_eq!(dues(&back), want);
-        assert_eq!(back["月付"]["last_renewed"], "2026-02-10");
-        let mut flags = shown(&r).await;
-        flags.sort();
-        assert_eq!(flags, [("last_renewed".into(), true), ("left".into(), true), ("next_renewal".into(), false)]);
+    /// `last_renewed`（本期起始日）是算出来的：整行回读再 PATCH（连同 `next_renewal` 一起带回来）照常放行，
+    /// 单独写它就 400。
+    #[test]
+    fn writing_the_computed_period_start_alone_is_refused() {
+        let conn = fresh();
+        let subs = coll(&conn, "subs");
+        assert!(insert_item(&conn, subs, &json!({ "name": "A", "last_renewed": "2026-01-01" })).is_err());
+        let id = insert_item(&conn, subs, &json!({ "name": "A", "cycle": "monthly", "next_renewal": "2026-03-15" })).unwrap();
+        let mut row = items_of(&conn, "subs").unwrap().into_iter().find(|r| r["id"] == id).unwrap();
+        assert_eq!(row["last_renewed"], json!("2026-02-15"));
+        update_item(&conn, id, &row).unwrap();
+        row["next_renewal"] = json!("");
+        update_item(&conn, id, &row).unwrap();
+        assert_eq!(one::<Option<String>>(&conn, "SELECT next_renewal FROM items WHERE id=?1", [id]), None);
+        assert!(update_item(&conn, id, &json!({ "last_renewed": "2026-02-01" })).is_err());
+        update_item(&conn, id, &json!({ "last_renewed": null, "extra": { "notes": "清空＝没说什么" } })).unwrap();
+        assert_eq!(one::<Option<String>>(&conn, "SELECT next_renewal FROM items WHERE id=?1", [id]), None);
     }
 
     /// 取图标的整轮截止要管住每一次网络等待，不只在候选之间判：一个候选跟几跳慢速重定向，

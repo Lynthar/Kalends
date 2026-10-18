@@ -76,26 +76,26 @@ PROTON_TIERS = [
          extra={'category': '隐私'}),
 ]
 
-# VPS：上次续费 + 周期的到期模型，规格列由模板字段自己拼出来
+# VPS：按账单日续费（续费起算 schedule），规格列由模板字段自己拼出来
 VPS = [
     dict(name='Hetzner', status='Active', price=4.51, currency='EUR', cycle='monthly',
-         last_renewed=day(-9), url='https://www.hetzner.com',
+         next_renewal=day(21), url='https://www.hetzner.com',
          extra={'product': 'CX22', 'locations': ['Falkenstein'], 'purpose': '自建服务',
                 'routes': ['直连'], 'cores': 2, 'ram_gb': 4, 'storage_gb': 40,
                 'storage_type': 'NVMe', 'port_gbps': 1, 'traffic_tb': 20, 'ipv6': 1}),
     dict(name='RackNerd', status='Active', price=16.88, currency='USD', cycle='annual',
-         last_renewed=day(-288),
+         next_renewal=day(77),
          extra={'product': '1G KVM', 'locations': ['Los Angeles'], 'purpose': '备用',
                 'routes': ['直连'], 'cores': 1, 'ram_gb': 1, 'storage_gb': 20,
                 'storage_type': 'SSD', 'port_gbps': 1, 'traffic_tb': 2, 'ipv6': 1}),
     dict(name='BuyVM', status='Active', price=3.5, currency='USD', cycle='monthly',
-         last_renewed=day(-24),
+         next_renewal=day(6),
          extra={'product': 'Slice 1G', 'locations': ['Las Vegas'], 'purpose': '存储',
                 'routes': ['直连'], 'cores': 1, 'ram_gb': 1, 'storage_gb': 20,
                 'storage_type': 'SSD', 'extra_storage': 'Block Storage 256G',
                 'port_gbps': 1, 'traffic_tb': 5, 'ipv6': 1}),
     dict(name='Vultr', status='Ended', price=6.0, currency='USD', cycle='monthly',
-         last_renewed=day(-96), extra={'product': 'Regular 1G', 'locations': ['Tokyo']}),
+         next_renewal=day(-66), extra={'product': 'Regular 1G', 'locations': ['Tokyo']}),
 ]
 
 INSURANCE = [
@@ -192,12 +192,12 @@ def seed(cli):
 def seed_ledger(cli):
     """记两笔账让台账页有内容；renew 会改写日期，所以记完把日期按设计值补回去"""
     items = cli.get('/api/collections/vps/items')
-    for name, last in (('Hetzner', day(-9)), ('BuyVM', day(-24))):
+    for name, due in (('Hetzner', day(21)), ('BuyVM', day(6))):
         it = next((x for x in items if x['name'] == name), None)
         if it is None:
             continue
         cli.post(f"/api/items/{it['id']}/renew", {})
-        cli.patch(f"/api/items/{it['id']}", {'last_renewed': last})
+        cli.patch(f"/api/items/{it['id']}", {'next_renewal': due})
 
 
 SECRET_KEY = re.compile(r'token|password|secret', re.I)

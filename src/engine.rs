@@ -38,108 +38,85 @@ fn four_digit(d: NaiveDate) -> Option<NaiveDate> {
     (0..=9999).contains(&d.year()).then_some(d)
 }
 
-/// 从某个到期日按周期前进 n 期；lifetime、未知周期或结果年份超过 9999 返回 None。
-/// **跨多期必须一次算第 n 期，不能循环调用 `advance` n 次**：月加法钳到月末后
-/// 锚点即丢（1/31 迭代六次得 7/28，正解 7/31）。
-pub fn advance_n(date: NaiveDate, cycle: &str, cycle_days: Option<i64>, n: u32) -> Option<NaiveDate> {
-    match step(cycle, cycle_days)? {
-        Step::Months(m) => date.checked_add_months(Months::new(m * n)),
-        Step::Days(d) => date.checked_add_days(Days::new(d * u64::from(n))),
-    }
-    .and_then(four_digit)
+/// `d` 所在月份有几天。
+fn month_len(d: NaiveDate) -> Option<u32> {
+    let (y, m) = (d.year(), d.month());
+    let next = if m == 12 { NaiveDate::from_ymd_opt(y + 1, 1, 1) } else { NaiveDate::from_ymd_opt(y, m + 1, 1) }?;
+    Some(next.pred_opt()?.day())
 }
 
-/// 换到期模型时，条目在新锚点 `to` 那侧写哪一天，才能让 `due_from` 算出同一个到期日 `due`；
-/// None＝推不出（无周期等），调用方不动这一格。`last` 表示不了的月末到期日（按月的 3/31：
-/// 上次续费再加一个月最多到 3/28）退到最近的更早一天——月减法钳到月末，提醒只会早不会晚。
-pub fn reanchor(to: &str, due: NaiveDate, cycle: &str, cycle_days: Option<i64>) -> Option<NaiveDate> {
-    if to == "next" {
-        return Some(due);
-    }
+/// 推进 n 期的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Moved {
+    pub due: NaiveDate,
+    /// 按月的周期在短月被钳到月末时，原本想落的那一天（1–31）；没钳位或不是按月的周期为 None。
+    /// 存回条目，下一次从钳位后的日期再推才回得到原来的账单日（1/31 → 2/28 → 3/31，而不是 3/28）。
+    pub billing_day: Option<u32>,
+}
+
+/// 从 `date` 按周期前进 n 期。按月的周期先定月份、再落到账单日（`billing_day`，缺省取 `date` 自己的日），
+/// 短月落不下就钳到月末。跨多期一次算第 n 期；lifetime、未知周期或结果年份超过 9999 返回 None。
+pub fn step_n(date: NaiveDate, cycle: &str, cycle_days: Option<i64>, n: u32, billing_day: Option<u32>) -> Option<Moved> {
+    let moved = match step(cycle, cycle_days)? {
+        Step::Months(m) => {
+            let want = billing_day.unwrap_or(date.day());
+            let first = date.with_day(1)?.checked_add_months(Months::new(m * n))?;
+            let day = want.min(month_len(first)?);
+            Moved { due: first.with_day(day)?, billing_day: (day != want).then_some(want) }
+        }
+        Step::Days(d) => Moved { due: date.checked_add_days(Days::new(d * u64::from(n)))?, billing_day: None },
+    };
+    four_digit(moved.due).map(|_| moved)
+}
+
+/// 从某个到期日按周期前进一步，只要日期。
+pub fn advance(date: NaiveDate, cycle: &str, cycle_days: Option<i64>, billing_day: Option<u32>) -> Option<NaiveDate> {
+    step_n(date, cycle, cycle_days, 1, billing_day).map(|m| m.due)
+}
+
+/// 本期从哪天起：到期日往前退一期。账单日照顾月末钳位（2/28 配账单日 31 退回 1/31）；推不动返回 None。
+pub fn period_start(due: NaiveDate, cycle: &str, cycle_days: Option<i64>, billing_day: Option<u32>) -> Option<NaiveDate> {
     match step(cycle, cycle_days)? {
-        Step::Months(m) => due.checked_sub_months(Months::new(m)),
+        Step::Months(m) => {
+            let want = billing_day.unwrap_or(due.day());
+            let first = due.with_day(1)?.checked_sub_months(Months::new(m))?;
+            first.with_day(want.min(month_len(first)?))
+        }
         Step::Days(d) => due.checked_sub_days(Days::new(d)),
     }
     .and_then(four_digit)
 }
 
-/// 从某个到期日按周期前进一步。
-pub fn advance(date: NaiveDate, cycle: &str, cycle_days: Option<i64>) -> Option<NaiveDate> {
-    advance_n(date, cycle, cycle_days, 1)
-}
-
-/// 到期日的唯一实现：库按 `due_anchor` 决定是直接读下次续费日，还是从上次续费推一期。
-/// 到期时间线（engine）与库列表（`collections::due_of`）都走这里，不许再长出第二份。
-pub fn due_from(
-    anchor: &str,
-    cycle: &str,
-    cycle_days: Option<i64>,
-    next_renewal: Option<&str>,
-    last_renewed: Option<&str>,
-) -> Option<NaiveDate> {
+/// 到期日的唯一实现：条目存的下次到期日；买断没有到期日。到期时间线（engine）与库列表
+/// （`collections::items_of`）都走这里，不许再长出第二份。
+pub fn due_from(cycle: &str, next_renewal: Option<&str>) -> Option<NaiveDate> {
     if cycle == "lifetime" {
         return None;
     }
-    let day = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok();
-    if anchor == "next" {
-        return next_renewal.and_then(day);
-    }
-    advance(last_renewed.and_then(day)?, cycle, cycle_days)
+    next_renewal.and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
 }
 
 /// 找不出结果就放弃，别把线程转死。周付从 1970 年推到现在也才 ~2900 期，越过这个数说明
-/// 周期或日期本身有问题：`next` 锚点返回 None＝不动日期；`last` + `schedule` 按「没有日程」回落成付款日。
+/// 周期或日期本身有问题：返回 None＝不动日期。
 const MAX_PERIODS: u32 = 10_000;
 
-/// 在 `paid_on` 付的这笔续费把锚点日期改写成哪一天；None＝推不动，调用方不改日期。
-/// `due_anchor` 管到期日从哪儿来，`renew_from` 管续费后从哪天起算（`schedule`＝账单日
-/// 不动 / `today`＝从付款那天重算），两轴正交；`last` 算不出日程时回落成付款日。
-#[allow(clippy::too_many_arguments)]
+/// 在 `paid_on` 付的这笔续费把到期日推到哪一天；None＝推不动（买断、无周期、年份封顶），调用方不改日期。
+/// `renew_from` 决定从哪天起算：`schedule` 沿原账单日一路推到付款日之后（逾期多期一次补齐，提前付恰好
+/// 推一期）；`today` 从付款那天重新计时。还没有到期日的条目没有日程可言，两种都从付款日起算一期。
 pub fn renew_to(
-    anchor: &str,
     renew_from: &str,
     cycle: &str,
     cycle_days: Option<i64>,
-    next_renewal: Option<NaiveDate>,
-    last_renewed: Option<NaiveDate>,
+    due: Option<NaiveDate>,
+    billing_day: Option<u32>,
     paid_on: NaiveDate,
-) -> Option<NaiveDate> {
-    if anchor == "next" {
-        if renew_from == "today" {
-            return advance(paid_on, cycle, cycle_days);
-        }
-        // 逾期多期时一路推到付款日之后。**每一步都从原始日期算第 n 期**，不能拿上一步的
-        // 结果再推一期：月加法会钳到月末，钳过之后锚点就永久丢了（1/31 迭代六次得 7/28）
-        let start = next_renewal?;
-        for n in 1..=MAX_PERIODS {
-            // 无周期时 advance_n 恒为 None，立刻收手别空转
-            let d = advance_n(start, cycle, cycle_days, n)?;
-            if d > paid_on {
-                return Some(d);
-            }
-        }
-        return None;
-    }
-    if renew_from == "today" {
-        return Some(paid_on);
-    }
-    // last + schedule：把 last_renewed 推到"刚付的那一期"，于是到期日落回原本的账单日。
-    // 判据要拿 advance(D) 而不是 advance_n(start, m+1)——存进去的是 D，之后 due_from 也
-    // 是从 D 推一期，所以只有前者能保证"这次续费之后到期日真的在付款日之后"。
-    let mut scheduled = None;
-    if let Some(start) = last_renewed {
-        for m in 1..=MAX_PERIODS {
-            let Some(d) = advance_n(start, cycle, cycle_days, m) else {
-                break;
-            };
-            if advance(d, cycle, cycle_days).is_some_and(|next| next > paid_on) {
-                scheduled = Some(d);
-                break;
-            }
-        }
-    }
-    // 没有上次续费日、买断、无周期——都没有日程可言，回落成付款日
-    Some(scheduled.unwrap_or(paid_on))
+) -> Option<Moved> {
+    let Some(start) = due.filter(|_| renew_from == "schedule") else {
+        return step_n(paid_on, cycle, cycle_days, 1, None);
+    };
+    (1..=MAX_PERIODS)
+        .map_while(|n| step_n(start, cycle, cycle_days, n, billing_day))
+        .find(|m| m.due > paid_on)
 }
 
 /// 折算为"每月几倍"的系数，用于分币种月支出；不可折算（买断等）返回 None。
@@ -286,23 +263,16 @@ struct Row {
     cycle: Option<String>,
     cycle_days: Option<i64>,
     next_renewal: Option<String>,
-    last_renewed: Option<String>,
-    due_anchor: String,
+    /// 月末钳位时记下的账单日（见 `Moved::billing_day`）
+    billing_day: Option<u32>,
     extra: Value,
     /// 自动续费的开启日；None＝没开
     auto_renew: Option<String>,
 }
 
 impl Row {
-    /// 到期日：库按 `due_anchor` 决定是直接读下次续费日，还是从上次续费按周期推。
     fn due(&self) -> Option<NaiveDate> {
-        due_from(
-            &self.due_anchor,
-            self.cycle.as_deref().unwrap_or(""),
-            self.cycle_days,
-            self.next_renewal.as_deref(),
-            self.last_renewed.as_deref(),
-        )
+        due_from(self.cycle.as_deref().unwrap_or(""), self.next_renewal.as_deref())
     }
 
     /// 这一期到期日是否归自动续费管。状态得计支出（停付了的不能替人记账）、周期推得动，
@@ -311,27 +281,7 @@ impl Row {
         let since = self.auto_renew.as_deref().and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
         sem.spend
             && since.is_some_and(|s| due >= s)
-            && advance(due, self.cycle.as_deref().unwrap_or(""), self.cycle_days).is_some()
-    }
-
-    /// 算不出到期日时，到底缺的是哪一项。**不能只按锚点二选一**：`last` 算不出有
-    /// 两半成因（缺上次续费日，或缺周期/天数），一律报"缺上次续费日"会把用户指向
-    /// 一个明明填着的字段；`next` 只有一种成因，照报即可。
-    fn missing_for_due(&self) -> &'static str {
-        let dated = |s: &Option<String>| {
-            s.as_deref()
-                .is_some_and(|x| NaiveDate::parse_from_str(x, "%Y-%m-%d").is_ok())
-        };
-        if self.due_anchor == "next" {
-            "下次续费日"
-        } else if !dated(&self.last_renewed) {
-            "上次续费日"
-        } else if self.cycle.as_deref() == Some("days") {
-            // 日期在、周期是"自定义天数"却推不动，只能是天数没填或不是正数
-            "周期天数"
-        } else {
-            "周期"
-        }
+            && advance(due, self.cycle.as_deref().unwrap_or(""), self.cycle_days, self.billing_day).is_some()
     }
 
     /// 该计支出、却因为缺一半而没被计进去时，缺的是哪一项；None＝不算欠缺。
@@ -370,36 +320,40 @@ impl Row {
     }
 }
 
+/// 读条目的账单日列：1–31 之外的值当没有（只有引擎自己写它，坏值只能来自手改库文件）。
+pub fn billing_day(v: ValueRef<'_>) -> Option<u32> {
+    crate::db::as_int(v).and_then(|d| u32::try_from(d).ok()).filter(|d| (1..=31).contains(d))
+}
+
 fn rows(conn: &Connection) -> Result<Vec<Row>> {
     let mut stmt = conn.prepare(
-        "SELECT c.key, c.verb, c.note_field, c.subtitle, c.due_anchor,
+        "SELECT c.key, c.verb, c.note_field, c.subtitle,
                 i.id, i.name, i.status, i.price, i.currency, i.cycle, i.cycle_days,
-                i.next_renewal, i.last_renewed, i.extra, i.auto_renew
+                i.next_renewal, i.billing_day, i.extra, i.auto_renew
          FROM items i JOIN collections c ON c.id = i.collection_id
          ORDER BY c.pos, i.id",
     )?;
     let out = stmt
         .query_map([], |r| {
-            let extra: Option<String> = r.get(14)?;
-            let price = r.get_ref(8)?;
+            let extra: Option<String> = r.get(13)?;
+            let price = r.get_ref(7)?;
             Ok(Row {
                 key: r.get(0)?,
                 verb: r.get::<_, Option<String>>(1)?.unwrap_or_else(|| "续费".into()),
                 note_field: r.get(2)?,
                 subtitle: r.get(3)?,
-                due_anchor: r.get(4)?,
-                id: r.get(5)?,
-                name: r.get(6)?,
-                status: r.get(7)?,
+                id: r.get(4)?,
+                name: r.get(5)?,
+                status: r.get(6)?,
                 price: crate::db::as_real(price),
                 price_unreadable: !matches!(price, ValueRef::Null) && crate::db::as_real(price).is_none(),
-                currency: r.get(9)?,
-                cycle: r.get(10)?,
-                cycle_days: crate::db::as_int(r.get_ref(11)?),
-                next_renewal: r.get(12)?,
-                last_renewed: r.get(13)?,
+                currency: r.get(8)?,
+                cycle: r.get(9)?,
+                cycle_days: crate::db::as_int(r.get_ref(10)?),
+                next_renewal: r.get(11)?,
+                billing_day: billing_day(r.get_ref(12)?),
                 extra: crate::api::extra_json(extra),
-                auto_renew: r.get(15)?,
+                auto_renew: r.get(14)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -424,7 +378,7 @@ pub fn undated(conn: &Connection) -> Result<Vec<Value>> {
             "id": r.id,
             "name": r.title(),
             "status": r.status,
-            "missing": r.missing_for_due(),
+            "missing": "到期日",
         }));
     }
     Ok(out)
@@ -601,40 +555,10 @@ mod tests {
             cycle: None,
             cycle_days: None,
             next_renewal: None,
-            last_renewed: None,
-            due_anchor: "next".into(),
+            billing_day: None,
             extra,
             auto_renew: None,
         }
-    }
-
-    /// 算不出到期日时点名的必须是真正缺的那一项。`last` 锚点有两半成因（缺日期 / 缺周期），
-    /// 一律报"缺上次续费日"的话，用户打开条目看见日期填着，按提示无从下手。
-    #[test]
-    fn undated_points_at_the_field_that_is_actually_missing() {
-        let mut r = row("x", None, json!({}));
-        r.due_anchor = "next".into();
-        assert_eq!(r.missing_for_due(), "下次续费日");
-
-        r.due_anchor = "last".into();
-        assert_eq!(r.missing_for_due(), "上次续费日");
-        r.last_renewed = Some("不是日期".into());
-        assert_eq!(r.missing_for_due(), "上次续费日");
-
-        // 日期填着、周期空着：缺的是周期
-        r.last_renewed = Some("2026-05-01".into());
-        assert_eq!(r.missing_for_due(), "周期");
-        r.cycle = Some(String::new());
-        assert_eq!(r.missing_for_due(), "周期");
-
-        // 自定义天数却没填天数（或填了 0）：缺的是天数，不是周期本身
-        r.cycle = Some("days".into());
-        assert_eq!(r.missing_for_due(), "周期天数");
-        r.cycle_days = Some(0);
-        assert_eq!(r.missing_for_due(), "周期天数");
-        // 天数补上就算得出来了，压根不该进这张清单
-        r.cycle_days = Some(30);
-        assert_eq!(r.due(), Some(d("2026-05-31")));
     }
 
     /// 买断没有"每月多少"可言，不算欠缺——这条豁免以前只写在周期那一支里，
@@ -664,64 +588,79 @@ mod tests {
         assert_eq!(r.missing_for_spend(), None);
     }
 
-    /// `renew_to` 的两个轴要真的正交：同一个 `last` 锚点，`schedule` 保住账单日、
-    /// `today` 从付款当天重算。
+    /// `schedule` 沿原账单日推：逾期多期一次补到付款日之后、提前付恰好推一期；`today` 从付款当天重算。
     #[test]
     fn renewing_on_schedule_keeps_the_billing_day() {
-        let today = d("2026-08-09");
-        // 年付逾期 60 天：账单日应当仍是 6/10，而不是被拽到 8/9
-        let got = renew_to("last", "schedule", "annual", None, None, Some(d("2025-06-10")), today);
-        assert_eq!(got, Some(d("2026-06-10")));
-        assert_eq!(advance(got.unwrap(), "annual", None), Some(d("2027-06-10")));
-
-        // 月付欠了两期：一次点击落到下一个真实账单日 8/15，账单日仍是 15 号
-        let got = renew_to("last", "schedule", "monthly", None, None, Some(d("2026-05-15")), today);
-        assert_eq!(got, Some(d("2026-07-15")));
-        assert_eq!(advance(got.unwrap(), "monthly", None), Some(d("2026-08-15")));
-
-        // 提前续费（到期日还没到）：恰好推一期，与 next 锚点那侧对称
-        let got = renew_to("last", "schedule", "monthly", None, None, Some(d("2026-07-15")), today);
-        assert_eq!(got, Some(d("2026-08-15")));
-
-        // 同一批数据换成 today 语义：SIM 保号就该从充值当天重新计时
-        let got = renew_to("last", "today", "days", Some(30), None, Some(d("2026-05-17")), today);
-        assert_eq!(got, Some(today));
+        let paid = d("2026-08-09");
+        // 年付逾期一年多：账单日仍是 6/10
+        let got = renew_to("schedule", "annual", None, Some(d("2025-06-10")), None, paid).unwrap();
+        assert_eq!((got.due, got.billing_day), (d("2027-06-10"), None));
+        // 月付欠了两期：一次落到下一个真实账单日 8/15
+        assert_eq!(renew_to("schedule", "monthly", None, Some(d("2026-05-15")), None, paid).unwrap().due, d("2026-08-15"));
+        // 提前续费（到期日还没到）：恰好推一期
+        assert_eq!(renew_to("schedule", "monthly", None, Some(d("2026-08-15")), None, paid).unwrap().due, d("2026-09-15"));
+        // 同一批数据换成 today 语义：SIM 保号从充值当天重新计时
+        assert_eq!(renew_to("today", "days", Some(30), Some(d("2026-06-16")), None, paid).unwrap().due, d("2026-09-08"));
     }
 
-    /// `last` 锚点算不出日程时回落成付款日。缺 `last_renewed` 的条目全靠点一次续费把日期
-    /// 补上——回落没了那条路就断了，只留下一笔无处落地的台账。
+    /// 还没有到期日的条目没有日程可言：两种起算都从付款日推一期——缺日期的条目全靠点一次续费把日期补上。
+    /// 买断与无周期确实推不动，维持原状不猜。
     #[test]
-    fn renewing_without_a_schedule_falls_back_to_the_payment_day() {
-        let today = d("2026-08-09");
-        // 没有上次续费日：无从谈起"原定日程"
-        assert_eq!(renew_to("last", "schedule", "annual", None, None, None, today), Some(today));
-        // 买断与无周期同理
-        assert_eq!(
-            renew_to("last", "schedule", "lifetime", None, None, Some(d("2025-01-01")), today),
-            Some(today)
-        );
-        // next 锚点缺下次续费日则确实推不动：那侧没有可回落的锚点，维持原状不猜
-        assert_eq!(renew_to("next", "schedule", "annual", None, None, None, today), None);
+    fn renewing_without_a_due_date_counts_from_the_payment_day() {
+        let paid = d("2026-08-09");
+        assert_eq!(renew_to("schedule", "annual", None, None, None, paid).unwrap().due, d("2027-08-09"));
+        assert_eq!(renew_to("today", "days", Some(30), None, None, paid).unwrap().due, d("2026-09-08"));
+        assert_eq!(renew_to("schedule", "lifetime", None, Some(d("2025-01-01")), None, paid), None);
+        assert_eq!(renew_to("today", "", None, None, None, paid), None);
+        assert_eq!(renew_to("schedule", "days", None, Some(d("2026-01-01")), None, paid), None);
     }
 
     /// 补记的续费按付款那天算，不按记账那天：晚三天才来点，SIM 的保号窗口不能跟着晚三天。
     #[test]
     fn a_backdated_renewal_counts_from_the_day_it_was_paid() {
         let paid = d("2026-06-20");
-        assert_eq!(renew_to("last", "today", "days", Some(30), None, Some(d("2026-05-17")), paid), Some(paid));
-        assert_eq!(renew_to("next", "today", "monthly", None, Some(d("2026-06-15")), None, paid), Some(d("2026-07-20")));
+        assert_eq!(renew_to("today", "days", Some(30), Some(d("2026-06-16")), None, paid).unwrap().due, d("2026-07-20"));
+        assert_eq!(renew_to("today", "monthly", None, Some(d("2026-06-15")), None, paid).unwrap().due, d("2026-07-20"));
         // 按日程的库只补到付款日所在那一期：6/20 付的是 6/15 那期，7/15 那期哪怕今天已过也还欠着
-        assert_eq!(renew_to("last", "schedule", "monthly", None, None, Some(d("2026-05-15")), paid), Some(d("2026-06-15")));
-        assert_eq!(renew_to("next", "schedule", "monthly", None, Some(d("2026-05-15")), None, paid), Some(d("2026-07-15")));
+        assert_eq!(renew_to("schedule", "monthly", None, Some(d("2026-05-15")), None, paid).unwrap().due, d("2026-07-15"));
     }
 
-    /// 跨多期前进一律一次性算第 n 期。逐期迭代会在经过一次二月之后把月末锚点永久丢掉，
-    /// 而补推逾期条目正是跨多期的场景。
+    /// 补推逾期条目一次算第 n 期：1/31 月付逾期到 7 月落 7/31。
     #[test]
     fn renewing_across_periods_keeps_a_month_end_anchor() {
-        // 1/31 月付、逾期到 7 月：正确答案是 7/31，逐期迭代会得到 7/28
-        let got = renew_to("next", "schedule", "monthly", None, Some(d("2026-01-31")), None, d("2026-07-15"));
-        assert_eq!(got, Some(d("2026-07-31")));
+        let got = renew_to("schedule", "monthly", None, Some(d("2026-01-31")), None, d("2026-07-15")).unwrap();
+        assert_eq!((got.due, got.billing_day), (d("2026-07-31"), None));
+    }
+
+    /// 月末账单日跨多次续费不漂移：1/31 → 2/28 时把 31 记进账单日，下一次续费从 2/28 推回 3/31。
+    /// 负向对照写在最后一行：不带账单日从 2/28 推一期得 3/28——这正是修掉的漂移。
+    #[test]
+    fn a_month_end_billing_day_survives_the_renewal_that_clamps_it() {
+        let first = renew_to("schedule", "monthly", None, Some(d("2026-01-31")), None, d("2026-01-31")).unwrap();
+        assert_eq!((first.due, first.billing_day), (d("2026-02-28"), Some(31)));
+        let second = renew_to("schedule", "monthly", None, Some(first.due), first.billing_day, d("2026-02-28")).unwrap();
+        assert_eq!((second.due, second.billing_day), (d("2026-03-31"), None));
+        let third = renew_to("schedule", "monthly", None, Some(second.due), second.billing_day, d("2026-03-31")).unwrap();
+        assert_eq!((third.due, third.billing_day), (d("2026-04-30"), Some(31)));
+        // 从付款日重算的库同样带着账单日：1/31 充值、月付 → 2/28 记 31
+        let today = renew_to("today", "monthly", None, None, None, d("2026-01-31")).unwrap();
+        assert_eq!((today.due, today.billing_day), (d("2026-02-28"), Some(31)));
+        assert_eq!(advance(d("2026-02-28"), "monthly", None, None), Some(d("2026-03-28")), "没有账单日就漂移");
+    }
+
+    /// 本期起始日＝到期日往前退一期，钳位过的到期日靠账单日退回原来的日子；推不动的周期返回 None。
+    #[test]
+    fn period_start_is_one_period_before_the_due_date() {
+        assert_eq!(period_start(d("2026-04-15"), "monthly", None, None), Some(d("2026-03-15")));
+        assert_eq!(period_start(d("2026-02-28"), "monthly", None, Some(31)), Some(d("2026-01-31")));
+        assert_eq!(period_start(d("2026-03-31"), "monthly", None, None), Some(d("2026-02-28")));
+        assert_eq!(period_start(d("2026-05-31"), "quarterly", None, None), Some(d("2026-02-28")));
+        assert_eq!(period_start(d("2029-02-28"), "annual", None, Some(29)), Some(d("2028-02-29")));
+        assert_eq!(period_start(d("2026-07-01"), "days", Some(181), None), Some(d("2026-01-01")));
+        assert_eq!(period_start(d("2026-01-08"), "weekly", None, None), Some(d("2026-01-01")));
+        for (cycle, days) in [("lifetime", None), ("", None), ("days", None), ("days", Some(0))] {
+            assert_eq!(period_start(d("2026-04-15"), cycle, days, None), None, "{cycle}");
+        }
     }
 
     // 空名条目是允许的（表尾「＋ 新建」先插空行再就地填），但到期时间线、通知与 ICS
@@ -740,67 +679,43 @@ mod tests {
         );
     }
 
+    /// 月末钳位：短月落到月末，并把想落的那一天记进 `billing_day`；带着账单日再推就回到原日。
     #[test]
-    fn advance_clamps_month_end() {
-        // 1/31 加一个月落在 2 月最后一天，而且从此固定在 28/29 号——月末订阅会这样漂移一次
-        assert_eq!(advance(d("2026-01-31"), "monthly", None), Some(d("2026-02-28")));
-        assert_eq!(advance(d("2024-01-31"), "monthly", None), Some(d("2024-02-29")));
-        assert_eq!(advance(d("2026-02-28"), "monthly", None), Some(d("2026-03-28")));
-        assert_eq!(advance(d("2026-03-31"), "quarterly", None), Some(d("2026-06-30")));
+    fn advance_clamps_month_end_and_remembers_the_billing_day() {
+        let step = |date: &str, cycle: &str, bd: Option<u32>| {
+            let m = step_n(d(date), cycle, None, 1, bd).unwrap();
+            (m.due, m.billing_day)
+        };
+        assert_eq!(step("2026-01-31", "monthly", None), (d("2026-02-28"), Some(31)));
+        assert_eq!(step("2024-01-31", "monthly", None), (d("2024-02-29"), Some(31)));
+        assert_eq!(step("2026-02-28", "monthly", Some(31)), (d("2026-03-31"), None));
+        assert_eq!(step("2026-02-28", "monthly", None), (d("2026-03-28"), None));
+        assert_eq!(step("2026-03-31", "quarterly", None), (d("2026-06-30"), Some(31)));
+        // 账单日优先于日期自己的日：3/15 配账单日 31 推一期落 4/30，钳位照记
+        assert_eq!(step("2026-03-15", "monthly", Some(31)), (d("2026-04-30"), Some(31)));
     }
 
     #[test]
     fn advance_spans_years() {
-        assert_eq!(advance(d("2026-12-15"), "monthly", None), Some(d("2027-01-15")));
-        assert_eq!(advance(d("2024-02-29"), "annual", None), Some(d("2025-02-28")));
-        assert_eq!(advance(d("2026-01-01"), "triennial", None), Some(d("2029-01-01")));
+        assert_eq!(advance(d("2026-12-15"), "monthly", None, None), Some(d("2027-01-15")));
+        assert_eq!(advance(d("2024-02-29"), "annual", None, None), Some(d("2025-02-28")));
+        assert_eq!(advance(d("2026-01-01"), "triennial", None, None), Some(d("2029-01-01")));
     }
 
     #[test]
     fn advance_custom_days_needs_a_positive_count() {
-        assert_eq!(advance(d("2026-01-01"), "days", Some(181)), Some(d("2026-07-01")));
+        assert_eq!(advance(d("2026-01-01"), "days", Some(181), None), Some(d("2026-07-01")));
         // 天数缺失或非正：推不出日期，宁可没有到期日也不要一个错的
-        assert_eq!(advance(d("2026-01-01"), "days", None), None);
-        assert_eq!(advance(d("2026-01-01"), "days", Some(0)), None);
-        assert_eq!(advance(d("2026-01-01"), "days", Some(-30)), None);
+        assert_eq!(advance(d("2026-01-01"), "days", None, None), None);
+        assert_eq!(advance(d("2026-01-01"), "days", Some(0), None), None);
+        assert_eq!(advance(d("2026-01-01"), "days", Some(-30), None), None);
     }
 
     #[test]
     fn advance_has_no_next_for_lifetime_or_unknown() {
-        assert_eq!(advance(d("2026-01-01"), "lifetime", None), None);
-        assert_eq!(advance(d("2026-01-01"), "", None), None);
-        assert_eq!(advance(d("2026-01-01"), "fortnightly", None), None);
-    }
-
-    /// 换到期模型前后到期日不变：折到 `next` 原样照抄，折到 `last` 退一期再由 `due_from` 推回来；
-    /// `last` 表示不了的月末到期日退到最近的更早一天，推不出的返回 None。
-    #[test]
-    fn reanchoring_keeps_the_due_date() {
-        let back = |due: NaiveDate, cycle: &str, days: Option<i64>| {
-            let last = reanchor("last", due, cycle, days)?;
-            due_from("last", cycle, days, None, Some(&last.to_string()))
-        };
-        assert_eq!(reanchor("next", d("2026-03-31"), "monthly", None), Some(d("2026-03-31")));
-        assert_eq!(reanchor("last", d("2026-04-15"), "monthly", None), Some(d("2026-03-15")));
-        assert_eq!(back(d("2026-03-31"), "monthly", None), Some(d("2026-03-28")));
-        assert_eq!(back(d("2028-03-31"), "monthly", None), Some(d("2028-03-29")));
-        assert_eq!(back(d("2026-05-31"), "quarterly", None), Some(d("2026-05-28")));
-        assert_eq!(back(d("2028-02-29"), "annual", None), Some(d("2028-02-28")));
-        for (cycle, days) in [("lifetime", None), ("", None), ("days", None), ("days", Some(0))] {
-            assert_eq!(reanchor("last", d("2026-04-15"), cycle, days), None, "{cycle}");
-        }
-        // 两年逐日扫一遍（含闰年）：推回来从不晚于原到期日，28 号以内与按天的周期分毫不差
-        for c in CYCLES.iter().filter(|c| **c != "lifetime") {
-            let mut due = d("2027-01-01");
-            while due.year() < 2029 {
-                let got = back(due, c, Some(30)).unwrap();
-                assert!(got <= due, "{c} {due} → {got}");
-                if due.day() <= 28 || matches!(*c, "weekly" | "days") {
-                    assert_eq!(got, due, "{c}");
-                }
-                due = due.succ_opt().unwrap();
-            }
-        }
+        assert_eq!(advance(d("2026-01-01"), "lifetime", None, None), None);
+        assert_eq!(advance(d("2026-01-01"), "", None, None), None);
+        assert_eq!(advance(d("2026-01-01"), "fortnightly", None, None), None);
     }
 
     #[test]
@@ -817,15 +732,15 @@ mod tests {
         assert_eq!(monthly_factor("days", Some(0)), None);
     }
 
-    /// 写入口照 `CYCLES` 收周期、`advance_n` 照分支推日期：两份对不上，收进来的周期就推不动。
+    /// 写入口照 `CYCLES` 收周期、`step` 照分支推日期：两份对不上，收进来的周期就推不动。
     #[test]
     fn the_cycle_set_is_exactly_what_advance_can_move() {
         let d = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
         for c in CYCLES {
-            assert_eq!(advance(d, c, Some(30)).is_some(), *c != "lifetime", "{c}");
+            assert_eq!(advance(d, c, Some(30), None).is_some(), *c != "lifetime", "{c}");
         }
         for c in ["yearly", "Monthly", "", "custom"] {
-            assert!(advance(d, c, Some(30)).is_none(), "{c}");
+            assert!(advance(d, c, Some(30), None).is_none(), "{c}");
         }
     }
 
@@ -856,38 +771,41 @@ mod tests {
     }
 
     /// 推算结果只到 9999 年：写入口只收四位年份，推过去存成 `+10000-01-15`，ICS 写出 9 位日期。
-    /// `next` 锚点因此推不动；`last` + `schedule` 按「没有日程」回落成今天。
+    /// 推不动就不动日期；日期本身仍算得出到期日。
     #[test]
     fn dates_are_never_pushed_past_year_9999() {
-        assert_eq!(advance(d("9999-11-15"), "monthly", None), Some(d("9999-12-15")));
-        assert_eq!(advance(d("9999-12-15"), "monthly", None), None);
-        assert_eq!(advance(d("9999-12-30"), "days", Some(5)), None);
+        assert_eq!(advance(d("9999-11-15"), "monthly", None, None), Some(d("9999-12-15")));
+        assert_eq!(advance(d("9999-12-15"), "monthly", None, None), None);
+        assert_eq!(advance(d("9999-12-30"), "days", Some(5), None), None);
         let today = d("2026-01-01");
-        assert_eq!(renew_to("next", "schedule", "monthly", None, Some(d("9999-12-15")), None, today), None);
-        assert_eq!(renew_to("last", "schedule", "monthly", None, None, Some(d("9999-12-15")), today), Some(today));
-        assert_eq!(due_from("last", "monthly", None, None, Some("9999-12-15")), None);
+        assert_eq!(renew_to("schedule", "monthly", None, Some(d("9999-12-15")), None, today), None);
+        assert_eq!(renew_to("today", "monthly", None, Some(d("2026-01-01")), None, d("9999-12-15")), None);
+        assert_eq!(due_from("monthly", Some("9999-12-15")), Some(d("9999-12-15")));
     }
 
-    /// 补推逾期条目必须一次性推 n 期。逐次调用 `advance` 会在月末被钳一次之后
-    /// 永久丢掉锚点：1/31 迭代六次得 7/28，而正确答案是 7/31。
+    /// 跨多期一次算第 n 期，与带着账单日逐期推结果一致；不带账单日逐期推会在二月之后永久丢掉月末。
     #[test]
     fn advancing_many_periods_keeps_the_month_end_anchor() {
         let start = d("2026-01-31");
-        let mut walked = start;
+        let n = |date: &str, cycle: &str, days: Option<i64>, n: u32| step_n(d(date), cycle, days, n, None).map(|m| m.due);
+        assert_eq!(n("2026-01-31", "monthly", None, 6), Some(d("2026-07-31")));
+        let mut walked = Moved { due: start, billing_day: None };
         for _ in 0..6 {
-            walked = advance(walked, "monthly", None).unwrap();
+            walked = step_n(walked.due, "monthly", None, 1, walked.billing_day).unwrap();
         }
-        assert_eq!(walked, d("2026-07-28"), "逐步推进会丢锚点（这正是不能那么做的理由）");
-        assert_eq!(advance_n(start, "monthly", None, 6).unwrap(), d("2026-07-31"));
-        // 短月仍然钳位，只是不把钳过的结果当成下一次的起点
-        assert_eq!(advance_n(start, "monthly", None, 1).unwrap(), d("2026-02-28"));
+        assert_eq!(walked.due, d("2026-07-31"));
+        let mut naive = start;
+        for _ in 0..6 {
+            naive = advance(naive, "monthly", None, None).unwrap();
+        }
+        assert_eq!(naive, d("2026-07-28"), "不带账单日逐步推进会丢锚点");
         // 天数与周是绝对的，n 期就是 n 倍
-        assert_eq!(advance_n(d("2026-01-01"), "days", Some(181), 2).unwrap(), d("2026-12-29")); // 362 天
-        assert_eq!(advance_n(d("2026-01-01"), "weekly", None, 3).unwrap(), d("2026-01-22"));
+        assert_eq!(n("2026-01-01", "days", Some(181), 2), Some(d("2026-12-29"))); // 362 天
+        assert_eq!(n("2026-01-01", "weekly", None, 3), Some(d("2026-01-22")));
         // 闰日按年推进：非闰年钳到 28，四年后回到 29
-        assert_eq!(advance_n(d("2028-02-29"), "annual", None, 1).unwrap(), d("2029-02-28"));
-        assert_eq!(advance_n(d("2028-02-29"), "annual", None, 4).unwrap(), d("2032-02-29"));
-        assert_eq!(advance_n(d("2026-01-01"), "lifetime", None, 2), None);
+        assert_eq!(n("2028-02-29", "annual", None, 1), Some(d("2029-02-28")));
+        assert_eq!(n("2028-02-29", "annual", None, 4), Some(d("2032-02-29")));
+        assert_eq!(n("2026-01-01", "lifetime", None, 2), None);
     }
 
     /// 月系数就是「一个月里有几个周期」：一月按 30.44 天（365.25 / 12）折，
@@ -1023,8 +941,8 @@ mod tests {
         add(&conn, "subs", &json!({ "name": "远", "status": "Active", "next_renewal": d(30) }));
         add(&conn, "subs", &json!({ "name": "近", "status": "Active", "next_renewal": d(2) }));
         // SIM：verb 是「保号」，note_field 是 keepalive_action
-        add(&conn, "sims", &json!({ "name": "卡A", "status": "Active", "cycle": "days", "cycle_days": 10, "last_renewed": d(0), "extra": { "keepalive_action": "发条短信" } }));
-        add(&conn, "sims", &json!({ "name": "卡B", "status": "Active", "cycle": "days", "cycle_days": 11, "last_renewed": d(0), "extra": { "keepalive_action": "" } }));
+        add(&conn, "sims", &json!({ "name": "卡A", "status": "Active", "cycle": "days", "cycle_days": 10, "next_renewal": d(10), "extra": { "keepalive_action": "发条短信" } }));
+        add(&conn, "sims", &json!({ "name": "卡B", "status": "Active", "cycle": "days", "cycle_days": 11, "next_renewal": d(11), "extra": { "keepalive_action": "" } }));
         let ups = upcoming(&conn).unwrap();
         assert_eq!(names(&ups), ["近", "卡A", "卡B", "远"]);
         assert_eq!(ups[0]["days_left"], json!(2));
@@ -1037,7 +955,7 @@ mod tests {
         assert_eq!(ups[3]["cycle"], json!(""));
     }
 
-    /// 该上时间线却算不出到期日的条目要被点名，并说清缺哪一项；买断与不上时间线的状态不算。
+    /// 该上时间线却算不出到期日的条目要被点名；买断、不上时间线的状态、有日期没周期的都不算。
     #[test]
     fn undated_names_the_timeline_items_that_have_no_due_date() {
         let conn = seeded();
@@ -1045,11 +963,11 @@ mod tests {
         add(&conn, "subs", &json!({ "name": "买断", "status": "Active", "cycle": "lifetime" }));
         add(&conn, "subs", &json!({ "name": "未启用", "status": "Unused" }));
         add(&conn, "subs", &json!({ "name": "有日期", "status": "Active", "next_renewal": "2030-01-01" }));
-        add(&conn, "sims", &json!({ "name": "缺周期", "status": "Ending", "last_renewed": "2026-01-01" }));
+        add(&conn, "sims", &json!({ "name": "缺周期有日期", "status": "Active", "next_renewal": "2030-01-01" }));
+        add(&conn, "sims", &json!({ "name": "缺日期卡", "status": "Ending", "cycle": "days", "cycle_days": 30 }));
         let list = undated(&conn).unwrap();
-        assert_eq!(names(&list), ["缺日期", "缺周期"]);
-        assert_eq!(list[0]["missing"], json!("下次续费日"));
-        assert_eq!(list[1]["missing"], json!("周期"));
+        assert_eq!(names(&list), ["缺日期", "缺日期卡"]);
+        assert!(list.iter().all(|x| x["missing"] == json!("到期日")), "{list:?}");
         assert_eq!(list[1]["kind"], json!("sims"));
     }
 
@@ -1104,18 +1022,15 @@ mod tests {
         assert_eq!(un[0]["missing"], json!("币种"));
     }
 
-    /// 到期日只有一份实现，到期时间线与库列表都走它。
+    /// 到期日只有一份实现，到期时间线与库列表都走它：读条目存的日期，买断没有到期日，坏日期算不出。
     #[test]
-    fn due_is_computed_one_way_for_both_anchors() {
-        assert_eq!(due_from("next", "annual", None, Some("2026-09-01"), None), Some(d("2026-09-01")));
-        assert_eq!(due_from("last", "days", Some(181), None, Some("2026-01-01")), Some(d("2026-07-01")));
-        // 买断没有到期日
-        assert_eq!(due_from("next", "lifetime", None, Some("2026-09-01"), None), None);
-        // 锚点字段缺了就算不出来——这些条目由 undated() 单独点名，而不是静默丢掉
-        assert_eq!(due_from("next", "annual", None, None, Some("2026-01-01")), None);
-        assert_eq!(due_from("last", "annual", None, Some("2026-09-01"), None), None);
-        // last 锚点但周期为空：同样算不出来（SIM 曾因界面清掉 cycle 整条掉出时间线）
-        assert_eq!(due_from("last", "", None, None, Some("2026-01-01")), None);
+    fn due_is_the_stored_date_except_for_lifetime() {
+        assert_eq!(due_from("annual", Some("2026-09-01")), Some(d("2026-09-01")));
+        assert_eq!(due_from("", Some("2026-09-01")), Some(d("2026-09-01")));
+        assert_eq!(due_from("lifetime", Some("2026-09-01")), None);
+        // 日期缺了或读不出就算不出来——这些条目由 undated() 单独点名，而不是静默丢掉
+        assert_eq!(due_from("annual", None), None);
+        assert_eq!(due_from("annual", Some("去年")), None);
     }
 
 }

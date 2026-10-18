@@ -41,9 +41,24 @@ def clean(d):
     return {k: v for k, v in d.items() if v is not None and v != ''}
 
 
+MONTHS = {'monthly': 1, 'quarterly': 3, 'semiannual': 6, 'annual': 12, 'biennial': 24, 'triennial': 36}
+
+
+def plus_period(iso, cycle, cycle_days=None):
+    """上次续费 + 一期 = 下次到期日（Kalends 只存到期日）。按月的周期钳到月末；推不出返回 None。"""
+    d = dt.date.fromisoformat(iso)
+    if cycle in MONTHS:
+        y, m0 = divmod(d.month - 1 + MONTHS[cycle], 12)
+        y, m = d.year + y, m0 + 1
+        last = (dt.date(y + (m == 12), m % 12 + 1, 1) - dt.timedelta(days=1)).day
+        return d.replace(year=y, month=m, day=min(d.day, last)).isoformat()
+    days = 7 if cycle == 'weekly' else (cycle_days if cycle == 'days' and cycle_days else None)
+    return (d + dt.timedelta(days=days)).isoformat() if days else None
+
+
 # ── 条目的形状：引擎要用的字段是 items 的真列，域字段一律进 extra（键即字段键）──
 REAL_COLS = {'name', 'parent_id', 'status', 'price', 'currency', 'cycle', 'cycle_days',
-             'next_renewal', 'last_renewed', 'url', 'notes'}
+             'next_renewal', 'url', 'notes'}
 # 三个续费库的状态词表 2026-07 起统一为英文（迁移 0006）；Notion 导出里还是中文
 STATUS_EN = {'启用': 'Active', '准备': 'Planned', '未启用': 'Unused',
              '预结束': 'Ending', '已结束': 'Ended'}
@@ -175,11 +190,10 @@ def import_sims(files):
             if not name:
                 continue
             cycle_days = r.get('cycle_days') or CYCLE_DAYS.get(r.get('cycle_raw') or '')
-            last = r.get('last_renewed')
-            if not last and r.get('next_date') and cycle_days:
-                last = (dt.date.fromisoformat(r['next_date'])
-                        - dt.timedelta(days=cycle_days)).isoformat()
-                derived.append(f'{name}: 由续费日期倒推上次续费 {last}')
+            nxt = r.get('next_date')
+            if not nxt and r.get('last_renewed') and cycle_days:
+                nxt = plus_period(r['last_renewed'], 'days', cycle_days)
+                derived.append(f'{name}: 由上次续费推出下次到期 {nxt}')
             forms = r.get('forms')
             try:
                 forms = json.loads(forms) if isinstance(forms, str) else (forms or [])
@@ -192,10 +206,10 @@ def import_sims(files):
                 'keepalive_action': r.get('keepalive_action'),
                 # 保号周期并进了通用周期模型：自定义天数 = cycle 'days' + cycle_days
                 'cycle': 'days' if cycle_days else None,
-                'cycle_days': cycle_days, 'last_renewed': last, 'notes': r.get('notes'),
+                'cycle_days': cycle_days, 'next_renewal': nxt, 'notes': r.get('notes'),
             })
             n += 1
-    print(f'SIM：导入 {n}；倒推 {len(derived)} 条：')
+    print(f'SIM：导入 {n}；推出 {len(derived)} 条：')
     for line in derived:
         print('  ', line)
 
@@ -233,7 +247,8 @@ def import_vps(files):
                 'price': r.get('price'),
                 'currency': 'USD' if r.get('price') is not None else None,
                 'cycle': cycle, 'cycle_days': cycle_days,
-                'last_renewed': r.get('last_renewed'),
+                # Notion 记的是上次续费；Kalends 只存下次到期日，推一期过去
+                'next_renewal': plus_period(r['last_renewed'], cycle, cycle_days) if r.get('last_renewed') else None,
             })
             n += 1
     print(f'VPS：导入 {n}')

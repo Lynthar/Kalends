@@ -590,15 +590,12 @@ async function doRenew(key, btn) {
   const body = JSON.stringify(paidOn ? { renewed_at: paidOn } : {});
   const r = await write(`item:${id}`, () => api(`/api/items/${id}/renew`, { method: 'POST', body }), {
     once: true,
-    // 报出下次到期是哪天（renew_from='today' 会把账单日拽走，说出来才看得见）；日期由
-    // 后端算，前端不自己算。算不出到期日时后端仍把上次续费日记成付款日——旧日期被覆盖要说出来
-    done: r => r?.due ? `已记账，下次到期 ${r.due}`
-      : r?.last_renewed ? `已记账，上次${verb}日记作 ${r.last_renewed}；${NO_NEXT_DUE}`
-      : `已记一笔；${NO_NEXT_DUE}`,
+    // 报出下次到期是哪天（renew_from='today' 会把账单日拽走，说出来才看得见）；日期由后端算，前端不自己算
+    done: r => r?.due ? `已记账，下次到期 ${r.due}` : `已记一笔；${NO_NEXT_DUE}`,
   });
   if (btn?.isConnected) { btn.disabled = false; btn.textContent = was; }
-  // 直接记下次到期日、又没有周期的（证件）推不动日期：记完账就开表单让人当场填新的到期日
-  const fresh = r && !r.due && 'next_renewal' in r && state[kind]?.find(x => x.id === +id);
+  // 推不动日期的（没有周期的证件、买断）：记完账就开表单让人当场填新的到期日
+  const fresh = r && !r.due && state[kind]?.find(x => x.id === +id);
   if (fresh) openItemDialog(kind, fresh, { focus: 'next_renewal', note: `已记一笔${verb}；${NO_NEXT_DUE}——在这里填上新的到期日再保存` });
 }
 

@@ -135,7 +135,7 @@ export default async function (t) {
   await sleep(900);
   const undOv = await (await fetch(APP + 'api/overview')).json();
   check('接口把它列进 undated 而不是丢掉',
-    undOv.undated.some(x => x.id === undRow.id && x.missing === '下次续费日'), JSON.stringify(undOv.undated));
+    undOv.undated.some(x => x.id === undRow.id && x.missing === '到期日'), JSON.stringify(undOv.undated));
   check('它确实不在到期时间线上（所以才必须点名）',
     !undOv.upcoming.some(x => x.kind === 'subs' && x.id === undRow.id));
   check('首页点名了它',

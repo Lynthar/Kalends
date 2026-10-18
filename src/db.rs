@@ -29,6 +29,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0021_ids_are_never_reused.sql"),
     include_str!("../migrations/0022_auto_renew.sql"),
     include_str!("../migrations/0023_notes_become_a_custom_column.sql"),
+    include_str!("../migrations/0024_one_due_date.sql"),
 ];
 
 /// 一个跑完全部迁移的内存库，等价于"全新安装"。只给测试用。
@@ -214,7 +215,7 @@ mod tests {
     }
 
     /// 从 v4（库泛化之前的最后形态）一路迁到当前：0006 状态翻译、0007 搬运与重指、
-    /// 0010/0011 删旧表、0012 NOCASE 回填、0013–0018 各钉一处逐值对拍、0020 媒体退场。
+    /// 0010/0011 删旧表、0012 NOCASE 回填、0013–0018 各钉一处逐值对拍、0020 媒体退场、0024 折成一个到期日。
     #[test]
     fn a_v4_era_database_upgrades_to_current_with_every_value_accounted_for() {
         let conn = db_at(4, include_str!("../tests/fixtures/uv04-data.sql"));
@@ -304,6 +305,35 @@ mod tests {
         assert_eq!(one::<String>(&conn, "SELECT json_extract(extra,'$.notes') FROM items WHERE name='alpha Host'", []), "团队账号");
         assert_eq!(one::<String>(&conn, "SELECT json_extract(extra,'$.c1') FROM items WHERE name='alpha Host'", []), "自定义值");
         assert_notes_became_a_custom_column(&conn);
+        // 0024：按上次续费记的 SIM / VPS 折成下次到期日（90 天、一年），直接记到期日的订阅原样；
+        // 没周期的行折不出来、落空（界面会点名）
+        assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE name='🇬🇧 ExampleTel'", []), "2026-08-30");
+        assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE name='ExampleHost'", []), "2027-03-10");
+        assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE name='Pro tier'", []), "2027-01-15");
+        assert_eq!(one::<Option<String>>(&conn, "SELECT next_renewal FROM items WHERE name='OldTel'", []), None);
+        assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM items WHERE billing_day IS NOT NULL", []), 0);
+        assert_one_due_date(&conn);
+        // 上次续费成了算出来的列、原来的上表设置不动；每个库都有下次到期，原来按上次续费记的库把它摆上表
+        assert_eq!(one::<String>(&conn, "SELECT src||':'||shown FROM fields WHERE tbl='sims' AND key='last_renewed'", []), "calc:1");
+        assert_eq!(one::<String>(&conn, "SELECT src||':'||shown FROM fields WHERE tbl='sims' AND key='next_renewal'", []), "col:1");
+        assert_eq!(one::<String>(&conn, "SELECT src||':'||shown FROM fields WHERE tbl='subs' AND key='last_renewed'", []), "calc:0");
+        assert_eq!(one::<String>(&conn, "SELECT src||':'||shown FROM fields WHERE tbl='subs' AND key='left'", []), "calc:0");
+    }
+
+    /// 0024 之后：items 没有 `last_renewed` 真列、collections 没有 `due_anchor`，到期索引只认 `next_renewal`；
+    /// 每个库都注册了下次到期 / 上次续费 / 剩余天数三列，补进去的行号从 `id_seq` 发、seq 跟着推到位。
+    fn assert_one_due_date(conn: &Connection) {
+        assert_eq!(one::<i64>(conn, "SELECT count(*) FROM pragma_table_info('items') WHERE name='last_renewed'", []), 0);
+        assert_eq!(one::<i64>(conn, "SELECT count(*) FROM pragma_table_info('collections') WHERE name='due_anchor'", []), 0);
+        assert_eq!(one::<String>(conn, "SELECT sql FROM sqlite_master WHERE name='idx_items_due'", []), "CREATE INDEX idx_items_due ON items(next_renewal)");
+        let colls: i64 = one(conn, "SELECT count(*) FROM collections", []);
+        for key in ["next_renewal", "last_renewed", "left"] {
+            assert_eq!(one::<i64>(conn, "SELECT count(*) FROM fields WHERE key=?1", [key]), colls, "{key} 该每个库一行");
+        }
+        assert_eq!(one::<i64>(conn, "SELECT count(*) FROM fields WHERE key='last_renewed' AND NOT (src='calc' AND builtin=1)", []), 0);
+        assert_eq!(one::<i64>(conn, "SELECT count(*) FROM fields WHERE key='next_renewal' AND NOT (src='col' AND shown=1)", []), 0);
+        // 测试里先调过 next_id 的话 seq 会多一格，所以只钉「没落在新行之后」
+        assert!(one::<i64>(conn, "SELECT seq FROM id_seq WHERE name='fields'", []) >= one::<i64>(conn, "SELECT max(id) FROM fields", []));
     }
 
     /// 0023 之后：items 没有 notes 真列，每个库的备注都注册成可改名、可删的 extra 列。
@@ -314,7 +344,8 @@ mod tests {
     }
 
     /// 从 v14（新架构时代）迁到当前：自定义库/自定义列/extra 原样存续，
-    /// 0016「用户改过就不动」的防线、0017 的默认值落点、0018 的近似回填、0022 的列并开关各钉一处。
+    /// 0016「用户改过就不动」的防线、0017 的默认值落点、0018 的近似回填、0022 的列并开关、
+    /// 0024 的月末折算各钉一处。
     #[test]
     fn a_v14_era_database_with_custom_shapes_upgrades_intact() {
         let conn = db_at(14, include_str!("../tests/fixtures/uv14-data.sql"));
@@ -344,8 +375,9 @@ mod tests {
         assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM sqlite_master WHERE name='media_items'", []), 0);
         // 0021：号从已删行留下的痕迹之后发——台账里的条目 999、库属性指着的 c950 与孤儿键 c900
         assert_eq!(one::<i64>(&conn, "SELECT seq FROM id_seq WHERE name='items'", []), 999);
-        assert_eq!(one::<i64>(&conn, "SELECT seq FROM id_seq WHERE name='fields'", []), 950);
-        assert_eq!(next_id(&conn, "fields").unwrap(), 951);
+        // 0024 给六个库补了 12 行字段（订阅 / 藏书各 2、SIM / VPS 各 1、两个域名库各 3），号从 950 之后发
+        assert_eq!(one::<i64>(&conn, "SELECT seq FROM id_seq WHERE name='fields'", []), 962);
+        assert_eq!(next_id(&conn, "fields").unwrap(), 963);
         assert_eq!(next_id(&conn, "items").unwrap(), 1000);
         // 0022：k5 的开/关并进开关（开＝迁移那天起自动续），键与列一起退场、别的 extra 不动；
         // k6 有开/关之外的值，整库原样；存量台账都不是自动记的
@@ -365,6 +397,17 @@ mod tests {
         assert_eq!(one::<String>(&conn, "SELECT extra FROM items WHERE name='Example Almanac'", []), r#"{"notes":"纸本"}"#);
         assert_eq!(one::<String>(&conn, "SELECT extra FROM items WHERE name='ExampleHost'", []), r#"{"product":"VPS-Basic","cores":2}"#);
         assert_notes_became_a_custom_column(&conn);
+        // 0024：按上次续费记的行折成下次到期日；1/31 月付钳到 2/28 并把 31 记进账单日（与 engine::step_n 同一答案）；
+        // 直接记到期日的库原样、账单日空着；藏书库补注册的两列不上表、原来的「到期」列名不动
+        assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE name='ExampleTel'", []), "2026-09-29");
+        assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE name='ExampleHost'", []), "2027-05-20");
+        assert_eq!(one::<Option<i64>>(&conn, "SELECT billing_day FROM items WHERE name='ExampleHost'", []), None);
+        assert_eq!(one::<String>(&conn, "SELECT next_renewal||':'||billing_day FROM items WHERE name='ExampleBox'", []), "2026-02-28:31");
+        assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE name='Example Plus'", []), "2026-09-01");
+        assert_eq!(one::<Option<i64>>(&conn, "SELECT billing_day FROM items WHERE name='Example Plus'", []), None);
+        assert_eq!(one::<String>(&conn, "SELECT name||':'||shown FROM fields WHERE tbl='books' AND key='next_renewal'", []), "到期:1");
+        assert_eq!(one::<i64>(&conn, "SELECT sum(shown) FROM fields WHERE tbl='books' AND key IN ('last_renewed','left')", []), 0);
+        assert_one_due_date(&conn);
     }
 
     /// 0020 只在媒体清空后放行：还有媒体行就整库拒绝迁移，原样无损。
