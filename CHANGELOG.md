@@ -2,6 +2,14 @@
 
 Release notes are taken from this file verbatim — each `## vX.Y.Z` section becomes that release's body.
 
+## v0.4.2
+
+**Security**: outgoing TLS (online exchange rates, notifications and email) no longer trusts the eMudhra (emSign) intermediate certificates that browsers and CA programs distrusted in October. The bundled root store moves to webpki-roots 1.0.11, with rustls-webpki 0.103.16.
+
+**Changed**: the built-in average exchange rates are refreshed to 2026-09-24 – 10-23.
+
+**Upgrading**: no schema change.
+
 ## v0.4.1
 
 **Fixed**: the "days left" bar now shrinks with the days that remain, the same direction as its label. It used to fill up as the period elapsed, so 88 of 92 days left showed a sliver and 40 of 1096 an almost full bar.
