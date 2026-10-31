@@ -118,6 +118,7 @@ kalends restore --from /path/to/data/backups/snapshot-2026-08-25.db --to /path/t
 - **界面目前只有中文。** 没有 i18n 层，所以界面和 `restore` 的输出都是中文。
 - **数据一次全部加载。** 搜索是在浏览器里对名称、备注和自定义列做子串匹配，所有条目一次画完，
   没有分页也没有虚拟滚动。个人账本感觉不到；上万条就会慢下来。
+- **浏览器不能太旧。** 要 Chrome / Edge 102、Firefox 112、Safari 或 iOS 15.5，或更新的版本。
 
 ## 文档
 

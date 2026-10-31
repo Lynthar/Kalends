@@ -156,6 +156,8 @@ SMTP always connects directly.
   names, notes and custom columns, and every entry is drawn at once, with no
   pagination or virtual scrolling. A personal ledger won't notice; tens of
   thousands of entries will.
+- **It needs a reasonably recent browser.** Chrome or Edge 102, Firefox 112,
+  Safari or iOS 15.5, or anything newer.
 
 ## Documentation
 
