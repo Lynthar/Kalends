@@ -2,7 +2,7 @@
 
 Release notes are taken from this file verbatim — each `## vX.Y.Z` section becomes that release's body.
 
-## Unreleased
+## v0.5.0
 
 **Fixed**: SIM cards added in the preset SIM library can be renewed again. That library never had a cycle column, so a new card's cycle stayed empty and renewing it could not move its date; the cycle (with price and link) is there now, and cards that only had a day count become a custom cycle. Auto-renew keeps a 29th–31st billing day in libraries that count from the payment day instead of settling on the 28th. A proxy address with an unsupported scheme (`socks://`, a typo) is refused instead of silently connecting directly. Smaller fixes cover a digest time just before midnight, half-typed dates and fast keyboard row moves.
 
