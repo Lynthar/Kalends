@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use chrono::{NaiveDate, NaiveDateTime};
 use rusqlite::{params, Connection};
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -28,11 +29,13 @@ pub struct EmailCfg {
 /// 设置读不出来是 `Err`，不折成「渠道没开」——那样提醒会静默停摆、日志零字。
 /// `Ok(None)` 只表示渠道关着、存着的值不是 JSON，或必填项没填全。
 pub fn telegram_cfg(conn: &Connection) -> Result<Option<TelegramCfg>> {
-    Ok(db::get_setting(conn, "notify.telegram")?.and_then(|raw| telegram_cfg_from(&raw)))
+    let outbound = db::get_setting(conn, "meta.proxy")?.unwrap_or_default();
+    Ok(db::get_setting(conn, "notify.telegram")?.and_then(|raw| telegram_cfg_from(&raw, &outbound)))
 }
 
 /// 从一份渠道配置串解析；渠道关着、不是 JSON 或必填项没填全都是 None。
-pub fn telegram_cfg_from(raw: &str) -> Option<TelegramCfg> {
+/// 自己那栏代理留空就沿用出网代理 `outbound`：配了出网代理的人多半就是连不上 Telegram 的人。
+pub fn telegram_cfg_from(raw: &str, outbound: &str) -> Option<TelegramCfg> {
     let v = serde_json::from_str::<Value>(raw).ok()?;
     if !v["enabled"].as_bool().unwrap_or(false) {
         return None;
@@ -40,7 +43,10 @@ pub fn telegram_cfg_from(raw: &str) -> Option<TelegramCfg> {
     let cfg = TelegramCfg {
         bot_token: v["bot_token"].as_str().unwrap_or("").trim().to_string(),
         chat_id: v["chat_id"].as_str().unwrap_or("").trim().to_string(),
-        proxy: v["proxy"].as_str().unwrap_or("").trim().to_string(),
+        proxy: Some(v["proxy"].as_str().unwrap_or("").trim())
+            .filter(|p| !p.is_empty())
+            .unwrap_or(outbound.trim())
+            .to_string(),
     };
     (!cfg.bot_token.is_empty() && !cfg.chat_id.is_empty()).then_some(cfg)
 }
@@ -101,6 +107,8 @@ fn build_client(
         builder = builder.resolve(host, addr);
     }
     if !proxy.is_empty() {
+        // 存量里可能还躺着写入口收紧之前的坏串：认不出的协议宁可报错也别静默直连
+        settings::proxy(proxy)?;
         // 配了代理时域名由代理解析，钉地址不生效——那种部署的出口管控在代理侧
         builder = builder.proxy(reqwest::Proxy::all(proxy)?);
     }
@@ -213,8 +221,9 @@ async fn send_email_within(cfg: &EmailCfg, subject: &str, body: &str, budget: st
     } else {
         AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.host).map_err(|e| smtp_error(&e))?
     };
+    // 连接阶段单独限时（lettre 缺省 60s，与下面的整段预算一样长，黑洞主机每封都要干等满）；
     // 用户名为空就别带凭据：无认证的内网中继会拒绝空 AUTH
-    let builder = builder.port(cfg.port);
+    let builder = builder.port(cfg.port).timeout(Some(std::time::Duration::from_secs(10)));
     let transport = if cfg.username.is_empty() {
         builder.build()
     } else {
@@ -248,7 +257,8 @@ fn tls_hint(chain: &str) -> Option<&'static str> {
     }
     let (_, cert) = chain.split_once("invalid peer certificate: ")?;
     [
-        ("UnknownIssuer", "证书不受信任：只认公共 CA 签发的证书，自签名或私有 CA 的服务器接不上"),
+        ("UnknownIssuer", "证书追溯不到内置的公共根证书：自签名、私有 CA，或已被移出根证书库的 CA 都接不上"),
+        ("CertDistrusted", "证书链里有已被撤销信任的 CA 证书：服务器得换一家 CA 的证书"),
         ("CaUsedAsEndEntity", "对端出示的是 CA 证书而不是服务器证书"),
         ("certificate not valid for name", "证书上的域名与填的服务器地址对不上"),
         ("NotValidForName", "证书上的域名与填的服务器地址对不上"),
@@ -464,10 +474,21 @@ fn load_since(today: &str, ups: &[Value]) -> String {
         .to_string()
 }
 
+/// 上一轮在昨天、摘要时刻之前，这一轮已过午夜：昨天的摘要时刻夹在两轮之间，两边都判不到它。
+/// 调度每 15 分钟一轮，摘要时刻设在 23:45 之后就可能日复一日落进这道缝。刚起的进程没有上一轮，
+/// 不补昨天的（停机补发归逐项提醒管，摘要是「当天的全景」）。
+fn late_digest_day(prev: Option<NaiveDateTime>, now: NaiveDateTime, digest_time: &str) -> Option<NaiveDate> {
+    let prev = prev?;
+    let day = prev.date();
+    (now.date().pred_opt() == Some(day) && prev.format("%H:%M").to_string().as_str() < digest_time).then_some(day)
+}
+
 /// 一轮检查的全部输入：都是已经读好的数据，不碰数据库也不看时钟。
 struct TickInput<'a> {
     now_hhmm: &'a str,
     today: &'a str,
+    /// 夹在上一轮与这一轮之间、没赶上发的那天的摘要（`late_digest_day`）
+    late_digest: Option<&'a str>,
     digest_time: &'a str,
     thresholds: &'a [i64],
     window: i64,
@@ -517,10 +538,11 @@ fn plan(inp: &TickInput<'_>) -> Vec<Pending> {
                 text: format!("Kalends 提醒\n{}", line(it)),
             });
         }
-        if inp.now_hhmm >= inp.digest_time
-            && !inp.sent.has_digest(inp.today, ch)
-            && !inp.sent.on_hold("digest", None, inp.today, None, ch)
-        {
+        let today = (inp.now_hhmm >= inp.digest_time).then_some(inp.today);
+        for day in [inp.late_digest, today].into_iter().flatten() {
+            if inp.sent.has_digest(day, ch) || inp.sent.on_hold("digest", None, day, None, ch) {
+                continue;
+            }
             let due_items: Vec<&Value> = inp
                 .ups
                 .iter()
@@ -532,16 +554,15 @@ fn plan(inp: &TickInput<'_>) -> Vec<Pending> {
                     .map(|i| format!("· {}", line(i)))
                     .collect::<Vec<_>>()
                     .join("\n");
-                let today = inp.today;
                 out.push(Pending {
                     kind: "digest".into(),
                     item_id: None,
                     channel: ch,
                     threshold: None,
                     covered: Vec::new(),
-                    due: today.to_string(),
+                    due: day.to_string(),
                     subject: format!("Kalends 摘要：{} 项即将到期", due_items.len()),
-                    text: format!("Kalends 摘要（{today}）\n{body}"),
+                    text: format!("Kalends 摘要（{day}）\n{body}"),
                 });
             }
         }
@@ -559,7 +580,9 @@ pub fn prune_failed(conn: &Connection) -> Result<usize> {
     )?)
 }
 
-pub async fn tick(db: &Db) -> Result<()> {
+/// `prev` 是上一轮成功检查的时刻（刚起的进程为 None）；返回这一轮的时刻，调度器留给下一轮。
+pub async fn tick(db: &Db, prev: Option<NaiveDateTime>) -> Result<NaiveDateTime> {
+    let now = chrono::Local::now().naive_local();
     let (pendings, tg, mail) = {
         let conn = db.lock().unwrap();
         // 渠道关着也要清：留下的失败行正是渠道坏掉那段时间攒的
@@ -574,7 +597,7 @@ pub async fn tick(db: &Db) -> Result<()> {
             channels.push(Channel::Email);
         }
         if channels.is_empty() {
-            return Ok(());
+            return Ok(now);
         }
         let thresholds: Vec<i64> = db::get_setting(&conn, "notify.thresholds")?
             .and_then(|s| serde_json::from_str(&s).ok())
@@ -583,15 +606,19 @@ pub async fn tick(db: &Db) -> Result<()> {
             .and_then(|s| s.parse().ok())
             .unwrap_or_else(settings::window_days_default);
         let digest_time = digest_at(&conn)?;
-        let now_hhmm = chrono::Local::now().format("%H:%M").to_string();
+        let now_hhmm = now.format("%H:%M").to_string();
         let today = engine::today().to_string();
+        let late = late_digest_day(prev, now, &digest_time).map(|d| d.to_string());
         let ups = engine::upcoming(&conn)?;
 
-        let sent = SentLog::load(&conn, &load_since(&today, &ups))?;
+        // 补昨天的摘要要先知道它发过没有：去重记忆从那天读起
+        let since = load_since(&today, &ups);
+        let sent = SentLog::load(&conn, late.as_deref().filter(|d| *d < since.as_str()).unwrap_or(&since))?;
 
         let pendings = plan(&TickInput {
             now_hhmm: &now_hhmm,
             today: &today,
+            late_digest: late.as_deref(),
             digest_time: &digest_time,
             thresholds: &thresholds,
             window,
@@ -645,19 +672,21 @@ pub async fn tick(db: &Db) -> Result<()> {
         }
         tx.commit()?;
     }
-    Ok(())
+    Ok(now)
 }
 
 pub async fn scheduler(db: Db) {
     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    let mut prev = None;
     loop {
         // 自动续费先跑、且不受渠道开关管：同一轮的摘要读到的得是续过的日期，没配通知的人也照样续
         let renewed = crate::collections::auto_renew(&db.lock().unwrap(), engine::today());
         if let Err(e) = renewed {
             tracing::warn!("auto renew failed: {e:#}");
         }
-        if let Err(e) = tick(&db).await {
-            tracing::warn!("notify tick failed: {e:#}");
+        match tick(&db, prev).await {
+            Ok(at) => prev = Some(at),
+            Err(e) => tracing::warn!("notify tick failed: {e:#}"),
         }
         tokio::time::sleep(std::time::Duration::from_mins(15)).await;
     }
@@ -680,15 +709,69 @@ mod tests {
         v
     }
 
+    /// 摘要时刻设在午夜前一刻钟内：上一轮 23:48 还没到点、下一轮已过午夜，昨天的摘要两头都判不到。
+    /// 夹在两轮之间就补发、按昨天记键；刚起的进程（没有上一轮）与当天就过了点的都不补。
+    #[test]
+    fn a_digest_time_that_falls_between_two_ticks_across_midnight_is_sent_late() {
+        let at = |s: &str| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
+        let d = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
+        assert_eq!(late_digest_day(Some(at("2026-08-15 23:48")), at("2026-08-16 00:03"), "23:50"), Some(d));
+        assert_eq!(late_digest_day(None, at("2026-08-16 00:03"), "23:50"), None, "刚起的进程不补昨天");
+        assert_eq!(late_digest_day(Some(at("2026-08-15 23:52")), at("2026-08-16 00:07"), "23:50"), None, "昨天已过点");
+        assert_eq!(late_digest_day(Some(at("2026-08-15 23:30")), at("2026-08-15 23:45"), "23:50"), None, "还在同一天");
+        assert_eq!(late_digest_day(Some(at("2026-08-13 23:48")), at("2026-08-16 00:03"), "23:50"), None, "隔了几天不补");
+
+        let ups = [up(1, 3, "2026-08-19")];
+        let tick = |sent: &SentLog| {
+            plan(&TickInput {
+                now_hhmm: "00:03",
+                today: "2026-08-16",
+                late_digest: Some("2026-08-15"),
+                digest_time: "23:50",
+                thresholds: &[],
+                window: 14,
+                channels: TG,
+                ups: &ups,
+                sent,
+            })
+        };
+        let p = tick(&SentLog::default());
+        assert_eq!(p.len(), 1);
+        assert_eq!((p[0].kind.as_str(), p[0].due.as_str()), ("digest", "2026-08-15"));
+        let mut sent = SentLog::default();
+        sent.digests.insert(("2026-08-15".into(), Channel::Telegram));
+        assert!(tick(&sent).is_empty(), "已经发过的不再补");
+    }
+
+    /// 代理只认 reqwest 真会拦截的协议：`socks://` 这类会被收下却一条请求都不拦，还顺手关掉环境代理。
+    /// 存量里的坏串在建连接时同样拒掉；Telegram 自己那栏留空就沿用出网代理。
+    #[test]
+    fn a_proxy_with_an_unknown_scheme_is_refused_instead_of_going_direct() {
+        for ok in ["", "http://127.0.0.1:3128", "socks5://127.0.0.1:1080", "SOCKS5H://h:1", "https://u:p@h:8443"] {
+            assert!(settings::proxy(ok).is_ok(), "{ok}");
+        }
+        for no in ["socks://127.0.0.1:1080", "sock5://h:1", "ftp://u:p@h:21", "htttp://h:1", "127.0.0.1:1080", "http://"] {
+            assert!(settings::proxy(no).is_err(), "{no}");
+            assert!(http_client(no).is_err(), "{no}");
+        }
+        let tg = |own: &str| {
+            let raw = format!(r#"{{"enabled":true,"bot_token":"t","chat_id":"1","proxy":"{own}"}}"#);
+            telegram_cfg_from(&raw, "socks5://10.0.0.5:1080").unwrap().proxy
+        };
+        assert_eq!(tg(""), "socks5://10.0.0.5:1080");
+        assert_eq!(tg("http://10.0.0.6:3128"), "http://10.0.0.6:3128");
+    }
+
     /// 邮件握手失败时 rustls 只给内部词（UnknownIssuer、InvalidContentType）：翻成用户能照着改的话，
     /// 原文仍留在原因链里；认不出的不硬翻。
     #[test]
     fn tls_failures_get_a_plain_reading() {
         // 原文照 rustls 0.23 的 Display：过期与域名不符走带上下文的变体，不再是裸的 Expired / NotValidForName
         let says = |raw: &str| tls_hint(raw).unwrap_or_default();
-        assert!(says("Connection error: invalid peer certificate: UnknownIssuer").contains("公共 CA"));
+        assert!(says("Connection error: invalid peer certificate: UnknownIssuer").contains("公共根证书"));
         assert!(says("Connection error: received corrupt message of type InvalidContentType").contains("STARTTLS"));
         assert!(says("invalid peer certificate: Other(OtherError(CaUsedAsEndEntity))").contains("CA 证书"));
+        assert!(says("invalid peer certificate: Other(OtherError(CertDistrusted))").contains("撤销信任"));
         assert!(says("invalid peer certificate: certificate not valid for name \"smtp.example.com\"; certificate is only valid for mail.example.org").contains("域名"));
         assert!(says("invalid peer certificate: certificate expired: verification time 1790000000 (UNIX), but certificate is not valid after 1780000000 (10000000 seconds ago)").contains("过期"));
         assert_eq!(tls_hint("Connection error: Connection refused (os error 61)"), None);
@@ -707,6 +790,7 @@ mod tests {
         plan(&TickInput {
             now_hhmm: now,
             today,
+            late_digest: None,
             digest_time: "09:00",
             thresholds: &TH,
             window: 14,
@@ -763,6 +847,7 @@ mod tests {
         plan(&TickInput {
             now_hhmm: "08:00",
             today,
+            late_digest: None,
             digest_time: "09:00",
             thresholds,
             window: 14,
@@ -825,6 +910,7 @@ mod tests {
         let p = plan(&TickInput {
             now_hhmm: "09:30",
             today: "2026-08-15",
+            late_digest: None,
             digest_time: "09:00",
             thresholds: &[],
             window: 14,
@@ -1076,7 +1162,7 @@ mod tests {
         ins(0, "-1 day");
         ins(1, "-400 days");
         let db: crate::Db = std::sync::Arc::new(std::sync::Mutex::new(conn));
-        tick(&db).await.unwrap();
+        tick(&db, None).await.unwrap();
         let conn = db.lock().unwrap();
         let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
         assert_eq!(count("SELECT count(*) FROM notification_log"), 2);
@@ -1148,7 +1234,7 @@ mod tests {
         )
         .unwrap();
         let db: crate::Db = std::sync::Arc::new(std::sync::Mutex::new(conn));
-        tick(&db).await.unwrap();
+        tick(&db, None).await.unwrap();
         let conn = db.lock().unwrap();
         let tried: i64 = conn
             .query_row("SELECT count(*) FROM notification_log WHERE item_id=?1 AND ok=0", [new], |r| r.get(0))
@@ -1178,7 +1264,7 @@ mod tests {
         .unwrap();
         let db: crate::Db = std::sync::Arc::new(std::sync::Mutex::new(conn));
         for _ in 0..3 {
-            tick(&db).await.unwrap();
+            tick(&db, None).await.unwrap();
         }
         let conn = db.lock().unwrap();
         let failures: i64 = conn

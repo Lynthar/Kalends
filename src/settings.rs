@@ -60,9 +60,8 @@ pub fn secret_field(key: &str) -> Option<&'static str> {
     spec(key).and_then(|s| s.secret)
 }
 
-/// 设置接口回读的值：密钥字段换成占位串。带密钥的键存值解析不出时整串换掉——
-/// 原样吐出就把密钥连同坏 JSON 一起交了出去。
-pub fn masked(key: &str, stored: &str) -> String {
+/// 只遮渠道密钥字段。带密钥的键存值解析不出时整串换掉——原样吐出就把密钥连同坏 JSON 一起交了出去。
+fn secret_masked(key: &str, stored: &str) -> String {
     let Some(field) = secret_field(key) else { return stored.into() };
     let Ok(mut v) = serde_json::from_str::<Value>(stored) else { return SECRET_MASK.into() };
     if v[field].as_str().is_some_and(|s| !s.is_empty()) {
@@ -71,10 +70,10 @@ pub fn masked(key: &str, stored: &str) -> String {
     v.to_string()
 }
 
-/// JSONL 导出的值：在 `masked` 之外把代理地址里的口令也遮掉（裸值与 JSON 对象的字符串字段
-/// 都算）。ICS 令牌与 PIN 与设置接口一致，不遮。
-pub fn exported(key: &str, stored: &str) -> String {
-    let out = masked(key, stored);
+/// 设置接口回读与 JSONL 导出的值：渠道密钥换成占位串，代理地址里的口令也遮掉（裸值与 JSON 对象的
+/// 字符串字段都算）。ICS 令牌与 PIN 不遮。
+pub fn masked(key: &str, stored: &str) -> String {
+    let out = secret_masked(key, stored);
     let Ok(Value::Object(mut o)) = serde_json::from_str::<Value>(&out) else {
         return without_url_password(&out);
     };
@@ -87,6 +86,21 @@ pub fn exported(key: &str, stored: &str) -> String {
         }
     }
     if changed { Value::Object(o).to_string() } else { out }
+}
+
+/// 回读时遮住的代理口令原样送回来，就换回库里那份（`stored` 是同一位置的存值）。
+///
+/// # Errors
+///
+/// 改了地址却还带着占位串时 400：没法知道口令该配哪个地址，把占位串当口令存下去代理就连不上。
+pub fn unmask_url_password(incoming: &str, stored: &str) -> anyhow::Result<String> {
+    if !incoming.contains(&format!(":{SECRET_MASK}@")) {
+        return Ok(incoming.into());
+    }
+    if without_url_password(stored) == incoming {
+        return Ok(stored.into());
+    }
+    Err(bad("代理地址里的口令是遮住的占位：改了地址就把口令也重新填一遍"))
 }
 
 /// `socks5://user:pass@host` → `socks5://user:••••••••@host`；没有口令的原样返回。
@@ -201,6 +215,10 @@ fn channel(v: &str) -> anyhow::Result<()> {
             return Err(bad(format!("渠道配置 {fk} 的类型不对")));
         }
     }
+    // Telegram 的代理与出网那栏同一条规则：认不出的协议会让请求静默直连
+    if let Some(p) = o.get("proxy").and_then(Value::as_str) {
+        proxy(p)?;
+    }
     // 端口在写入口就拦：环绕成没人配过的端口号之后，读侧只能悄悄回落默认
     if let Some(p) = o.get("port") {
         p.as_u64()
@@ -225,10 +243,27 @@ fn token(v: &str) -> anyhow::Result<()> {
     .ok_or_else(|| bad("ICS 令牌要是非空的 URL 安全字符串——空令牌等于把日历开给所有人"))
 }
 
-fn proxy(v: &str) -> anyhow::Result<()> {
-    (v.is_empty() || v.contains("://"))
-        .then_some(())
-        .ok_or_else(|| bad("代理要是带协议的地址（如 socks5://…），留空＝直连"))
+/// reqwest 真会用来走代理的协议（与 hyper-util 认的环境代理同一张表）。
+const PROXY_SCHEMES: &[&str] = &["http", "https", "socks4", "socks4a", "socks5", "socks5h"];
+
+/// 代理地址的形状：留空＝不配，否则协议得在 `PROXY_SCHEMES` 里。
+///
+/// # Errors
+///
+/// 协议不认识就 400。放过去的后果是静默直连：reqwest 收下 `socks://` 这类地址却不拦截任何请求，
+/// 还顺手关掉环境变量里的代理——配了代理的人恰恰是不想直连的人。
+pub fn proxy(v: &str) -> anyhow::Result<()> {
+    let v = v.trim();
+    if v.is_empty() {
+        return Ok(());
+    }
+    let Some((scheme, rest)) = v.split_once("://") else {
+        return Err(bad("代理要是带协议的地址（如 socks5://127.0.0.1:1080），留空＝不走代理"));
+    };
+    if !PROXY_SCHEMES.contains(&scheme.to_ascii_lowercase().as_str()) || rest.is_empty() {
+        return Err(bad(format!("代理地址的协议「{scheme}」不支持，只认 {}", PROXY_SCHEMES.join(" / "))));
+    }
+    Ok(())
 }
 
 fn pass(_: &str) -> anyhow::Result<()> {
@@ -290,9 +325,9 @@ mod tests {
         for same in ["", "socks5://10.0.0.5:1080", "http://u@h", "http://u:@h", "http://h/p:q@r", "not a url"] {
             assert_eq!(without_url_password(same), same);
         }
-        assert_eq!(exported("meta.proxy", "http://u:p@h"), format!("http://u:{m}@h"));
+        assert_eq!(masked("meta.proxy", "http://u:p@h"), format!("http://u:{m}@h"));
         // 没东西可遮的 JSON 原样返回，不经重新序列化
-        assert_eq!(exported("fx.rates", r#"{"USD": 7.10}"#), r#"{"USD": 7.10}"#);
+        assert_eq!(masked("fx.rates", r#"{"USD": 7.10}"#), r#"{"USD": 7.10}"#);
     }
 
     /// 读侧回落值恒等声明里的播种值：设置页「清空＝回默认」显示的就是它们，两边不等就是

@@ -2,9 +2,17 @@
 
 Release notes are taken from this file verbatim — each `## vX.Y.Z` section becomes that release's body.
 
+## Unreleased
+
+**Fixed**: SIM cards added in the preset SIM library can be renewed again. That library never had a cycle column, so a new card's cycle stayed empty and renewing it could not move its date; the cycle (with price and link) is there now, and cards that only had a day count become a custom cycle. Auto-renew keeps a 29th–31st billing day in libraries that count from the payment day instead of settling on the 28th. A proxy address with an unsupported scheme (`socks://`, a typo) is refused instead of silently connecting directly. Smaller fixes cover a digest time just before midnight, half-typed dates and fast keyboard row moves.
+
+**Changed**: the day count belongs to the custom cycle and sits next to it. Lifetime items have no due date and no renew button. Auto-renew is offered only while the status counts as spending and the cycle can move forward; switching to a status that does not count turns it off. Telegram uses the outbound proxy when its own field is empty. The settings page no longer reads proxy passwords back. On phones the due list keeps the date.
+
+**Upgrading**: two migrations, after a snapshot lands in `backups/pre-migration-v24.db`. Day counts on non-custom cycles and due dates on lifetime items are cleared. API: a day count on a non-custom cycle, a due date on a lifetime item, auto-renew on an item that cannot use it and non-object bodies get a 400; collection ids are never reused.
+
 ## v0.4.2
 
-**Security**: outgoing TLS (online exchange rates, notifications and email) no longer trusts the eMudhra (emSign) intermediate certificates that browsers and CA programs distrusted in October. The bundled root store moves to webpki-roots 1.0.11, with rustls-webpki 0.103.16.
+**Security**: outgoing TLS (online exchange rates, icon fetches, notifications and email) no longer trusts the eMudhra (emSign) certificates that browsers and CA programs distrusted in October 2026: webpki-roots 1.0.11 drops the emSign Root CA - C1, ECC Root CA - G3 and ECC Root CA - C3 roots, and rustls-webpki 0.103.16 refuses the distrusted intermediates.
 
 **Changed**: the built-in average exchange rates are refreshed to 2026-09-24 – 10-23.
 
@@ -20,7 +28,7 @@ Release notes are taken from this file verbatim — each `## vX.Y.Z` section bec
 
 **One due date.** Every item stores its next due date and nothing else; the "last renewal plus cycle" model and the per-library due-date setting are gone. Libraries that used it have each date carried over one cycle. "Last renewed" is now a read-only computed column (the start of the current period) and, like "days left", exists in every library, hidden unless it was already on the table. Month-end billing days no longer drift: a 31st renewed through February comes back to the 31st in March instead of sticking at the 28th. Renewing an item that has no date yet counts one cycle from the day you paid.
 
-**Upgrading**: one migration, after a snapshot lands in `backups/pre-migration-v23.db`. Items in a "last renewal" library whose cycle cannot be advanced (lifetime, none, or custom days without a count) lose their date and are listed on the home page. API: collection writes carrying `due_anchor` get a 400; `last_renewed` is read-only (sending a different value gets a 400); items carry a read-only `billing_day`; the renew response is `{ "due": ... }` only.
+**Upgrading**: one migration, after a snapshot lands in `backups/pre-migration-v23.db`. Items in a "last renewal" library whose cycle cannot be advanced (lifetime, none, or custom days without a count) lose their date and are listed on the home page. API: collection writes carrying `due_anchor` get a 400; `last_renewed` is read-only (sent without `next_renewal` it gets a 400, sent alongside it is ignored); items carry a read-only `billing_day`; the renew response is `{ "due": ... }` only.
 
 ## v0.3.2
 

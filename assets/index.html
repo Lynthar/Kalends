@@ -40,6 +40,7 @@
 </header>
 
 <main>
+<p id="boot-note" class="boot-note" role="alert" hidden></p>
 <div id="page-renewals">
   <section class="panel hero" id="up-panel">
     <div class="rubric-row">
@@ -130,7 +131,7 @@
     <div class="fgrid">
       <label>提醒阈值（提前天数，留空＝只发每日摘要）<input name="thresholds"></label>
       <label>摘要发送时间<input name="digest_time" type="time"></label>
-      <label>摘要窗口（天）<input name="window_days" type="number" min="1"></label>
+      <label>摘要列入几天内到期的（天）<input name="window_days" type="number" min="1"></label>
     </div>
     <fieldset class="chanset">
       <legend>币种折算</legend>
@@ -149,7 +150,7 @@
       <div class="fgrid">
         <label class="span2">Bot Token<input name="tg_token" autocomplete="off"></label>
         <label>Chat ID<input name="tg_chat"></label>
-        <label>代理（可选）<input name="tg_proxy" placeholder="socks5://127.0.0.1:1080"></label>
+        <label>Telegram 专用代理（留空＝沿用「出网」那栏）<input name="tg_proxy" placeholder="socks5://127.0.0.1:1080"></label>
       </div>
       <button type="button" class="btn ghost" data-test="telegram">发送测试</button>
     </fieldset>
@@ -172,12 +173,12 @@
         <input id="ics-url" readonly aria-label="日历订阅地址">
         <button type="button" class="btn ghost" id="btn-copy-ics">复制</button>
       </div>
-      <p class="note">在手机/电脑日历中「订阅日历」粘贴此地址，续费与保号事件自动同步。</p>
+      <p class="note">在手机/电脑日历中「订阅日历」粘贴此地址，各库的到期事件自动同步。</p>
     </fieldset>
     <fieldset class="chanset">
       <legend>续费台账</legend>
       <div id="ledger-list" class="ledger-log"></div>
-      <p class="note">每次点「已续费 / 已保号」都会记一笔，这里按日期倒序列出最近 500 笔。</p>
+      <p class="note">手动点的续费（按钮上的字跟着各库的动作名）与自动续费记的账都在这里，按日期倒序列出最近 500 笔。</p>
     </fieldset>
     <fieldset class="chanset">
       <legend>通知发送记录</legend>
@@ -187,9 +188,10 @@
     <fieldset class="chanset">
       <legend>出网</legend>
       <div class="fgrid">
-        <label class="span2">代理（可选）<input name="meta_proxy" placeholder="socks5://127.0.0.1:1080"></label>
+        <label class="span2">出网代理（可选；协议限 http / https / socks4 / socks4a / socks5 / socks5h）<input name="meta_proxy" placeholder="socks5://127.0.0.1:1080"></label>
       </div>
-      <p class="note">拉取实时汇率、从网站取图标共用这一个代理。两件事都得你主动触发才会发生。</p>
+      <p class="note">拉取实时汇率、从网站取图标走这个代理，Telegram 那栏留空时也走它；邮件不走代理。
+        汇率与图标都得你主动点才会出网。</p>
     </fieldset>
     <fieldset class="chanset">
       <legend>安全与数据</legend>

@@ -230,6 +230,16 @@ async fn set_semantics(State(app): State<App>, Json(b): Json<Value>) -> R {
         .optional()?
         .ok_or_else(|| bad("该列没有状态词表"))?;
     let mut opts: Vec<Value> = serde_json::from_str(&stored).unwrap_or_default();
+    // 点名的值对不上词表（含大小写不同）就说出来：静默跳过等于回 200 却一个标记都没改
+    let stray: Vec<String> = want
+        .iter()
+        .filter(|w| !opts.iter().any(|o| o["v"] == w["v"]))
+        .map(|w| w["v"].as_str().unwrap_or_default().to_string())
+        .collect();
+    if want.is_empty() || !stray.is_empty() {
+        let vocab: Vec<&str> = opts.iter().filter_map(|o| o["v"].as_str()).collect();
+        return Err(bad(format!("词表里没有「{}」；可选：{}", stray.join("、"), vocab.join("、"))).into());
+    }
     for o in &mut opts {
         let Some(w) = want.iter().find(|w| w["v"] == o["v"]) else { continue };
         // opts_array 只保留调用方真传了的标记，没传的保持原样
@@ -274,8 +284,9 @@ async fn add_status(State(app): State<App>, Json(b): Json<Value>) -> R {
     let value = s(&b, "value").ok_or_else(|| bad("状态值不能为空"))?;
     let conn = app.db.lock().unwrap();
     let (id, mut opts) = status_options(&conn, &tbl, &key)?;
-    if opts.iter().any(|o| o["v"] == value.as_str()) {
-        return Err(bad(format!("状态「{value}」已经在词表里")).into());
+    // 判重不分大小写，与删值时「在用」的判定（NOCASE）同一口径：active 与 Active 并存，写入口就不知道该落哪个
+    if let Some(have) = opts.iter().filter_map(|o| o["v"].as_str()).find(|v| v.eq_ignore_ascii_case(&value)) {
+        return Err(bad(format!("状态「{have}」已经在词表里")).into());
     }
     opts.push(json!({ "v": value, "spend": 0, "alert": 0, "timeline": 0 }));
     conn.execute(
@@ -686,7 +697,7 @@ mod tests {
         }
     }
 
-    /// 状态语义按值逐项合并：只动点名的那个值、只动传了的标记，别的值与没传的标记原样。
+    /// 状态语义按值逐项合并：只动点名的那个值、只动传了的标记，别的值与没传的标记原样；点名对不上词表就 400。
     #[tokio::test]
     async fn status_semantics_change_only_the_named_flags_of_the_named_value() {
         let (r, db) = fresh();
@@ -701,9 +712,15 @@ mod tests {
         want[at]["alert"] = json!(0);
         assert_eq!(options(&db, "subs", "status"), want);
         assert_eq!(sem("category").await.0, StatusCode::BAD_REQUEST, "没有状态词表的列");
+        // 点名的值对不上词表（大小写不同也算）或一个都没点：400 且词表不动，别回 200 却什么都没改
+        for opts in [json!([{ "v": "active", "alert": 1 }]), json!([{ "v": "Nope", "spend": 1 }]), json!([])] {
+            let body = json!({ "tbl": "subs", "key": "status", "options": opts });
+            assert_eq!(call(&r, "PUT", "/api/fields/semantics", Some(body)).await.0, StatusCode::BAD_REQUEST, "{opts}");
+        }
+        assert_eq!(options(&db, "subs", "status"), want);
     }
 
-    /// 追加状态值：新值三个标记全关地排到末尾；已有的值（老形态的纯文本也算）400 且词表不动。
+    /// 追加状态值：新值三个标记全关地排到末尾；已有的值（老形态的纯文本、大小写不同都算）400 且词表不动。
     #[tokio::test]
     async fn an_added_status_goes_last_and_duplicates_are_refused() {
         let (r, db) = fresh();
@@ -716,7 +733,8 @@ mod tests {
         let add = |value: &str| {
             call(&r, "POST", "/api/fields/add_status", Some(json!({ "tbl": "subs", "key": "status", "value": value })))
         };
-        for dup in ["Active", "Legacy"] {
+        // 大小写不同也算重：active 与 Active 并存，写入口就不知道该把 ACTIVE 落成哪个
+        for dup in ["Active", "Legacy", "active", "LEGACY"] {
             assert_eq!(add(dup).await.0, StatusCode::BAD_REQUEST, "{dup}");
         }
         assert_eq!(options(&db, "subs", "status"), seeded, "被拒的请求一个字段也不该写");

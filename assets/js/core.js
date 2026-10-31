@@ -95,9 +95,11 @@ async function api(path, opts = {}, mayAskPin = true) {
     }
     if (pinGiven) return api(path, opts, false);
   }
-  if (r.status === 401) throw new Error('访问 PIN 不对或没填：刷新页面重新输入');
-  const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+  if (r.status === 401) throw Object.assign(new Error('访问 PIN 不对或没填：刷新页面重新输入'), { pin: true });
+  // 接口成功时恒回 JSON：解析不出来多半是反代或登录页顶了回来，当成功就是「已保存」而什么都没写
+  const d = await r.json().catch(() => null);
+  if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
+  if (d === null) throw new Error(`响应不是 Kalends 的（HTTP ${r.status}，多半是反向代理或登录页）：这次没写成`);
   return d;
 }
 
@@ -313,6 +315,7 @@ async function fetchAll() {
     api('/api/settings'),
     api('/api/settings/defaults'),
     api('/api/fx').catch(e => {
+      if (e.pin) throw e; // 门没过，整页都拿不到：别说成汇率的事
       toast('汇率表没取到，费用按原币显示：' + e.message, true);
       return noFx;
     }),
@@ -336,6 +339,7 @@ let latestLoad = null;
 function loadAll() {
   const run = fetchAll().then(d => {
     if (run !== latestLoad) return latestLoad;
+    $('#boot-note').hidden = true;
     Object.assign(state, { overview: d.overview, settings: d.settings, defaults: d.defaults, fx: d.fx }, d.rows);
     if (d.fields) state.fields = d.fields;
     const wins = ['7', '14', '30', '60', '90', '180', 'all'];
@@ -452,7 +456,7 @@ function renderUpcoming() {
   if (off.length) {
     const when = d => d === 0 ? '今天' : `${d} 天后`;
     const names = off.map(x => `${x.name}（${x.status} · ${when(x.days_left)}）`).join('、');
-    offEl.textContent = `◌ 另有 ${off.length} 项状态不上时间线，到期不会提醒：${names}`;
+    offEl.textContent = `◌ 另有 ${off.length} 项状态不上时间线，到期不会提醒（状态改成 Active 这类上时间线的就会列进来）：${names}`;
   }
   // 状态不在所属库词表里的：写入口照收（导入要能先进来），语义只能回落到内置含义，说出来让人补
   const unkEl = $('#up-unknown');

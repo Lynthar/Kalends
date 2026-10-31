@@ -28,6 +28,10 @@ function semOf(key, status) {
   // 提醒蕴含时间线（同后端 sem_map）：只勾提醒的存量，浮层上也得显示成在时间线上
   return { ...s, timeline: s.timeline || s.alert };
 }
+// 能不能挂自动续费，与后端 engine::auto_allowed 同一判据：状态计支出、周期推得动（买断、没周期都不行）。
+// 后端照样会拒，这里只管别把挂不上的选项摆出来
+const autoAllowed = (key, status, cycle, days) => !!semOf(key, status).spend
+  && CYCLE_ORDER.includes(cycle) && !!cycle && cycle !== 'lifetime' && (cycle !== 'days' || days > 0);
 const statusOrder = key => (fieldOf(key, 'status')?.options || []).map(o => o.v);
 
 /* **显示值与编辑值必须分开**：表格与筛选读 fieldVal，表单与编辑器一律读 fieldRaw。周期是唯一
@@ -260,7 +264,7 @@ function renderColl(key) {
     const tds = fields.map(f => {
       const v = fieldVal(f, it);
       if (f.key === entry) {
-        return `<td>${hasKids ? `<button class="tgl" data-tgl type="button" title="折叠 / 展开子行">${collapsed.has(it.id) ? '▸' : '▾'}</button>` : ''}${(!depth && parent) ? `<span class="sub-parent">${esc(parent.name)} ↳ </span>` : ''}${logoOf(it) ? `<img class="slogo" src="/logos/${esc(logoOf(it))}" alt="" loading="lazy">` : ''}${nameCell(it.name)}${it.auto_renew ? '<span class="automark">自动</span>' : ''}${safeUrl(it.url) ? ` <a class="btn link" href="${esc(safeUrl(it.url))}" target="_blank" rel="noreferrer">↗</a>` : ''}<button class="rowopen" data-open type="button" title="打开详情">⤢</button>${sub ? `<div class="muted" style="font-size:.75rem">${subTel ? TYPES.tel.cell(sub) : esc(sub)}</div>` : ''}</td>`;
+        return `<td>${hasKids ? `<button class="tgl" data-tgl type="button" title="折叠 / 展开子行">${collapsed.has(it.id) ? '▸' : '▾'}</button>` : ''}${(!depth && parent) ? `<span class="sub-parent">${esc(parent.name)} ↳ </span>` : ''}${logoOf(it) ? `<img class="slogo" src="/logos/${esc(logoOf(it))}" alt="" loading="lazy">` : ''}${nameCell(it.name)}${it.auto_renew && autoAllowed(key, it.status, it.cycle, it.cycle_days) ? '<span class="automark">自动</span>' : ''}${safeUrl(it.url) ? ` <a class="btn link" href="${esc(safeUrl(it.url))}" target="_blank" rel="noreferrer">↗</a>` : ''}<button class="rowopen" data-open type="button" title="打开详情">⤢</button>${sub ? `<div class="muted" style="font-size:.75rem">${subTel ? TYPES.tel.cell(sub) : esc(sub)}</div>` : ''}</td>`;
       }
       if (f.key === 'left') return `<td class="wide">${leftBar(it)}</td>`;
       if (f.key === 'price') {
@@ -279,7 +283,7 @@ function renderColl(key) {
     }).join('');
     const sem = semOf(key, it.status);
     // 没填到期日的也能记：后端从付款日推一期，正是给新条目补日期的路（engine::renew_to）
-    const canRenew = sem.timeline;
+    const canRenew = sem.timeline && it.cycle !== 'lifetime'; // 买断没有下一期可记
     tr.innerHTML = `${tds}<td class="ops">
         ${canRenew ? `<button class="btn link" data-renew type="button">已${esc(c.verb || '续费')}</button>` : ''}
       </td>`;
@@ -440,9 +444,10 @@ function openItemDialog(key, it, { focus, note } = {}) {
     if (f.src === 'calc') continue; // 算出来的列不可编辑
     box.appendChild(fieldControl(key, f, it));
   }
-  box.appendChild(autoRow(it));
+  box.appendChild(autoRow(key, it));
   box.appendChild(parentRow(key, it));
   if (it) box.appendChild(logoRow(it));
+  wireItemForm(key);
   $('#dlg-item-note').hidden = !note;
   $('#dlg-item-note').textContent = note || '';
   d.showModal();
@@ -477,6 +482,14 @@ function fieldControl(key, f, it) {
         `<label class="check"><input type="checkbox" value="${esc(o)}"${cur.has(o) ? ' checked' : ''}><span>${esc(o)}</span></label>`
       ).join('')}</span><input class="mopt-add" placeholder="新选项，回车加入" aria-label="给「${esc(f.name || f.key)}」加一个新选项，回车加入"></span>`;
     initMoptAdd(lab.querySelector('.mopt-add'));
+  } else if (f.key === 'cycle' && f.src === 'col') {
+    // 周期天数只属于自定义周期（Custom）：与周期同一格，选了 Custom 才出天数框（显隐由 wireItemForm 管）
+    const cur = val === '' ? '' : String(val);
+    lab.innerHTML = `<span>${esc(f.name || f.key)}</span><span class="cyclebox">
+      <select data-f="cycle"><option value=""></option>${selOptions(key, f, cur).map(o =>
+        `<option value="${esc(o.v)}"${o.v === cur ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}</select>
+      <input type="number" min="1" step="1" data-f="cycle_days" placeholder="天数" aria-label="自定义周期的天数"
+        value="${esc(String(it?.cycle_days ?? ''))}"></span>`;
   } else if (f.ftype === 'sel') {
     const cur = val === '' ? '' : String(val);
     const sel = `<select data-f="${esc(f.key)}"><option value=""></option>${selOptions(key, f, cur).map(o =>
@@ -505,16 +518,51 @@ function fieldControl(key, f, it) {
     // 标出网址输入框：「从网站取图标」认这个标记，所以自建的网址列同样能用
     const mark = f.ftype === 'url' ? ' data-urlfield' : '';
     lab.innerHTML = `<span>${esc(f.name || f.key)}</span><input type="${type}"${type === 'number' ? ' step="any"' : ''} data-f="${esc(f.key)}"${mark} value="${esc(val)}">`;
+    if (f.key === 'next_renewal' && f.src === 'col') lab.insertAdjacentHTML('beforeend', '<span class="fp-note" data-lifetime-note hidden>买断没有到期日</span>');
   }
   return lab;
 }
 
-/* 自动续费开关。值是开启那天（itemBody 取），不是注册字段，与父条目同一处理方式。 */
-function autoRow(it) {
+/* 表单里跟着前提走的控件（与后端 settle_dependents 同一套规则）：天数框只在 Custom 时出现；
+   买断时到期日清空并停用；自动续费只在计支出、周期推得动时出现。被规则收起的自动续费记作「动过」：
+   用户看到的是没勾，保存就得写成没勾，不能让服务端那份照旧开着 */
+function wireItemForm(key) {
+  const box = $('#item-fields');
+  const pick = f => box.querySelector(`[data-f="${f}"]`);
+  const autoBox = box.querySelector('[data-autorow]');
+  const sync = () => {
+    const status = pick('status')?.value ?? editingItem.row.status ?? DEFAULT_STATUS;
+    const cycle = pick('cycle')?.value ?? editingItem.row.cycle ?? '';
+    const daysEl = pick('cycle_days');
+    if (daysEl) daysEl.hidden = cycle !== 'days';
+    const days = daysEl && !daysEl.hidden ? +daysEl.value : editingItem.row.cycle_days;
+    const due = pick('next_renewal');
+    if (due) {
+      const life = cycle === 'lifetime';
+      if (life && due.value) { due.value = ''; editingItem.touched.add('next_renewal'); }
+      due.disabled = life;
+      box.querySelector('[data-lifetime-note]').hidden = !life;
+    }
+    if (!autoBox) return;
+    const ok = autoAllowed(key, status, cycle, days);
+    const auto = autoBox.querySelector('[data-auto]');
+    if (!ok && auto.checked) { auto.checked = false; editingItem.touched.add('auto_renew'); }
+    autoBox.hidden = !ok;
+  };
+  for (const f of ['status', 'cycle', 'cycle_days']) pick(f)?.addEventListener(f === 'cycle_days' ? 'input' : 'change', sync);
+  sync();
+}
+
+/* 自动续费开关。值是开启那天（itemBody 取），不是注册字段，与父条目同一处理方式。
+   挂不上的存量（升级前留下的不计支出 + 自动续费）打开时就是没勾，改回 Active 也得重新勾 */
+function autoRow(key, it) {
   const box = document.createElement('div');
   box.className = 'field span2';
-  box.innerHTML = `<label class="check"><input type="checkbox" data-auto${it?.auto_renew ? ' checked' : ''}><span>自动续费</span></label>
-    <span class="fp-note">账单日过后自动记一笔、推到下一期；开启前就已逾期的期仍要手动点一次「已续费」</span>`;
+  box.dataset.autorow = '';
+  const on = !!it?.auto_renew && autoAllowed(key, it.status, it.cycle, it.cycle_days);
+  const verb = collOf(key)?.verb || '续费';
+  box.innerHTML = `<label class="check"><input type="checkbox" data-auto${on ? ` checked data-since="${esc(it.auto_renew)}"` : ''}><span>自动${esc(verb)}</span></label>
+    <span class="fp-note">账单日过后自动记一笔、推到下一期；开启前就已逾期的期仍要手动点一次「已${esc(verb)}」</span>`;
   return box;
 }
 
@@ -659,12 +707,20 @@ function itemBody(key, touched) {
   // 币种同理：它并进了费用栏，迁移 0013 起不再是注册字段，上面那圈循环读不到它
   const csel = document.querySelector('#item-fields [data-f="currency"]');
   if (csel && want('currency')) cols.currency = fxCode(csel.value); // 手打的 usd 一律存成 USD；空串＝清空
-  // 自动续费存开启那天，只管那天之后的账单日：已开着的保持原日期，刷成今天会把中间没续的期甩给手动
+  // 周期天数并在周期那一格里：不是 Custom 就显式写 null（只有 Custom 才收天数）
+  const dbox = document.querySelector('#item-fields [data-f="cycle_days"]');
+  if (dbox && (want('cycle') || want('cycle_days'))) {
+    const custom = document.querySelector('#item-fields [data-f="cycle"]')?.value === 'days';
+    cols.cycle_days = custom && dbox.value !== '' ? Number(dbox.value) : null;
+  }
+  // 自动续费存开启那天，只管那天之后的账单日：已开着的保持原日期，刷成今天会把中间没续的期甩给手动；
+  // 打开时没生效的（含挂不上的存量）重新勾上就从今天算
   const auto = document.querySelector('#item-fields [data-auto]');
   const autoOn = auto && want('auto_renew') ? auto.checked : undefined;
+  const since = auto?.dataset.since;
   return row => {
     const out = { ...cols };
-    if (autoOn !== undefined) out.auto_renew = autoOn ? row.auto_renew || state.overview.today : null;
+    if (autoOn !== undefined) out.auto_renew = autoOn ? (since && row.auto_renew) || state.overview.today : null;
     if (!Object.keys(ext).length) return out;
     const extra = { ...(row.extra || {}) };
     for (const [k, v] of Object.entries(ext)) {
@@ -714,12 +770,13 @@ function collDialog() {
         <label><span>续费后从哪天算</span><select data-c="renew_from">
           <option value="schedule">沿用原账单日</option>
           <option value="today">从付款当天重新算</option>
-        </select></label>
+        </select><span class="fp-note">只管手动记的；自动续费恒按账单日记</span></label>
         <label><span>到期动作名称</span><input data-c="verb" placeholder="续费"></label>
       </div>
       <div id="coll-fields-box" hidden>
-        <div class="fp-note">字段是这个库自己的属性：拖动调序、关掉「上表」都<b>跟着账本走、所有设备一致</b>。
-          列宽 / 列序 / 隐藏 / 排序 / 筛选是每台设备各自记的，改这里会把本机那份列序覆写作废。</div>
+        <div class="fp-note">字段是这个库自己的属性：拖动调序、关掉「上表」、删列都<b>当场生效</b>（不用点保存，「取消」也撤不回），
+          <b>跟着账本走、所有设备一致</b>。列宽 / 列序 / 隐藏 / 排序 / 筛选 / 表头里换的呈现方式是每台设备各自记的，
+          改这里会把本机那份列序覆写作废。</div>
         <div id="coll-fields" class="fpanel"></div>
         <button type="button" class="btn ghost" id="coll-reset-widths" hidden>还原列宽（仅本机）</button>
       </div>
@@ -764,6 +821,9 @@ function pickTpl(d, t) {
   fillTplChips(d);
 }
 
+// 字段面板的整份写入排成一队（同 write 的同键排队）；走 fieldCall 是为了写成而刷新失败时说清「已生效」
+let panelTail = Promise.resolve();
+
 /* 字段面板改的是 schema（fields.pos/shown，跟着账本走、所有设备一致）；列宽/列序/
    隐藏/排序/筛选是本机 view。两层唯一打架的是列序——由 settleView 自动结算，
    这里不必也不该再手动清一次。 */
@@ -776,8 +836,10 @@ function fillCollFields(c) {
   const fs = fieldsOf(c.key);
   const call = (path, method, body, refresh = () => rebuildHead(c.key)) =>
     fieldCall(path, method, body, { refresh: async () => { await refresh(); fillCollFields(c); } });
-  // 本机那份过期的列序覆写由 settleView 结算，见上方注释
-  const apply = body => call('/api/fields/order', 'PUT', body);
+  // 本机那份过期的列序覆写由 settleView 结算，见上方注释。字段序整份替换：排队、轮到时对着上一次
+  // 刷新后的字段集现算——拿面板打开时的快照算，一个往返里连点两下只挪一格
+  const reorder = edit => (panelTail = panelTail.then(() =>
+    call('/api/fields/order', 'PUT', { tbl: c.key, keys: edit(fieldsOf(c.key).map(x => x.key)) })));
   fs.forEach((f, idx) => {
     const row = document.createElement('div');
     row.className = 'opt-row';
@@ -792,13 +854,12 @@ function fillCollFields(c) {
       ${kind === 'custom'
         ? '<button type="button" class="btn link fp-del" data-del title="删除此列">✕</button>'
         : `<span class="fp-del fp-mark" title="${COL_KINDS[kind].tip}">${COL_KINDS[kind].mark}</span>`}`;
-    const move = dir => {
-      const j = idx + dir;
-      if (j < 0 || j >= fs.length) return;
-      const keys = fs.map(x => x.key);
-      [keys[idx], keys[j]] = [keys[j], keys[idx]];
-      apply({ tbl: c.key, keys });
-    };
+    const move = dir => reorder(keys => {
+      const i = keys.indexOf(f.key);
+      const j = i + dir;
+      if (i >= 0 && j >= 0 && j < keys.length) [keys[i], keys[j]] = [keys[j], keys[i]];
+      return keys;
+    });
     row.querySelector('[data-up]').onclick = () => move(-1);
     row.querySelector('[data-dn]').onclick = () => move(1);
     // 不上表的列没有表头，表头菜单那条删除入口够不着——这儿是它们唯一的出口
@@ -817,12 +878,14 @@ function fillCollFields(c) {
       axis: 'y',
       key: idx,
       onDrop: (from, after) => {
-        const keys = fs.map(x => x.key);
-        const [moved] = keys.splice(from, 1);
-        let at = idx + (after ? 1 : 0);
-        if (from < at) at--;
-        keys.splice(at, 0, moved);
-        apply({ tbl: c.key, keys });
+        const mk = fs[from]?.key;
+        if (!mk || mk === f.key) return;
+        reorder(keys => {
+          const rest = keys.filter(x => x !== mk);
+          const at = rest.indexOf(f.key);
+          rest.splice(at < 0 ? rest.length : at + (after ? 1 : 0), 0, mk);
+          return rest;
+        });
       },
     });
     list.appendChild(row);
@@ -853,10 +916,11 @@ async function openCollDialog(c) {
   };
   const tplRow = $('#coll-tpl-row');
   tplRow.hidden = true;
+  let tplErr = null; // 等框开了再说：toast 住进发出那一刻开着的框，先说就压在框下面
   if (!c) {
     try {
       collTemplates = collTemplates || await api('/api/collections/templates');
-    } catch (e) { toast(e.message, true); }
+    } catch (e) { tplErr = e; }
     // 列表第一项约定是空白模板
     if (collTemplates?.length) {
       tplRow.hidden = false;
@@ -874,6 +938,7 @@ async function openCollDialog(c) {
       { once: true, done: () => '已删除' })) d.close();
   };
   d.showModal();
+  if (tplErr) toast(`模板没取到，只能建空白库：${tplErr.message}`, true);
 }
 
 document.addEventListener('submit', async e => {

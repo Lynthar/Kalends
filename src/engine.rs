@@ -247,6 +247,16 @@ fn sem_of(map: &SemMap, coll: &str, status: &str) -> StatusSem {
         .unwrap_or_else(|| status_sem(status))
 }
 
+/// 某库里一个状态值的语义（与时间线、支出同一套读法）。
+pub fn sem_in(conn: &Connection, coll: &str, status: &str) -> Result<StatusSem> {
+    Ok(sem_of(&sem_map(conn)?, coll, status))
+}
+
+/// 条目能不能挂自动续费：状态得计支出（停付了的不能替人记账），周期得推得动（买断、没周期都不行）。
+pub fn auto_allowed(sem: StatusSem, cycle: &str, cycle_days: Option<i64>) -> bool {
+    sem.spend && step(cycle, cycle_days).is_some()
+}
+
 /// 一个条目在到期时间线上的样子；跨库统一，engine 之外只认这个形状。
 struct Row {
     key: String,
@@ -275,13 +285,14 @@ impl Row {
         due_from(self.cycle.as_deref().unwrap_or(""), self.next_renewal.as_deref())
     }
 
-    /// 这一期到期日是否归自动续费管。状态得计支出（停付了的不能替人记账）、周期推得动，
+    /// 这一期到期日是否归自动续费管。条目得挂得上自动续费（`auto_allowed`）、这期推得动，
     /// 且账单日不早于开启日：开启前就逾期的期仍要用户自己对齐，否则陈旧日期会一次补出一串没核过的账。
     fn auto_covers(&self, sem: StatusSem, due: NaiveDate) -> bool {
         let since = self.auto_renew.as_deref().and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
-        sem.spend
+        let cycle = self.cycle.as_deref().unwrap_or("");
+        auto_allowed(sem, cycle, self.cycle_days)
             && since.is_some_and(|s| due >= s)
-            && advance(due, self.cycle.as_deref().unwrap_or(""), self.cycle_days, self.billing_day).is_some()
+            && advance(due, cycle, self.cycle_days, self.billing_day).is_some()
     }
 
     /// 该计支出、却因为缺一半而没被计进去时，缺的是哪一项；None＝不算欠缺。

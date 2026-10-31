@@ -214,6 +214,21 @@ export default async function (t) {
     JSON.stringify([badPrice, priceNow, nf.price]));
   await evl(`closePop()`);
   await quietToast();
+  // 日期栏只填了一半（退格清掉一段）：value 同样是空串，当清空写出去，条目就掉进首页点名
+  await evl(`document.querySelector('#subs-body tr[data-id="${nf.id}"] td[data-k="next_renewal"]').click()`);
+  await sleep(400);
+  await evl(`document.querySelector('.cellpop input[type=date]').focus()`);
+  for (const type of ['keyDown', 'keyUp']) {
+    await send('Input.dispatchKeyEvent', { type, key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+  }
+  const badDate = await evl(`document.querySelector('.cellpop input[type=date]').validity.badInput`);
+  await evl(`document.querySelector('.cellpop .cp-foot button').click()`);
+  await settle();
+  const dueNow = (await items('subs')).find(r => r.id === nf.id).next_renewal;
+  check('到期日格：日期只填一半时不保存、说出原因', badDate && await refused() && dueNow === nf.next_renewal,
+    JSON.stringify([badDate, dueNow, nf.next_renewal]));
+  await evl(`closePop()`);
+  await quietToast();
   await evl(`switchTab('vps')`);
   await sleep(300);
 

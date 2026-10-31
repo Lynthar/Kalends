@@ -338,4 +338,21 @@ export default async function (t) {
   await evl('loadLedger()');
   check('自动续费：台账标出自动记的那笔', await waitFor(`[...document.querySelectorAll('#ledger-list .lg-row')]
     .some(r => r.textContent.includes('自动续费甲') && r.textContent.includes('自动续费'))`));
+
+
+  /* 12. 行序是整份替换：一个往返里连按两下「下移」，第二下得对着第一下落定后的行序算。
+     拿按键那一刻的快照算的话，两份 PUT 体一模一样、只挪了一格（慢链路上键盘连按就撞上） */
+  await evl(`setSort('subs', null, null)`);
+  await settle();
+  const topOrder = async () => (await items('subs')).filter(r => !r.parent_id).sort((a, b) => a.pos - b.pos).map(r => r.id);
+  const ordBefore = await topOrder();
+  const mover = ordBefore[0];
+  await evl(`window.__hold = (p, o) => p.endsWith('/items/order') && o?.method === 'PUT'; true`);
+  await evl(`nudgeRow('subs', ${mover}, 1); true`);
+  await held();
+  await evl(`nudgeRow('subs', ${mover}, 1); true`);
+  await release();
+  await settle();
+  const ordAfter = await topOrder();
+  check('连按两下「下移」挪了两格', ordAfter.indexOf(mover) === 2, `${ordBefore} → ${ordAfter}`);
 }

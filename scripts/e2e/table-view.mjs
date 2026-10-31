@@ -260,6 +260,26 @@ export default async function (t) {
     const table = wrap.querySelector('table');
     return wrap.scrollLeft === 0 && table.getBoundingClientRect().left >= wrap.getBoundingClientRect().left - 1;
   })()`) === true);
+  // 触屏（hover: none）下首列给行首浮标让出 3.7rem 内边距，能窄到的宽度高于 52px：按 52 算表宽，
+  // 拖窄后表格比容器宽、右缘贴不住（没有鼠标的 Linux headless 就是这个环境）
+  await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
+  await send('Emulation.setEmulatedMedia', { features: [{ name: 'hover', value: 'none' }, { name: 'pointer', value: 'coarse' }] });
+  if (await evl(`matchMedia('(hover: none)').matches`)) {
+    await dragW(-5000);
+    await sleep(150);
+    const touchFloor = await evl(`colFloor(document.querySelector('#view-subs th[data-k="name"]'))`);
+    const touchW = await evl(`document.querySelector('#view-subs th[data-k="name"]').getBoundingClientRect().width`);
+    check('触屏首列：拖窄钳在它的内边距地板（高于 52px）', touchFloor > 52 && Math.abs(touchW - touchFloor) <= 1,
+      JSON.stringify([touchFloor, touchW]));
+    const [tw, cw] = [await tableW(), await evl(`document.querySelector('#view-subs').clientWidth`)];
+    check('触屏首列：拖窄后表格仍贴满容器', Math.abs(tw - cw) <= 2, JSON.stringify([tw, cw]));
+  } else {
+    skip('触屏首列地板', '这个浏览器模拟不出 (hover: none)');
+  }
+  await send('Emulation.setEmulatedMedia', { features: [] });
+  await send('Emulation.setTouchEmulationEnabled', { enabled: false });
+  await dragW(-5000);
+  await sleep(150);
   // 宽拖到底：先吃空白再压右侧列到 52px，把手停在右边框——不产生任何横向溢出
   await dragW(2000);
   await sleep(150);

@@ -54,4 +54,10 @@ async function boot() {
   await loadAll();
 }
 
-boot().catch(e => toast('加载失败：' + e.message, true));
+// 首屏没加载成功时页面是个空壳，toast 几秒就消失：原因写进页面常驻，直到下一次加载成功
+boot().catch(e => {
+  const note = $('#boot-note');
+  note.textContent = `加载失败：${e.message}`;
+  note.hidden = false;
+  toast('加载失败：' + e.message, true);
+});

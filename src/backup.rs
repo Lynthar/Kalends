@@ -62,7 +62,7 @@ pub fn run(conn: &Connection, data_dir: &Path) -> Result<Report> {
             }
             if *table == "settings" {
                 if let (Some(Value::String(k)), Some(Value::String(v))) = (obj.get("key"), obj.get("value")) {
-                    let v = crate::settings::exported(k, v);
+                    let v = crate::settings::masked(k, v);
                     obj.insert("value".into(), Value::from(v));
                 }
             }

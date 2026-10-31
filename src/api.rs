@@ -146,7 +146,14 @@ pub fn extra_json(text: Option<String>) -> Value {
 /// 类型校验，**只作用于这次请求里出现的键**：取值函数（`s`/`f`/`i`）读不出来就给 None，
 /// 「出现即写入」的协议下那是一次静默清空，还回 200。`""` 与 `null` 仍按协议表示清空；
 /// `extra` 出现时必须是对象（`""`/`null` 同样算清空）。
+///
+/// # Errors
+///
+/// 请求体不是 JSON 对象时 400：`[]`、`"x"` 取哪个键都是缺席，放过去就是新建一条空行或回一个假成功。
 pub fn check_shape(b: &Value, strs: &[&str], ints: &[&str], reals: &[&str]) -> anyhow::Result<()> {
+    if !b.is_object() {
+        return Err(bad("请求体要是 JSON 对象"));
+    }
     let clearing = |v: &&Value| v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty());
     for k in strs {
         if let Some(v) = b.get(*k).filter(|v| !clearing(v)) {
@@ -239,8 +246,9 @@ async fn fx_get(State(app): State<App>) -> R {
 }
 
 /// 手动拉一次实时汇率（默认关着的那条出网，用户在设置页点一下才发生）。
-async fn fx_refresh(State(app): State<App>) -> R {
-    Ok(Json(crate::fx::refresh(&app.db).await?))
+async fn fx_refresh(State(app): State<App>, Json(b): Json<Value>) -> R {
+    let proxy = outbound_proxy(&app.db.lock().unwrap(), &b)?;
+    Ok(Json(crate::fx::refresh(&app.db, &proxy).await?))
 }
 
 /// 续费台账（设置页只读列表）。名字以**写入时钉进去的快照**为准（迁移 0018）：
@@ -319,17 +327,39 @@ fn check_setting(k: &str, v: &str) -> anyhow::Result<()> {
 // 渠道密钥不回读明文：GET 把它换成占位串（`settings::masked`），PUT 收到占位串＝保持库里那份；
 // 清空照旧发 ""。
 fn keep_masked_secret(conn: &rusqlite::Connection, k: &str, incoming: &str) -> anyhow::Result<String> {
-    let Some(field) = settings::secret_field(k) else { return Ok(incoming.into()) };
-    let Ok(mut v) = serde_json::from_str::<Value>(incoming) else { return Ok(incoming.into()) };
-    if v[field].as_str() == Some(settings::SECRET_MASK) {
-        // 读不出旧值要报错别吞：把故障当"没存过"会把密钥静默清空
-        let stored = crate::db::get_setting(conn, k)?
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-            .and_then(|s| s[field].as_str().map(str::to_string))
-            .unwrap_or_default();
-        v[field] = Value::from(stored);
+    if !incoming.contains(settings::SECRET_MASK) {
+        return Ok(incoming.into());
     }
-    Ok(v.to_string())
+    // 读不出旧值要报错别吞：把故障当"没存过"会把密钥静默清空
+    let stored = crate::db::get_setting(conn, k)?.unwrap_or_default();
+    let Ok(Value::Object(mut o)) = serde_json::from_str::<Value>(incoming) else {
+        return settings::unmask_url_password(incoming, &stored); // 裸值：出网代理
+    };
+    let old: Value = serde_json::from_str(&stored).unwrap_or_default();
+    let secret = settings::secret_field(k);
+    for (f, v) in &mut o {
+        let Value::String(s) = v else { continue };
+        let was = old[f.as_str()].as_str().unwrap_or_default();
+        *s = if secret == Some(f.as_str()) && s == settings::SECRET_MASK {
+            was.into()
+        } else {
+            settings::unmask_url_password(s, was)?
+        };
+    }
+    Ok(Value::Object(o).to_string())
+}
+
+/// 这次出网该走的出网代理：请求里带了 `proxy`（设置框里还没保存的那栏）就按它，否则读库。
+/// 与「发送测试」测表单当前值同理——改了代理没保存就点，测的得是刚填的那个。
+fn outbound_proxy(conn: &rusqlite::Connection, b: &Value) -> anyhow::Result<String> {
+    match b.get("proxy") {
+        Some(Value::String(p)) => {
+            settings::proxy(p)?;
+            keep_masked_secret(conn, "meta.proxy", p.trim())
+        }
+        Some(_) => Err(bad("proxy 要写成文本")),
+        None => Ok(crate::db::get_setting(conn, "meta.proxy")?.unwrap_or_default()),
+    }
 }
 
 /// 固定默认值下发给前端：表单的占位串与「清空＝回默认」都读它，JS 里不再抄一份。
@@ -407,7 +437,8 @@ async fn notify_test(State(app): State<App>, Json(b): Json<Value>) -> R {
     let text = "Kalends 通知测试 ✓";
     match channel.as_str() {
         "telegram" => {
-            let cfg = notify::telegram_cfg_from(&raw("notify.telegram")?)
+            let outbound = outbound_proxy(&app.db.lock().unwrap(), &b)?;
+            let cfg = notify::telegram_cfg_from(&raw("notify.telegram")?, &outbound)
                 .ok_or_else(|| bad("Telegram 未启用或未配置完整"))?;
             notify::send_telegram(&cfg, text).await?;
         }
@@ -520,6 +551,27 @@ mod tests {
         ok("some.future_key", "anything at all");
     }
 
+    /// 代理口令同样不回读明文（出网那栏的裸值、Telegram 那栏的 JSON 字段都算）：原样写回＝保持，
+    /// 改了地址却还带着占位串就 400，别把占位串当口令存下去。
+    #[test]
+    fn proxy_passwords_mask_on_read_and_round_trip_on_write() {
+        let conn = crate::db::fresh_in_memory().unwrap();
+        let put = |k: &str, v: &str| {
+            conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?1,?2)", [k, v]).unwrap();
+        };
+        put("meta.proxy", "socks5://me:S3CRET@10.0.0.5:1080");
+        put("notify.telegram", r#"{"enabled":true,"bot_token":"tok","chat_id":"1","proxy":"http://tg:P4SS@10.0.0.6:3128"}"#);
+        let shown = |k: &str| settings::masked(k, &crate::db::get_setting(&conn, k).unwrap().unwrap());
+        let (meta, tg) = (shown("meta.proxy"), shown("notify.telegram"));
+        assert!(!meta.contains("S3CRET") && !tg.contains("P4SS") && !tg.contains("\"tok\""), "{meta} {tg}");
+        assert_eq!(keep_masked_secret(&conn, "meta.proxy", &meta).unwrap(), "socks5://me:S3CRET@10.0.0.5:1080");
+        let kept: Value = serde_json::from_str(&keep_masked_secret(&conn, "notify.telegram", &tg).unwrap()).unwrap();
+        assert_eq!((kept["proxy"].as_str(), kept["bot_token"].as_str()), (Some("http://tg:P4SS@10.0.0.6:3128"), Some("tok")));
+        let moved = format!("socks5://me:{}@10.0.0.9:1080", settings::SECRET_MASK);
+        assert!(keep_masked_secret(&conn, "meta.proxy", &moved).is_err());
+        assert_eq!(keep_masked_secret(&conn, "meta.proxy", "socks5://me:new@10.0.0.9:1080").unwrap(), "socks5://me:new@10.0.0.9:1080");
+    }
+
     /// 渠道密钥不回读明文：GET 换占位串；PUT 收占位串＝保持、收新值＝更新、收空串＝清掉。
     #[test]
     fn channel_secrets_mask_on_read_and_keep_on_masked_write() {
@@ -576,7 +628,7 @@ mod tests {
             [key, r#"{"enabled":true,"bot_token":"STORED","chat_id":"1"}"#],
         )
         .unwrap();
-        let tg = |config: Option<&Value>| notify::telegram_cfg_from(&test_config(&conn, key, config).unwrap()).unwrap();
+        let tg = |config: Option<&Value>| notify::telegram_cfg_from(&test_config(&conn, key, config).unwrap(), "").unwrap();
 
         let form = json!(format!(r#"{{"enabled":true,"bot_token":"{}","chat_id":"2"}}"#, settings::SECRET_MASK));
         let cfg = tg(Some(&form));

@@ -332,8 +332,16 @@ function initHead(tab) {
 
 /* 列宽三律（右边框硬边界，最右可见列右缘恒贴容器）：① 无手动宽 fitWidths 自动装容器
    （不落存储）；② 有手动宽最右可见列吸收残差（存宽是它的下限）；③ 拖宽先吃残差、贴边后
-   压右侧数据列到 MIN_COLW，拖窄全给最右列。一切宽度变化都经 applyWidths 结算。 */
+   压右侧数据列到各自的地板（colFloor），拖窄全给最右列。一切宽度变化都经 applyWidths 结算。 */
 const MIN_COLW = 52;
+// 一列实际能窄到多少：MIN_COLW，或这一格左右内边距加边框（触屏下首列给行首浮标让出 3.7rem，
+// 光内边距就将近 70px）。按 MIN_COLW 算的表宽比浏览器排出来的窄，右缘就贴不住容器
+function colFloor(th) {
+  const cs = getComputedStyle(th);
+  const box = ['paddingLeft', 'paddingRight', 'borderLeftWidth', 'borderRightWidth']
+    .reduce((sum, p) => sum + (parseFloat(cs[p]) || 0), 0);
+  return Math.max(MIN_COLW, Math.ceil(box));
+}
 
 function applyWidths(tab) {
   const thead = $(HEAD_SEL[tab]);
@@ -357,6 +365,7 @@ function applyWidths(tab) {
       if (px < 8) { table.style.width = ''; return; }
       w[th.dataset.k] = px;
     }
+    px = Math.max(px, colFloor(th)); // 别的设备上存的窄宽，在这儿可能低于首列地板
     th.style.width = px + 'px';
     sum += px;
   }
@@ -379,7 +388,7 @@ function fitWidths(tab, thead, table) {
   for (const t of ths) t.style.width = '';
   const avail = table.closest('.tablewrap').clientWidth;
   if (!avail) return; // 表在隐藏页量不到，等可见时再排
-  const nat = ths.map(t => ({ t, w: t.getBoundingClientRect().width, ops: t.classList.contains('ops') }));
+  const nat = ths.map(t => ({ t, w: t.getBoundingClientRect().width, ops: t.classList.contains('ops'), floor: colFloor(t) }));
   if (nat.reduce((s, x) => s + x.w, 0) <= avail + 1) return; // 天然放得下：保持 auto 铺满
   // 等比压缩必然截到日期、金额这类一截就读不出的列（TYPES[t].whole，「2026-…」）：有它们可见就不压，
   // 退回自然列宽加横滚
@@ -389,13 +398,13 @@ function fitWidths(tab, thead, table) {
   let room = avail - [...fitted.values()].reduce((s, x) => s + x, 0);
   for (let guard = 0; guard < nat.length; guard++) {
     const natSum = pool.reduce((s, x) => s + x.w, 0);
-    const clamped = pool.filter(x => x.w * room / natSum < MIN_COLW);
+    const clamped = pool.filter(x => x.w * room / natSum < x.floor);
     if (!clamped.length) break;
-    for (const x of clamped) { fitted.set(x.t, MIN_COLW); room -= MIN_COLW; }
+    for (const x of clamped) { fitted.set(x.t, x.floor); room -= x.floor; }
     pool = pool.filter(x => !clamped.includes(x));
   }
   const natSum = pool.reduce((s, x) => s + x.w, 0) || 1;
-  for (const x of pool) fitted.set(x.t, Math.max(MIN_COLW, Math.floor(x.w * room / natSum)));
+  for (const x of pool) fitted.set(x.t, Math.max(x.floor, Math.floor(x.w * room / natSum)));
   let total = 0;
   for (const px of fitted.values()) total += px;
   // 压到下限还塞不进容器就整个放弃压缩、退回自然列宽：横滚照样免不了，压缩只会把
@@ -418,7 +427,7 @@ function freezeWidths(tab) {
 }
 
 // 右边框是硬边界：拖宽先吃容器空白，贴边后从被拖列右侧的数据列（显示序邻列优先，
-// 操作列除外）逐列压缩到 MIN_COLW，压无可压就停；拖窄整表收窄。
+// 操作列除外）逐列压缩到各自的地板（colFloor），压无可压就停；拖窄整表收窄。
 function widenBase(tab, th) {
   const v = views[tab];
   const hid = v.hiddenCols || [];
@@ -429,21 +438,21 @@ function widenBase(tab, th) {
   const after = [];
   for (let t = th.nextElementSibling; t; t = t.nextElementSibling) {
     if (t.classList.contains('ops') || t.style.display === 'none') continue;
-    after.push({ k: t.dataset.k, w0: v.widths[t.dataset.k] || Math.round(t.getBoundingClientRect().width) });
+    after.push({ k: t.dataset.k, w0: v.widths[t.dataset.k] || Math.round(t.getBoundingClientRect().width), floor: colFloor(t) });
   }
   const capW = th.closest('table').closest('.tablewrap').clientWidth;
   const blank = Math.max(0, capW - startSum); // 最右列当前吃着的残差
-  const maxW = startW + blank + after.reduce((s, a) => s + Math.max(0, a.w0 - MIN_COLW), 0);
-  return { k, startW, after, blank, maxW };
+  const maxW = startW + blank + after.reduce((s, a) => s + Math.max(0, a.w0 - a.floor), 0);
+  return { k, startW, after, blank, maxW, floor: colFloor(th) };
 }
 
 function applyWiden(tab, base, want) {
   const v = views[tab];
-  const nw = Math.min(base.maxW, Math.max(MIN_COLW, Math.round(want)));
+  const nw = Math.min(base.maxW, Math.max(base.floor, Math.round(want)));
   v.widths[base.k] = nw;
   let need = Math.max(0, nw - base.startW - base.blank);
   for (const a of base.after) {
-    const take = Math.min(need, Math.max(0, a.w0 - MIN_COLW));
+    const take = Math.min(need, Math.max(0, a.w0 - a.floor));
     need -= take;
     v.widths[a.k] = a.w0 - take;
   }
@@ -649,7 +658,7 @@ function bindRowGutter(tab, tr, g) {
     axis: 'y',
     key: id,
     onStart: () => { if (!tr.draggable) return false; closePop(); },
-    onDrop: (from, after) => applyRowOrder(tab, moveRow(tab, from, id, after)),
+    onDrop: (from, after) => applyRowOrder(tab, () => moveRow(tab, from, id, after)),
     touch: false, // 触屏上挪行走手柄菜单
   });
   tr.addEventListener('dragend', () => { tr.draggable = false; });
@@ -705,29 +714,27 @@ function nudgeRow(tab, id, step) {
     toast('清掉列排序后才能挪行', true);
     return;
   }
-  const list = fullOrder(tab);
-  const has = new Set(list.map(r => r.id));
-  const lvl = r => (r.parent_id && has.has(r.parent_id) ? 1 : 0);
-  const i = list.findIndex(r => r.id === id);
-  if (i < 0) return;
-  const peers = list.filter(r => lvl(r) === lvl(list[i]) && r.parent_id === list[i].parent_id);
-  const pi = peers.findIndex(r => r.id === id);
-  const tgt = peers[pi + step];
-  if (!tgt) return;
-  applyRowOrder(tab, moveRow(tab, id, tgt.id, step > 0), id);
+  applyRowOrder(tab, () => {
+    const list = fullOrder(tab);
+    const has = new Set(list.map(r => r.id));
+    const lvl = r => (r.parent_id && has.has(r.parent_id) ? 1 : 0);
+    const i = list.findIndex(r => r.id === id);
+    if (i < 0) return null;
+    const peers = list.filter(r => lvl(r) === lvl(list[i]) && r.parent_id === list[i].parent_id);
+    const tgt = peers[peers.findIndex(r => r.id === id) + step];
+    return tgt ? moveRow(tab, id, tgt.id, step > 0) : null;
+  }, id);
 }
 
-async function applyRowOrder(tab, ids, refocus) {
-  if (!ids) return;
-  const path = `/api/collections/${tab}/items/order`;
-  try {
-    await api(path, { method: 'PUT', body: JSON.stringify({ ids }) });
-    // 本地同步 pos，省一次整表重取；渲染层无排序时就是按 pos 排
-    const at = new Map(ids.map((x, n) => [x, n + 1]));
-    for (const r of state[tab] || []) if (at.has(r.id)) r.pos = at.get(r.id);
-    RENDER[tab]();
-    if (refocus) tbodyOf(tab)?.querySelector(`tr[data-id="${refocus}"] [data-sel]`)?.focus();
-  } catch (e) { toast(e.message, true); }
+/* 行序整份替换：plan 在写入轮到时对着上一次挪动落定后的行序现算（同键排队）——拿按键那一刻的
+   快照算，一个往返里连按两下，两份 PUT 体一模一样、只挪了一格 */
+async function applyRowOrder(tab, plan, refocus) {
+  await write(`order:${tab}`, async () => {
+    const ids = plan();
+    if (!ids) return null;
+    return api(`/api/collections/${tab}/items/order`, { method: 'PUT', body: JSON.stringify({ ids }) });
+  });
+  if (refocus) tbodyOf(tab)?.querySelector(`tr[data-id="${refocus}"] [data-sel]`)?.focus();
 }
 
 /* ── 选区 ── */

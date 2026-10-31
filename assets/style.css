@@ -674,6 +674,8 @@ dialog h3 {
 }
 /* 设置框顶的坏配置原因：保存因此停用，得和普通说明区分开 */
 #settings-note { color: var(--coral-ink); }
+/* 首屏没加载成功的原因：常驻、醒目，不靠几秒就消失的 toast */
+.boot-note { color: var(--coral-ink); font-weight: 600; margin: 0 0 1rem; }
 #dlg-renew { width: min(94vw, 24rem); }
 /* 所选那天已经记过一笔：再点「记账」就是重复入账 */
 #dlg-renew-note { color: var(--coral-ink); }
@@ -775,8 +777,13 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
   *, *::before, *::after { animation: none !important; transition: none !important; } /* 背景光斑在 body 的伪元素上 */
 }
 @media (max-width: 640px) {
-  .ledger li { grid-template-columns: 3.4rem 1fr auto; }
-  .ledger .due, .ledger .amt { display: none; }
+  /* 窄屏收起金额，到期日挪到名字下面：剩余天数是相对的，没有日期就对不上账单 */
+  .ledger li { grid-template-columns: 3.4rem 1fr auto; grid-template-areas: "days what btn" "days due btn"; row-gap: .1rem; }
+  .ledger .days { grid-area: days; }
+  .ledger .what { grid-area: what; }
+  .ledger .due { grid-area: due; font-size: .75rem; }
+  .ledger li > button { grid-area: btn; }
+  .ledger .amt { display: none; }
   .fgrid { grid-template-columns: 1fr; }
   .fgrid .span2 { grid-column: span 1; }
   .masthead { gap: .8rem; }
@@ -816,6 +823,10 @@ dialog form > footer { display: flex; gap: .6rem; margin-top: 1.25rem; }
 .pricebox .sopts, .fp-form .sopts { flex: 0 0 7.5rem; }
 .pricebox .sopts select, .fp-form .sopts select { flex: 1 1 auto; }
 .cur-add { text-transform: uppercase; }
+/* 周期一格：下拉 + 只在 Custom 时出现的天数框 */
+.cyclebox { display: flex; gap: .4rem; }
+.cyclebox select { flex: 1 1 auto; min-width: 0; }
+.cyclebox input { flex: 0 0 5.5rem; min-width: 0; }
 
 /* 电话号码：可点拨号；位数偏少的挂个问号，只提醒不拦（存量数据里就有残缺值） */
 .grid a.tel { color: inherit; text-decoration: none; border-bottom: 1px dashed var(--line); }

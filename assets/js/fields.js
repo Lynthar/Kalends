@@ -118,17 +118,32 @@ function openStatusSemPop(tab, k, anchor) {
 function openOptionsPop(tab, k, anchor) {
   closePop();
   popKey = 'opts:' + tab + ':' + k;
-  const reopen = () => { popKey = ''; openOptionsPop(tab, k, anchor); };
+  const mine = popKey;
+  // 写完重开这一个浮层；等待期间用户已经换开了别的编辑器就别抢回来
+  const reopen = () => { if (popKey !== mine) return; popKey = ''; openOptionsPop(tab, k, anchor); };
   popEl = document.createElement('div');
   popEl.className = 'filterpop optpop';
   popEl.innerHTML = `<div class="fp-head"><b>选项 · ${esc(colLabel(tab, k))}</b></div>`;
-  const stored = storedOpts(tab, k);
   // 展示 = 已存词表（带颜色，手动序）+ 数据里出现但未入表的值；任何编辑都按展示序整体落表
-  const shown = [...stored, ...effectiveOptions(tab, k).filter(v => !stored.some(o => o.v === v)).map(v => ({ v }))];
-  const commitList = async next => {
-    await putOpts(tab, k, next);
-    RENDER[tab]();
+  const listNow = () => {
+    const st = storedOpts(tab, k);
+    return [...st.map(o => ({ ...o })), ...effectiveOptions(tab, k).filter(v => !st.some(o => o.v === v)).map(v => ({ v }))];
+  };
+  const shown = listNow();
+  // 整份落表的那份在写入轮到时对着最新词表现算（同键排队，上一次落定才轮到下一次）：
+  // 拿打开时的快照算，一个往返里连点两下「下移」只挪一格。所以下面的编辑一律按值、不按下标
+  const commitList = async edit => {
+    await write(`opts:${tab}:${k}`, () => api('/api/fields/options',
+      { method: 'PUT', body: JSON.stringify({ tbl: tab, key: k, options: edit(listNow()) }) }));
     reopen();
+  };
+  const placeAt = (list, v, ref, after) => {
+    const from = list.findIndex(s => s.v === v);
+    if (from < 0 || v === ref) return list;
+    const [moved] = list.splice(from, 1);
+    const at = list.findIndex(s => s.v === ref);
+    list.splice(at < 0 ? list.length : at + (after ? 1 : 0), 0, moved);
+    return list;
   };
   shown.forEach((o, idx) => {
     const x = o.v;
@@ -141,13 +156,12 @@ function openOptionsPop(tab, k, anchor) {
       <button type="button" class="btn link" data-dn title="下移">↓</button>
       <button type="button" class="btn link" data-rn title="改名">✎</button>
       <button type="button" class="btn link" data-del title="删除">✕</button>`;
-    const move = dir => {
-      const j = idx + dir;
-      if (j < 0 || j >= shown.length) return;
-      const next = shown.map(s => ({ ...s }));
-      [next[idx], next[j]] = [next[j], next[idx]];
-      commitList(next);
-    };
+    const move = dir => commitList(list => {
+      const i = list.findIndex(s => s.v === x);
+      const j = i + dir;
+      if (i >= 0 && j >= 0 && j < list.length) [list[i], list[j]] = [list[j], list[i]];
+      return list;
+    });
     row.querySelector('[data-up]').onclick = () => move(-1);
     row.querySelector('[data-dn]').onclick = () => move(1);
     reorderDnD(row, {
@@ -155,12 +169,8 @@ function openOptionsPop(tab, k, anchor) {
       axis: 'y',
       key: idx,
       onDrop: (from, after) => {
-        const next = shown.map(s => ({ ...s }));
-        const [moved] = next.splice(from, 1);
-        let at = idx + (after ? 1 : 0);
-        if (from < at) at--;
-        next.splice(at, 0, moved);
-        commitList(next);
+        const v = shown[from]?.v;
+        if (v !== undefined) commitList(list => placeAt(list, v, x, after));
       },
     });
     row.querySelector('[data-color]').onclick = () => {
@@ -173,14 +183,14 @@ function openOptionsPop(tab, k, anchor) {
         const b = document.createElement('button');
         b.type = 'button';
         b.className = `cdot t${c}${o.c === c ? ' on' : ''}`;
-        b.onclick = () => commitList(shown.map(s => s.v === x ? { v: x, c } : { ...s }));
+        b.onclick = () => commitList(list => list.map(s => s.v === x ? { v: x, c } : s));
         strip.appendChild(b);
       }
       const auto = document.createElement('button');
       auto.type = 'button';
       auto.className = 'btn link';
       auto.textContent = '自动';
-      auto.onclick = () => commitList(shown.map(s => s.v === x ? { v: x } : { ...s }));
+      auto.onclick = () => commitList(list => list.map(s => s.v === x ? { v: x } : s));
       strip.appendChild(auto);
       row.appendChild(strip);
     };
@@ -223,10 +233,8 @@ function openOptionsPop(tab, k, anchor) {
     if (!enterPressed(e)) return;
     const val = addInp.value.trim();
     if (!val) return;
-    if (!effectiveOptions(tab, k).includes(val)) {
-      await putOpts(tab, k, [...shown.map(s => ({ ...s })), { v: val }]);
-    }
-    reopen();
+    if (effectiveOptions(tab, k).includes(val)) { reopen(); return; }
+    await commitList(list => (list.some(s => s.v === val) ? list : [...list, { v: val }]));
   });
   popEl.appendChild(addRow);
   placePop(popEl, anchor);
@@ -286,7 +294,8 @@ function openTypeMenu(tab, th) {
   const cur = colType(tab, k);
   popEl = document.createElement('div');
   popEl.className = 'thmenu';
-  popEl.innerHTML = '<div class="tm-title">字段类型</div>';
+  // 只换这台设备上的呈现（存在本机 view 里），不改字段本身：别的设备、详情表单都照原类型
+  popEl.innerHTML = '<div class="tm-title">呈现为（仅本机）</div>';
   for (const t of CONV_TYPES) {
     const b = document.createElement('button');
     b.type = 'button';

@@ -30,6 +30,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0022_auto_renew.sql"),
     include_str!("../migrations/0023_notes_become_a_custom_column.sql"),
     include_str!("../migrations/0024_one_due_date.sql"),
+    include_str!("../migrations/0025_every_library_has_a_cycle.sql"),
+    include_str!("../migrations/0026_collection_ids_are_never_reused.sql"),
 ];
 
 /// 一个跑完全部迁移的内存库，等价于"全新安装"。只给测试用。
@@ -92,8 +94,8 @@ fn pre_migration_snapshot(conn: &Connection, data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 给 `table`（`items` 或 `fields`）发一个从没发出过的 id：SQLite 不带 AUTOINCREMENT 时会把删掉的
-/// 最大 id 再发出去，而字段键 `c<id>`、通知去重键、放锁期间的在途请求都拿 id 当身份。
+/// 给 `table`（`items`、`fields` 或 `collections`）发一个从没发出过的 id：SQLite 不带 AUTOINCREMENT 时
+/// 会把删掉的最大 id 再发出去，而字段键 `c<id>`、通知去重键、旧标签页里的在途请求都拿 id 当身份。
 /// 要在插行的同一事务里调，回滚时号才跟着退回；`table` 会被拼进 SQL，只能传字面量。
 pub fn next_id(conn: &Connection, table: &str) -> rusqlite::Result<i64> {
     conn.query_row(
@@ -318,6 +320,7 @@ mod tests {
         assert_eq!(one::<String>(&conn, "SELECT src||':'||shown FROM fields WHERE tbl='sims' AND key='next_renewal'", []), "col:1");
         assert_eq!(one::<String>(&conn, "SELECT src||':'||shown FROM fields WHERE tbl='subs' AND key='last_renewed'", []), "calc:0");
         assert_eq!(one::<String>(&conn, "SELECT src||':'||shown FROM fields WHERE tbl='subs' AND key='left'", []), "calc:0");
+        assert_every_library_has_a_cycle(&conn);
     }
 
     /// 0024 之后：items 没有 `last_renewed` 真列、collections 没有 `due_anchor`，到期索引只认 `next_renewal`；
@@ -375,10 +378,13 @@ mod tests {
         assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM sqlite_master WHERE name='media_items'", []), 0);
         // 0021：号从已删行留下的痕迹之后发——台账里的条目 999、库属性指着的 c950 与孤儿键 c900
         assert_eq!(one::<i64>(&conn, "SELECT seq FROM id_seq WHERE name='items'", []), 999);
-        // 0024 给六个库补了 12 行字段（订阅 / 藏书各 2、SIM / VPS 各 1、两个域名库各 3），号从 950 之后发
-        assert_eq!(one::<i64>(&conn, "SELECT seq FROM id_seq WHERE name='fields'", []), 962);
-        assert_eq!(next_id(&conn, "fields").unwrap(), 963);
+        // 0024 给六个库补了 12 行字段（订阅 / 藏书各 2、SIM / VPS 各 1、两个域名库各 3），号从 950 之后发；
+        // 0025 再给没注册周期 / 费用 / 链接的四个库（SIM、藏书、两个域名库）各补 3 行
+        assert_eq!(one::<i64>(&conn, "SELECT seq FROM id_seq WHERE name='fields'", []), 974);
+        assert_eq!(next_id(&conn, "fields").unwrap(), 975);
         assert_eq!(next_id(&conn, "items").unwrap(), 1000);
+        // 0026：库号从现有最大 id 之后发
+        assert_eq!(next_id(&conn, "collections").unwrap(), 7);
         // 0022：k5 的开/关并进开关（开＝迁移那天起自动续），键与列一起退场、别的 extra 不动；
         // k6 有开/关之外的值，整库原样；存量台账都不是自动记的
         let since = one::<Option<String>>(&conn, "SELECT auto_renew FROM items WHERE name='example.com'", []);
@@ -408,6 +414,29 @@ mod tests {
         assert_eq!(one::<String>(&conn, "SELECT name||':'||shown FROM fields WHERE tbl='books' AND key='next_renewal'", []), "到期:1");
         assert_eq!(one::<i64>(&conn, "SELECT sum(shown) FROM fields WHERE tbl='books' AND key IN ('last_renewed','left')", []), 0);
         assert_one_due_date(&conn);
+        // 0025：只填了天数的 SIM 落成自定义周期；预置周期上的天数清掉；买断丢掉到期日与自动续费
+        assert_eq!(one::<String>(&conn, "SELECT cycle||':'||cycle_days FROM items WHERE name='ExampleTel2'", []), "days:30");
+        assert_eq!(one::<String>(&conn, "SELECT cycle||':'||cycle_days FROM items WHERE name='ExampleTel'", []), "days:90");
+        assert_eq!(one::<Option<i64>>(&conn, "SELECT cycle_days FROM items WHERE name='ExampleVM'", []), None);
+        assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE name='ExampleVM'", []), "2027-03-01");
+        assert_eq!(one::<Option<String>>(&conn, "SELECT next_renewal FROM items WHERE name='Example Forever'", []), None);
+        assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM items WHERE name='example.io' AND next_renewal IS NULL AND auto_renew IS NULL", []), 1);
+        assert!(one::<Option<String>>(&conn, "SELECT auto_renew FROM items WHERE name='example.com'", []).is_some());
+        assert_every_library_has_a_cycle(&conn);
+    }
+
+    /// 0025 之后：每个库都注册了周期 / 费用 / 链接（预置 SIM 原来缺），周期排在下次到期旁边；
+    /// 周期天数不再单独注册，也只留在自定义周期的条目上。
+    fn assert_every_library_has_a_cycle(conn: &Connection) {
+        let colls: i64 = one(conn, "SELECT count(*) FROM collections", []);
+        for key in ["cycle", "price", "url"] {
+            assert_eq!(one::<i64>(conn, "SELECT count(*) FROM fields WHERE key=?1 AND src='col'", [key]), colls, "{key} 该每个库一行");
+        }
+        assert_eq!(one::<i64>(conn, "SELECT count(*) FROM fields WHERE key='cycle_days'", []), 0);
+        assert_eq!(one::<i64>(conn, "SELECT count(*) FROM items WHERE cycle_days IS NOT NULL AND coalesce(cycle,'') <> 'days'", []), 0);
+        let pos = |key: &str| one::<i64>(conn, "SELECT pos FROM fields WHERE tbl='sims' AND key=?1", [key]);
+        assert_eq!(pos("cycle"), pos("next_renewal"));
+        assert_eq!(one::<String>(conn, "SELECT name||':'||shown FROM fields WHERE tbl='sims' AND key='cycle'", []), "周期:0");
     }
 
     /// 0020 只在媒体清空后放行：还有媒体行就整库拒绝迁移，原样无损。

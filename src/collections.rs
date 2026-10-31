@@ -132,9 +132,11 @@ async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
     // 建库与播字段集要么一起成、要么一条都不落：半途断在中间留下的是一个没有任何列的
     // 空壳库，界面上是张点不动的空表
     let tx = conn.unchecked_transaction()?;
+    // id 也不能让 SQLite 自己发：删掉的最大 id 会被再发出去，旧标签页对旧库的改 / 删就打到新库上
+    let id = db::next_id(&tx, "collections")?;
     tx.execute(
-        "INSERT INTO collections(key,name,icon,subtitle,subline,verb,note_field,pos,builtin,renew_from)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0,?9)",
+        "INSERT INTO collections(id,key,name,icon,subtitle,subline,verb,note_field,pos,builtin,renew_from)
+         VALUES(?10,?1,?2,?3,?4,?5,?6,?7,?8,0,?9)",
         params![
             key,
             name,
@@ -144,10 +146,10 @@ async fn create(State(app): State<App>, Json(b): Json<Value>) -> R {
             take("verb", tpl.and_then(|t| opt(t.verb))),
             tpl.and_then(|t| opt(t.note_field)),
             pos,
-            renew_from
+            renew_from,
+            id
         ],
     )?;
-    let id = tx.last_insert_rowid();
     seed_fields(&tx, &key, tpl)?;
     let row = tx.query_row(
         &format!("SELECT {COLL_COLS} FROM collections WHERE id=?1"),
@@ -578,7 +580,7 @@ fn generic_defs() -> Vec<FieldDef> {
         ("left", "剩余天数", "num", "calc", 0, 42),
         // 备注不被引擎读，是一列普通的自定义列（src='extra'、builtin=0，与模板的域字段同权）
         ("notes", "备注", "text", "extra", 1, 50),
-        ("cycle_days", "周期天数", "num", "col", 0, 60),
+        // 周期天数不单独成列：它只属于自定义周期，跟周期在同一格里填（items.cycle_days 照旧是真列）
         ("url", "链接", "text", "col", 0, 61),
     ]
 }
@@ -952,10 +954,11 @@ fn normalize_item(conn: &Connection, coll: i64, b: &mut Value, cur: Option<&Valu
     if let Some(st) = b.get("status").and_then(Value::as_str) {
         b["status"] = json!(respell_status(conn, &key, st)?);
     }
-    // 两个日期真列不看注册表：自动续费的开启日不注册，照样被读、被导出
-    for k in ["next_renewal", "auto_renew"] {
+    // 引擎与界面直接读的三个真列不看注册表：自动续费的开启日不注册；「链接」注册成 text，
+    // 不判的话裸域名存进去名称格就没有 ↗，`javascript:` 也落得了库
+    for (k, ftype) in [("next_renewal", "date"), ("auto_renew", "date"), ("url", "url")] {
         if let Some(v) = b.get(k).and_then(Value::as_str) {
-            b[k] = json!(normalize_shaped("date", v)?);
+            b[k] = json!(normalize_shaped(ftype, v)?);
         }
     }
     let mut stmt = conn.prepare("SELECT key, name, ftype, src FROM fields WHERE tbl=?1")?;
@@ -1033,6 +1036,71 @@ fn check_computed_keys(b: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 请求带来的这一键与现值不同（`""` 与 `null` 都算空）；请求没带它就不算变。新建时现值恒为空。
+fn differs(b: &Value, cur: Option<&Value>, k: &str) -> bool {
+    let norm = |v: Option<&Value>| v.filter(|v| !(v.is_null() || v.as_str() == Some(""))).cloned();
+    b.get(k).is_some() && norm(b.get(k)) != norm(cur.and_then(|c| c.get(k)))
+}
+
+/// 只在前提成立时才有意义的列：周期天数只属于自定义周期，买断没有到期日，自动续费只挂在计支出、
+/// 周期推得动的条目上。请求自相矛盾就 400；请求把前提改没了，就在同一次写入里显式写 null 清掉——
+/// 留着的话界面上一格说「月付」一格说「30 天」，或者状态改回 Active 时自动续费不声不响地复活。
+fn settle_dependents(conn: &Connection, coll: i64, b: &mut Value, cur: Option<&Value>) -> anyhow::Result<()> {
+    let key: String = conn.query_row("SELECT key FROM collections WHERE id=?1", [coll], |r| r.get(0))?;
+    let now = |k: &str| {
+        b.get(k)
+            .or_else(|| cur.and_then(|c| c.get(k)))
+            .filter(|v| !(v.is_null() || v.as_str() == Some("")))
+            .cloned()
+    };
+    let had = |k: &str| cur.and_then(|c| c.get(k)).is_some_and(|v| !(v.is_null() || v.as_str() == Some("")));
+    let cycle = now("cycle").and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+    let status = now("status").and_then(|v| v.as_str().map(str::to_string)).unwrap_or_else(|| DEFAULT_STATUS.into());
+    // 原样带回来的现值不算「这次请求要写它」：整行回读再 PATCH 的客户端改周期时照样清得掉
+    let cycle_moved = differs(b, cur, "cycle");
+    let mut clear = Vec::new();
+
+    if cycle != "days" {
+        if differs(b, cur, "cycle_days") && now("cycle_days").is_some() {
+            return Err(bad("周期天数只给自定义周期（Custom）填：先把周期改成 Custom"));
+        }
+        if cycle_moved && had("cycle_days") {
+            clear.push("cycle_days");
+        }
+    }
+    if cycle == "lifetime" {
+        if differs(b, cur, "next_renewal") && now("next_renewal").is_some() {
+            return Err(bad("买断没有到期日：要记到期日，先换一个周期"));
+        }
+        if cycle_moved && had("next_renewal") {
+            clear.push("next_renewal");
+        }
+    }
+
+    let cycle_days = if clear.contains(&"cycle_days") { None } else { now("cycle_days").and_then(|v| v.as_i64()) };
+    let allowed = engine::auto_allowed(engine::sem_in(conn, &key, &status)?, &cycle, cycle_days);
+    if differs(b, cur, "auto_renew") && now("auto_renew").is_some() {
+        if !allowed {
+            return Err(bad("自动续费只挂在计支出的状态、推得动的周期上（买断、没周期都不行）"));
+        }
+    } else if had("auto_renew") {
+        let status_moved = differs(b, cur, "status");
+        let was_spend = match cur.and_then(|c| c["status"].as_str()) {
+            Some(st) => engine::sem_in(conn, &key, st)?.spend,
+            None => false,
+        };
+        // 改了状态或周期才动它：只改名之类的写入不替人收拾存量
+        let relevant = status_moved || cycle_moved || differs(b, cur, "cycle_days");
+        if relevant && (!allowed || (status_moved && !was_spend)) {
+            clear.push("auto_renew");
+        }
+    }
+    for k in clear {
+        b[k] = Value::Null;
+    }
+    Ok(())
+}
+
 /// cycle='days' 缺天数就算不出到期日，周期还显示成 "Every 0 days"。判规范化之后的值；`cur` 是这一行的
 /// 现值（新建为 None）。只在请求碰了这两个键之一时判：拿整行去判，库里一个陈年坏值就能把这行锁死
 fn check_cycle_days(b: &Value, cur: Option<&Value>) -> anyhow::Result<()> {
@@ -1106,6 +1174,7 @@ pub fn insert_item(conn: &Connection, coll: i64, b: &Value) -> anyhow::Result<i6
     check_parent(conn, coll, None, i(b, "parent_id"))?;
     let mut b = b.clone();
     normalize_item(conn, coll, &mut b, None)?;
+    settle_dependents(conn, coll, &mut b, None)?;
     check_cycle_days(&b, None)?;
     let b = &b;
     let mut vals = item_values(b)?;
@@ -1148,6 +1217,7 @@ pub fn update_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<()> 
     // 改任何别的字段都会被一个自己没碰过的字段 400 掉。
     let mut incoming = b.clone();
     normalize_item(conn, coll, &mut incoming, Some(&cur))?;
+    settle_dependents(conn, coll, &mut incoming, Some(&cur))?;
     check_cycle_days(&incoming, Some(&cur))?;
     // 父行规则同理只判请求带来的 parent_id：一条存量坏链接不该让这行连备注都改不了
     if incoming.get("parent_id").is_some() {
@@ -1161,8 +1231,9 @@ pub fn update_item(conn: &Connection, id: i64, b: &Value) -> anyhow::Result<()> 
         .enumerate()
         .map(|(n, (c, v))| (format!("{c}=?{},", n + 1), v))
         .unzip();
-    // 手填的到期日以手填那天为准：月末钳位记下的账单日随之作废（`engine::Moved`）
-    let reset = if incoming.get("next_renewal").is_some() { "billing_day=NULL," } else { "" };
+    // 手填的到期日以手填那天为准：月末钳位记下的账单日随之作废（`engine::Moved`）。只认真改了的——
+    // 整行回读再 PATCH 的客户端把原日期原样带回来，不该顺手清掉账单日
+    let reset = if differs(&incoming, Some(&cur), "next_renewal") { "billing_day=NULL," } else { "" };
     vals.push(rusqlite::types::Value::from(id));
     conn.execute(
         &format!(
@@ -1342,7 +1413,9 @@ fn renew(conn: &Connection, id: i64, pay: &Payment) -> anyhow::Result<Value> {
     // 日期该落在哪天由 engine 那个纯函数说了算：两种起算、钳位记账单日、年份封顶都在那里，单测钉着
     let cy = cycle.as_deref().unwrap_or_default();
     let due = engine::due_from(cy, next.as_deref());
-    let moved = engine::renew_to(&renew_from, cy, cycle_days, due, billing_day, paid_on);
+    // 自动记的这笔就付在账单日上：按付款日重算会把月末账单日丢掉（1/31 → 2/28 → 3/28 → 永远 28 号）
+    let renew_from = if pay.auto { "schedule" } else { renew_from.as_str() };
+    let moved = engine::renew_to(renew_from, cy, cycle_days, due, billing_day, paid_on);
     if let Some(m) = moved {
         tx.execute(
             "UPDATE items SET next_renewal=?1,billing_day=?2,updated_at=datetime('now') WHERE id=?3",
@@ -1569,21 +1642,28 @@ fn public_host_ok(host: &str) -> bool {
     bare.contains('.')
 }
 
-/// 字面 + 解析结果双重校验，**并把校验过的地址交回去钉死**；None＝不许连，
-/// **每一跳重定向都要重新过这里**。只校验不钉的话 reqwest 连接时会再解析一次，
-/// 两次之间 DNS 可以翻脸（rebinding / TOCTOU）。配了代理时由代理解析，这里都不生效。
-async fn resolve_public(host: &str, port: u16) -> Option<std::net::SocketAddr> {
+/// 字面 + 解析结果双重校验，**并把校验过的地址交回去钉死**；Err 是不去连的原因（指向内网、
+/// 解析不出分开说），**每一跳重定向都要重新过这里**。只校验不钉的话 reqwest 连接时会再解析一次，
+/// 两次之间 DNS 可以翻脸（rebinding / TOCTOU）。配了代理时解析关照样在本机跑，钉地址交给代理。
+async fn resolve_public(host: &str, port: u16) -> Result<std::net::SocketAddr, String> {
+    let private = || format!("{host} 指向内网或本机，不去连它");
     if !public_host_ok(host) {
-        return None;
+        return Err(private());
     }
     let bare = bare_host(host);
     if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-        return Some(std::net::SocketAddr::new(ip, port)); // 字面 IP 上面已验过
+        return Ok(std::net::SocketAddr::new(ip, port)); // 字面 IP 上面已验过
     }
-    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((bare, port)).await.ok()?.collect();
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((bare, port))
+        .await
+        .map_err(|e| format!("{host} 在本机解析不出地址（{e}）"))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(format!("{host} 在本机解析不出地址"));
+    }
     let ips: Vec<std::net::IpAddr> = addrs.iter().map(std::net::SocketAddr::ip).collect();
     // 有一条落内网就整体拒；否则钉住第一条——钉的必须是刚校验过的那一批里的
-    resolved_ips_ok(&ips).then(|| addrs[0])
+    resolved_ips_ok(&ips).then(|| addrs[0]).ok_or_else(private)
 }
 
 /// 响应体上限。reqwest 没有默认上限，唯一边界是 30s 总超时＝「带宽 × 30s」全进内存；
@@ -1627,9 +1707,7 @@ async fn get_public(proxy: &str, url: &str, ua: &str) -> Result<reqwest::Respons
         let parsed = reqwest::Url::parse(&current).map_err(|_| format!("网址不对：{current}"))?;
         let host = parsed.host_str().unwrap_or("").to_string();
         let port = parsed.port_or_known_default().unwrap_or(443);
-        let Some(addr) = resolve_public(&host, port).await else {
-            return Err(format!("{host} 指向内网或本机，不去连它"));
-        };
+        let addr = resolve_public(&host, port).await?;
         // 每跳一个钉死地址的客户端：钉的就是刚校验过的那个地址，reqwest 不会再解析一次
         let client = crate::notify::http_client_pinned(proxy, &host, addr)
             .map_err(|e| format!("建连接失败：{e}"))?;
@@ -2109,38 +2187,14 @@ mod tests {
 
     /// 订阅 / SIM / VPS 三个预置库由迁移 0007/0008 建出来，而模板里也有一份同名的描述。
     /// 副本删不掉（已发布的迁移不能改，全新安装照样会走 0008），但漂移可以变成测试失败：
-    /// 这条钉的就是"模板产出 ⊇ 迁移产出，且多出来的恰好是这几个说得清的字段"。
+    /// 跑完全部迁移的预置库与照模板播的字段集逐行相同（预置 SIM 缺的周期 / 费用 / 链接由 0025 补上）。
     #[test]
     fn builtin_collections_match_their_templates() {
         let conn = crate::db::fresh_in_memory().unwrap();
-        // 模板多出来的字段只有 SIM 的三列：预置库没注册费用/周期/链接，模板注册上
-        // 但不上表——这是有意为之的修正（没注册 cycle 曾让编辑清掉周期），不是漂移。
-        let allowed_extra: &[(&str, &[&str])] = &[
-            ("subs", &[]),
-            ("sims", &["cycle", "price", "url"]),
-            ("vps", &[]),
-        ];
-
-        for (key, extra_keys) in allowed_extra {
+        for key in ["subs", "sims", "vps"] {
             let migrated = fields_of(&conn, key);
-            let templated = seeded_by_template(&conn, key);
             assert!(!migrated.is_empty(), "{key}：全新安装后该有字段");
-
-            // 迁移产出的每一行，模板都要一字不差地复现
-            for row in &migrated {
-                assert!(
-                    templated.contains(row),
-                    "{key}：模板没有复现迁移里的字段 {row:?}\n模板产出：{templated:#?}"
-                );
-            }
-            // 模板多出来的，只能是说好的那几个
-            let mut surplus: Vec<&str> = templated
-                .iter()
-                .filter(|r| !migrated.contains(r))
-                .map(|r| r.0.as_str())
-                .collect();
-            surplus.sort_unstable();
-            assert_eq!(&surplus, extra_keys, "{key}：模板多出来的字段与预期不符");
+            assert_eq!(migrated, seeded_by_template(&conn, key), "{key}：预置库与模板的字段集不一致");
         }
     }
 
@@ -2293,8 +2347,9 @@ mod tests {
         assert_eq!(normalize_shaped("date", "0001-01-01").unwrap(), "0001-01-01");
         let conn = fresh();
         let subs = coll(&conn, "subs");
-        assert!(insert_item(&conn, subs, &json!({ "name": "A", "auto_renew": "去年" })).is_err());
-        let id = insert_item(&conn, subs, &json!({ "name": "A", "auto_renew": "2026-8-5" })).unwrap();
+        let a = |since: &str| json!({ "name": "A", "status": "Active", "cycle": "monthly", "auto_renew": since });
+        assert!(insert_item(&conn, subs, &a("去年")).is_err());
+        let id = insert_item(&conn, subs, &a("2026-8-5")).unwrap();
         assert_eq!(one::<String>(&conn, "SELECT auto_renew FROM items WHERE id=?1", [id]), "2026-08-05");
     }
 
@@ -2831,15 +2886,23 @@ mod tests {
         let missed = sub("三期没记", "Active", "monthly", "2026-03-15", Some("2026-03-01"));
         let due_today = sub("今天扣款", "Active", "monthly", "2026-06-10", Some("2026-01-01"));
         let before_since = sub("开启前逾期", "Active", "monthly", "2026-05-01", Some("2026-05-20"));
-        let ending = sub("到期不续", "Ending", "monthly", "2026-05-01", Some("2026-01-01"));
         let manual = sub("没开", "Active", "monthly", "2026-05-01", None);
-        let lifetime = sub("买断", "Active", "lifetime", "2026-05-01", Some("2026-01-01"));
+        // 写入口挂不上自动续费的两种存量形态（升级前留下的）：引擎照样不替它们记账
+        let legacy = |id: i64, next: &str| {
+            conn.execute("UPDATE items SET next_renewal=?2, auto_renew='2026-01-01' WHERE id=?1", params![id, next]).unwrap();
+            id
+        };
+        let ending = legacy(sub("到期不续", "Ending", "monthly", "2026-05-01", None), "2026-05-01");
+        let lifetime = legacy(sub("买断", "Active", "lifetime", "", None), "2026-05-01");
         let vps = mk("vps", json!({ "name": "VPS", "status": "Active", "cycle": "annual",
                                     "next_renewal": "2026-06-01", "auto_renew": "2026-01-01" }));
         let sim = mk("sims", json!({ "name": "SIM", "status": "Active", "cycle": "days", "cycle_days": 30,
                                      "next_renewal": "2026-05-31", "auto_renew": "2026-05-01" }));
+        // 按付款日起算的库里月付 31 号：自动记的每笔都付在账单日上，短月钳过之后要回到 31 号
+        let month_end = mk("sims", json!({ "name": "月付 31 号", "status": "Active", "cycle": "monthly",
+                                           "next_renewal": "2026-01-31", "auto_renew": "2026-01-01" }));
 
-        assert_eq!(auto_renew(&conn, today).unwrap(), 5);
+        assert_eq!(auto_renew(&conn, today).unwrap(), 10);
         let books = |id: i64| -> Vec<(String, Option<f64>, Option<String>, bool)> {
             let mut stmt = conn
                 .prepare("SELECT renewed_at, amount, currency, auto FROM renewal_ledger WHERE item_id=?1 ORDER BY id")
@@ -2860,6 +2923,9 @@ mod tests {
         assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE id=?1", [vps]), "2027-06-01");
         assert_eq!(books(sim), [("2026-05-31".to_string(), None, None, true)]);
         assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE id=?1", [sim]), "2026-06-30");
+        let days: Vec<String> = books(month_end).into_iter().map(|b| b.0).collect();
+        assert_eq!(days, ["2026-01-31", "2026-02-28", "2026-03-31", "2026-04-30", "2026-05-31"]);
+        assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE id=?1", [month_end]), "2026-06-30");
         // 追平之后再跑一轮什么都不记
         assert_eq!(auto_renew(&conn, today).unwrap(), 0);
         // 手点的续费永远不是自动的，请求体里带 auto 也一样
@@ -2871,17 +2937,18 @@ mod tests {
     #[test]
     fn an_auto_renewal_that_cannot_move_the_date_books_nothing() {
         let conn = fresh();
+        // 年份封顶：再推一期就过了 9999 年
         let id = insert_item(
             &conn,
             coll(&conn, "subs"),
-            &json!({ "name": "买断", "status": "Active", "cycle": "lifetime", "next_renewal": "2026-05-01" }),
+            &json!({ "name": "封顶", "status": "Active", "cycle": "monthly", "next_renewal": "9999-12-15" }),
         )
         .unwrap();
-        let paid_on = NaiveDate::from_ymd_opt(2026, 5, 1).unwrap();
+        let paid_on = NaiveDate::from_ymd_opt(9999, 12, 15).unwrap();
         let pay = Payment { paid_on, amount: None, currency: None, note: None, auto: true };
         assert!(renew(&conn, id, &pay).is_err());
         assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM renewal_ledger", []), 0);
-        assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE id=?1", [id]), "2026-05-01");
+        assert_eq!(one::<String>(&conn, "SELECT next_renewal FROM items WHERE id=?1", [id]), "9999-12-15");
     }
 
     /// 到期栏只把「真会自动续的那一期」标成自动、并且静音（只进摘要）；开启前就逾期的那期
@@ -2898,7 +2965,9 @@ mod tests {
         };
         let covered = mk("会自动续", "Active", day(3), day(-10));
         let stale = mk("开启前逾期", "Active", day(-5), day(-1));
-        let ending = mk("到期不续", "Ending", day(3), day(-10));
+        // 写入口不让不计支出的状态挂自动续费，这里造的是升级前留下的存量
+        let ending = mk("到期不续", "Ending", day(3), String::new());
+        conn.execute("UPDATE items SET auto_renew=?1 WHERE id=?2", params![day(-10), ending]).unwrap();
         let ups = engine::upcoming(&conn).unwrap();
         let flags = |id: i64| {
             let u = ups.iter().find(|u| u["id"] == id).unwrap();
@@ -2909,11 +2978,103 @@ mod tests {
         assert_eq!(flags(ending), (false, true));
     }
 
+    /// 只在前提成立时才有意义的列：周期天数只给 Custom、买断没有到期日、自动续费只挂在计支出且推得动的条目上。
+    /// 自相矛盾的请求 400；把前提改没了的请求在同一次写入里清掉跟着它的列，改回来也不复活。
+    #[test]
+    fn columns_that_only_mean_something_with_their_premise() {
+        let conn = fresh();
+        let subs = coll(&conn, "subs");
+        let row = |id: i64| items_of(&conn, "subs").unwrap().into_iter().find(|r| r["id"] == id).unwrap();
+        // 周期天数
+        assert!(insert_item(&conn, subs, &json!({ "name": "a", "cycle": "monthly", "cycle_days": 30 })).is_err());
+        let d = insert_item(&conn, subs, &json!({ "name": "d", "cycle": "days", "cycle_days": 30 })).unwrap();
+        assert!(update_item(&conn, d, &json!({ "cycle": "monthly", "cycle_days": 45 })).is_err());
+        // 原样带回来的天数不算要写它：整行回读改周期的客户端照样清得掉
+        update_item(&conn, d, &json!({ "cycle": "monthly", "cycle_days": 30 })).unwrap();
+        assert_eq!(row(d)["cycle_days"], Value::Null, "切走 Custom 即清");
+        assert!(update_item(&conn, d, &json!({ "cycle_days": 7 })).is_err(), "月付上不收天数");
+        // 买断
+        let l = insert_item(&conn, subs, &json!({ "name": "l", "cycle": "monthly", "next_renewal": "2026-02-28" })).unwrap();
+        conn.execute("UPDATE items SET billing_day=31 WHERE id=?1", [l]).unwrap();
+        update_item(&conn, l, &json!({ "cycle": "lifetime" })).unwrap();
+        assert_eq!((row(l)["next_renewal"].clone(), row(l)["billing_day"].clone()), (Value::Null, Value::Null));
+        assert!(update_item(&conn, l, &json!({ "next_renewal": "2027-01-01" })).is_err());
+        assert!(insert_item(&conn, subs, &json!({ "name": "x", "cycle": "lifetime", "next_renewal": "2027-01-01" })).is_err());
+        // 自动续费
+        let today = engine::today().to_string();
+        for (status, cycle) in [("Planned", "monthly"), ("Ending", "monthly"), ("Active", "lifetime"), ("Active", "")] {
+            let b = json!({ "name": "x", "status": status, "cycle": cycle, "auto_renew": today });
+            assert!(insert_item(&conn, subs, &b).is_err(), "{status} / {cycle:?} 不该挂得上自动续费");
+        }
+        let on = json!({ "name": "a", "status": "Active", "cycle": "monthly", "auto_renew": today });
+        let a = insert_item(&conn, subs, &on).unwrap();
+        update_item(&conn, a, &json!({ "name": "改名不动它", "cycle": "annual" })).unwrap();
+        assert_eq!(row(a)["auto_renew"], json!(today));
+        update_item(&conn, a, &json!({ "status": "Ending" })).unwrap();
+        assert_eq!(row(a)["auto_renew"], Value::Null, "改走计支出的状态即清");
+        // 改回 Active 也不复活：存量（升级前留下的不计支出 + 自动续费）同理，得重新勾
+        conn.execute("UPDATE items SET auto_renew=?1 WHERE id=?2", params![today, a]).unwrap();
+        update_item(&conn, a, &json!({ "status": "Active" })).unwrap();
+        assert_eq!(row(a)["auto_renew"], Value::Null);
+        update_item(&conn, a, &json!({ "auto_renew": today })).unwrap();
+        update_item(&conn, a, &json!({ "cycle": "lifetime" })).unwrap();
+        assert_eq!(row(a)["auto_renew"], Value::Null, "改成买断即清");
+    }
+
+    /// 整行回读再 PATCH 的客户端把原到期日原样带回来：月末账单日不动；真改了日期才作废。
+    #[test]
+    fn echoing_the_due_date_back_keeps_the_billing_day() {
+        let conn = fresh();
+        let id = insert_item(
+            &conn,
+            coll(&conn, "subs"),
+            &json!({ "name": "月末", "status": "Active", "cycle": "monthly", "next_renewal": "2026-01-31" }),
+        )
+        .unwrap();
+        let paid_on = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+        renew(&conn, id, &Payment { paid_on, amount: None, currency: None, note: None, auto: false }).unwrap();
+        let bd = || one::<Option<i64>>(&conn, "SELECT billing_day FROM items WHERE id=?1", [id]);
+        assert_eq!(bd(), Some(31));
+        let echo = items_of(&conn, "subs").unwrap().into_iter().find(|r| r["id"] == id).unwrap();
+        update_item(&conn, id, &echo).unwrap();
+        assert_eq!(bd(), Some(31));
+        update_item(&conn, id, &json!({ "next_renewal": "2026-03-15" })).unwrap();
+        assert_eq!(bd(), None);
+    }
+
+    /// 请求体不是对象就 400：`[]`、`"x"` 取哪个键都是缺席，放过去就是新建一条空行或一个假成功。
+    /// 「链接」真列按网址规范化：裸域名补协议，`javascript:` 不落库。
+    #[test]
+    fn non_object_bodies_and_bad_links_are_refused() {
+        let conn = fresh();
+        let subs = coll(&conn, "subs");
+        for body in [json!([]), json!("x"), json!(1), Value::Null] {
+            assert!(insert_item(&conn, subs, &body).is_err(), "{body}");
+        }
+        let id = insert_item(&conn, subs, &json!({ "name": "a", "url": "example.com/x" })).unwrap();
+        assert!(update_item(&conn, id, &json!([])).is_err());
+        assert_eq!(one::<String>(&conn, "SELECT url FROM items WHERE id=?1", [id]), "https://example.com/x");
+        assert!(update_item(&conn, id, &json!({ "url": "javascript:alert(1)" })).is_err());
+        assert_eq!(one::<i64>(&conn, "SELECT count(*) FROM items", []), 1);
+    }
+
+    /// 删掉的库号不再发出：旧标签页对旧库的改 / 删会打到新库上（删库还会级联删它的条目）。
+    #[tokio::test]
+    async fn a_deleted_collection_id_is_never_handed_out_again() {
+        let r = routed(fresh(), std::path::Path::new("."));
+        let (_, a) = call(&r, "POST", "/api/collections", Some(json!({ "name": "甲" }))).await;
+        let old = a["id"].as_i64().unwrap();
+        assert_eq!(call(&r, "DELETE", &format!("/api/collections/{old}"), None).await.0, StatusCode::OK);
+        let (_, b) = call(&r, "POST", "/api/collections", Some(json!({ "name": "乙" }))).await;
+        assert!(b["id"].as_i64().unwrap() > old, "{b}");
+        assert_eq!(call(&r, "DELETE", &format!("/api/collections/{old}"), None).await.0, StatusCode::NOT_FOUND);
+    }
+
     /// 开关存开启日：写入按日期规范化、空值关掉，非日期与非文本拒掉。
     #[test]
     fn the_auto_renew_switch_is_a_date() {
         let conn = fresh();
-        let id = insert_item(&conn, coll(&conn, "subs"), &json!({ "name": "x" })).unwrap();
+        let id = insert_item(&conn, coll(&conn, "subs"), &json!({ "name": "x", "status": "Active", "cycle": "monthly" })).unwrap();
         let read = || one::<Option<String>>(&conn, "SELECT auto_renew FROM items WHERE id=?1", [id]);
         update_item(&conn, id, &json!({ "auto_renew": "2026-6-1" })).unwrap();
         assert_eq!(read().as_deref(), Some("2026-06-01"));
@@ -3251,11 +3412,11 @@ mod tests {
         for no in ["255.255.255.255", "192.0.2.1", "198.51.100.7", "203.0.113.9"] {
             assert!(!public_ip_ok(&ip(no)), "本该拦下 {no}");
         }
-        assert_eq!(resolve_public("1.1.1.1", 443).await, Some(SocketAddr::new(ip("1.1.1.1"), 443)));
-        assert_eq!(resolve_public("[2606:4700:4700::1111]", 80).await, Some(SocketAddr::new(ip("2606:4700:4700::1111"), 80)));
-        assert_eq!(resolve_public("10.0.0.5", 443).await, None);
-        assert_eq!(resolve_public("[::1]", 443).await, None);
-        assert_eq!(resolve_public("nas.local", 443).await, None);
+        assert_eq!(resolve_public("1.1.1.1", 443).await, Ok(SocketAddr::new(ip("1.1.1.1"), 443)));
+        assert_eq!(resolve_public("[2606:4700:4700::1111]", 80).await, Ok(SocketAddr::new(ip("2606:4700:4700::1111"), 80)));
+        for no in ["10.0.0.5", "[::1]", "nas.local"] {
+            assert!(resolve_public(no, 443).await.is_err_and(|e| e.contains("指向内网或本机")), "{no}");
+        }
     }
 
     /// RFC 6052 §2.2 的四种布局各抽一次：/48 与 /56 也要读得出嵌着的 10.0.0.5；

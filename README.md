@@ -47,10 +47,13 @@ private in the library.
   billed on the 15th stays on the 15th) or the payment day (a SIM keep-alive
   window restarts when you top up). Items the provider charges automatically
   can be set to auto-renew: the day after a billing date, Kalends books that
-  period in the ledger, marked as automatic, and moves on to the next one, as
-  long as the status counts as spending. Periods already overdue when you
-  switch it on still need one manual renewal, and auto-renewing items show up
-  in the daily digest instead of getting reminders of their own.
+  period in the ledger, marked as automatic, and moves on to the next one,
+  always on the billing schedule. The switch is only offered while the status
+  counts as spending and the cycle can move forward (not lifetime, not empty);
+  changing the status to one that does not count switches it off, and it has to
+  be ticked again later. Periods already overdue when you switch it on still
+  need one manual renewal, and auto-renewing items show up in the daily digest
+  instead of getting reminders of their own.
 - **Status values carry meaning.** Each one declares whether it counts as
   spending, whether it should remind you, and whether it belongs on the
   timeline.
@@ -132,10 +135,13 @@ a display currency, Telegram and SMTP credentials, reminder thresholds and the
 digest time.
 
 Outbound HTTP requests also honour `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and
-`NO_PROXY` from the environment, unless the settings page gives them a proxy:
-Telegram has its own proxy field, while exchange rates and icon fetching share
-the outbound one. A proxy set there replaces the environment ones for those
-requests. SMTP always connects directly.
+`NO_PROXY` from the environment, unless the settings page gives them a proxy.
+Exchange rates and icon fetching use the outbound proxy; Telegram uses its own
+proxy field, or the outbound proxy when that field is empty. A proxy set there
+replaces the environment ones for those requests. Proxy addresses must start
+with `http://`, `https://`, `socks4://`, `socks4a://`, `socks5://` or
+`socks5h://`; anything else is refused rather than silently connecting directly.
+SMTP always connects directly.
 
 ## Limitations
 

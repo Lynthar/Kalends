@@ -1,6 +1,6 @@
 // 详情表单：整行往返与幂等保存、自定义天数拦截、图标上传与清除、父条目下拉、开放词表的现场新增。
 export default async function (t) {
-  const { APP, sleep, patch, raw, items, fields, check, send, evl, shot, toastOnTop } = t;
+  const { APP, sleep, patch, raw, mk, items, fields, check, send, evl, shot, toastOnTop, day, sql, settle, waitFor } = t;
   /* 12d. 订阅 logo：上传 → 名称格渲染（子行回退父 logo）→ 整行 PUT 保留 → 清除 */
   const PNG1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
   const subsNow = await (await fetch(APP + 'api/collections/subs/items')).json();
@@ -79,8 +79,7 @@ export default async function (t) {
     check(`${key} 详情表单原样保存不动任何字段`, stripVolatile(before) === stripVolatile(after),
       `\n    前 ${stripVolatile(before)}\n    后 ${stripVolatile(after)}`);
   }
-  // 自定义天数没填天数：表单该拦下（就地编辑器早就拦了，表单一直没拦）。
-  // 挑 subs——SIM 的周期恒为自定义天数，当初就没把 cycle 注册成字段，表单里没有这个控件
+  // 自定义天数没填天数：表单该拦下（就地编辑器早就拦了，表单一直没拦）
   const daysRow = (await fetch(`${APP}api/collections/subs/items`).then(r => r.json())).find(r => r.cycle);
   await evl(`switchTab('subs')`);
   await sleep(200);
@@ -245,4 +244,67 @@ export default async function (t) {
     freshItem?.extra?.payment_method === '云闪付', JSON.stringify(freshItem?.extra));
 
 
+
+  /* 17.40. 跟着前提走的控件（与后端 settle_dependents 同一套规则）：天数框只在 Custom 时出现；
+     买断停用到期日、撤掉续费按钮；自动续费只在计支出、周期推得动时出现，改走状态即取消且不复活。
+     预置 SIM 库原来没注册周期，界面新建的 SIM 续不动——0025 补上之后，从表单建一条要能续。 */
+  const setF = (f, v, ev = 'change') => evl(`(() => {
+    const el = document.querySelector('#item-fields [data-f="${f}"]');
+    el.value = ${JSON.stringify(v)}; el.dispatchEvent(new Event('${ev}', { bubbles: true })); return true; })()`);
+  const shown = sel => evl(`(() => { const el = document.querySelector('${sel}'); return !!el && !el.closest('[hidden]'); })()`);
+  const days = '#item-fields [data-f="cycle_days"]', autoRow = '#item-fields [data-autorow]';
+  await evl(`switchTab('sims')`);
+  await evl(`openItemDialog('sims', null)`);
+  await waitFor(`!!document.querySelector('#dlg-item')?.open`);
+  check('预置 SIM 的表单里有周期', await shown('#item-fields [data-f="cycle"]'));
+  check('没选 Custom 时不出天数框', !await shown(days));
+  check('新建默认 Planned：不给自动续费选项', !await shown(autoRow));
+  await setF('name', '表单建的 SIM', 'input');
+  await setF('status', 'Active');
+  await setF('cycle', 'days');
+  check('选了 Custom 才出天数框', await shown(days));
+  await setF('cycle_days', '30', 'input');
+  await setF('next_renewal', day(3));
+  check('Active + 推得动的周期：给自动续费选项', await shown(autoRow));
+  await evl(`document.querySelector('#form-item').requestSubmit()`);
+  await settle();
+  const sim = (await items('sims')).find(r => r.name === '表单建的 SIM');
+  check('表单建的 SIM 落成自定义周期', sim?.cycle === 'days' && sim?.cycle_days === 30, `${sim?.cycle}/${sim?.cycle_days}`);
+  const renewed = await (await raw(`/api/items/${sim.id}/renew`, 'POST', {})).json();
+  check('表单建的 SIM 续得动（从付款当天推 30 天）', renewed.due === day(30), JSON.stringify(renewed));
+
+  await evl(`switchTab('subs')`);
+  const nf = (await items('subs')).find(r => r.name === 'Netflix');
+  await evl(`openItemDialog('subs', state.subs.find(r => r.id === ${nf.id}))`);
+  await waitFor(`!!document.querySelector('#dlg-item')?.open`);
+  check('月付不出天数框', !await shown(days));
+  check('Active 月付给自动续费选项', await shown(autoRow));
+  await evl(`document.querySelector('#item-fields [data-auto]').click()`);
+  await setF('status', 'Ending');
+  check('改成不计支出的状态：自动续费选项收起', !await shown(autoRow));
+  await setF('status', 'Active');
+  check('改回 Active：选项回来但没勾', await shown(autoRow)
+    && await evl(`document.querySelector('#item-fields [data-auto]').checked`) === false);
+  await setF('cycle', 'lifetime');
+  check('买断：到期日停用并清空', await evl(`(() => { const d = document.querySelector('#item-fields [data-f="next_renewal"]');
+    return d.disabled && d.value === ''; })()`) === true);
+  check('买断：说明出现、自动续费收起', await shown('#item-fields [data-lifetime-note]') && !await shown(autoRow));
+  await shot('40-form-lifetime');
+  await evl(`document.querySelector('#dlg-item').close()`);
+  check('取消就什么都没写', (await items('subs')).find(r => r.id === nf.id).next_renewal === nf.next_renewal);
+
+  // 表格：买断没有续费按钮；「自动」标记以状态为准，存量里挂着的不计支出 + 自动续费不显示
+  const life = await mk('subs', { name: '买断的软件', status: 'Active', price: 30, currency: 'USD', cycle: 'lifetime' });
+  const auto = await mk('subs', { name: '自动扣的', status: 'Active', price: 3, currency: 'USD', cycle: 'monthly',
+    next_renewal: day(9), auto_renew: day(0) });
+  const stale = await mk('subs', { name: '停了的', status: 'Ended', price: 3, currency: 'USD', cycle: 'monthly', next_renewal: day(9) });
+  sql('UPDATE items SET auto_renew=? WHERE id=?', [day(0), stale.id]);
+  await evl(`loadAll()`);
+  await settle();
+  const rowHas = (id, sel) => evl(`!!document.querySelector('#subs-body tr[data-id="${id}"] ${sel}')`);
+  check('买断那行没有续费按钮', await rowHas(life.id, '[data-renew]') === false);
+  check('Active 月付开着自动续费：名称格有「自动」', await rowHas(auto.id, '.automark') === true);
+  check('Ended 挂着的存量自动续费不标「自动」', await rowHas(stale.id, '.automark') === false);
+  await patch(`/api/items/${auto.id}`, { status: 'Ending' });
+  check('改走计支出的状态：服务端一并关掉自动续费', (await items('subs')).find(r => r.id === auto.id).auto_renew == null);
 }

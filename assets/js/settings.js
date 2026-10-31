@@ -24,7 +24,9 @@ $('#fx-refresh').onclick = async e => {
   btn.disabled = true;
   btn.textContent = '拉取中…';
   try {
-    state.fx = await api('/api/fx/refresh', { method: 'POST', body: '{}' });
+    // 带上框里这会儿的出网代理（与「发送测试」同理）：改了代理没保存就点，走的得是刚填的那个
+    const proxy = $('#form-settings').elements.meta_proxy.value.trim();
+    state.fx = await api('/api/fx/refresh', { method: 'POST', body: JSON.stringify({ proxy }) });
     syncFxPanel();
     toast(`已更新 ${state.fx.live.length} 种汇率`);
     renderAll();
@@ -37,6 +39,8 @@ $('#fx-refresh').onclick = async e => {
 const smtpPortDefault = () => JSON.parse(state.defaults['notify.email']).port;
 
 function openSettings() {
+  // 首屏没加载成功（PIN 没过、服务不通）时设置与默认值都还没有，开框只会抛错
+  if (!state.settings || !state.defaults) return void toast('设置还没加载出来：先刷新页面', true);
   const st = state.settings, D = state.defaults;
   const f = $('#form-settings').elements;
   f.pin.value = st['auth.pin'] || '';
@@ -94,7 +98,7 @@ async function loadLedger() {
     box.className = 'ledger-log';
     if (!rows.length) {
       box.className = 'ledger-log note';
-      box.textContent = '还没有记过账——表格里点「已续费 / 已保号」就会写一笔';
+      box.textContent = '还没有记过账';
       return;
     }
     box.innerHTML = '';
@@ -218,8 +222,10 @@ document.querySelectorAll('[data-test]').forEach(b => b.onclick = async () => {
   b.disabled = true;
   try {
     const channel = b.dataset.test;
-    const config = settingsBody()[`notify.${channel}`];
-    await api('/api/notify/test', { method: 'POST', body: JSON.stringify({ channel, config }) });
+    const body = settingsBody();
+    // Telegram 自己那栏留空时沿用出网代理：一并带上框里这会儿的出网代理
+    await api('/api/notify/test', { method: 'POST',
+      body: JSON.stringify({ channel, config: body[`notify.${channel}`], proxy: body['meta.proxy'] }) });
     toast('测试已发送，请查收——设置还没保存');
   } catch (err) { toast(err.message, true); }
   b.disabled = false;

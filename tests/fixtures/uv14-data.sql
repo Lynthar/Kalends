@@ -31,7 +31,12 @@ INSERT INTO items(id, collection_id, name, status, price, currency, cycle, cycle
   (104, 4, 'Example Almanac', 'Active', NULL,  NULL,  NULL,      NULL, '2026-12-31', NULL,         NULL,                                      1, '纸本'),
   (105, 5, 'example.com',     'Active', 10,    'USD', 'annual',  NULL, '2027-03-01', NULL,         '{"auto_renew":"开","registrar":"ExampleReg"}', 1, NULL),
   (106, 5, 'example.org',     'Active', 10,    'USD', 'annual',  NULL, '2027-04-01', NULL,         '{"auto_renew":"关"}',                     2, NULL),
-  (107, 6, 'example.net',     'Active', 10,    'USD', 'annual',  NULL, '2027-05-01', NULL,         '{"auto_renew":"是"}',                     1, NULL);
+  (107, 6, 'example.net',     'Active', 10,    'USD', 'annual',  NULL, '2027-05-01', NULL,         '{"auto_renew":"是"}',                     1, NULL),
+  -- 0025 的四种形态：只填了天数的 SIM、预置周期上挂着天数、买断带日期、买断开着自动续费
+  (109, 2, 'ExampleTel2',     'Active', NULL,  NULL,  NULL,      30,   NULL,         '2026-07-01', NULL,                                      2, NULL),
+  (110, 3, 'ExampleVM',       'Active', 4,     'USD', 'annual',  365,  NULL,         '2026-03-01', NULL,                                      3, NULL),
+  (111, 1, 'Example Forever', 'Active', 49,    'USD', 'lifetime', NULL, '2030-01-01', NULL,        NULL,                                      2, NULL),
+  (112, 5, 'example.io',      'Active', 10,    'USD', 'lifetime', NULL, '2027-06-01', NULL,        '{"auto_renew":"开"}',                     3, NULL);
 
 INSERT INTO renewal_ledger(kind, item_id, renewed_at, amount, currency) VALUES
   ('subs',  101, '2026-08-01', 11.99, 'USD'),

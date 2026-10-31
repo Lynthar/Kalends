@@ -65,7 +65,7 @@ export default async function (t) {
   const ordBefore = await evl(`[...document.querySelectorAll('#subs-body tr')].map(t => +t.dataset.id)`);
   // 把顶层第一行挪到第二个顶层行之后（子行跟着父行整块走）
   const topIds = await evl(`[...document.querySelectorAll('#subs-body tr:not(.subrow)')].map(t => +t.dataset.id)`);
-  await evl(`applyRowOrder('subs', moveRow('subs', ${topIds[0]}, ${topIds[1]}, true))`);
+  await evl(`applyRowOrder('subs', () => moveRow('subs', ${topIds[0]}, ${topIds[1]}, true))`);
   await sleep(600);
   const ordAfter = await evl(`[...document.querySelectorAll('#subs-body tr')].map(t => +t.dataset.id)`);
   check('拖动改变了行序', JSON.stringify(ordAfter) !== JSON.stringify(ordBefore),

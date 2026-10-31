@@ -36,10 +36,11 @@ function closerOf() {
   return () => { if (popEl === mine) closePop(); };
 }
 
-// 数字栏里打了不成数的东西（`1e`、`12-`）时 value 读出来是空串，照「清空」写出去就静默删了原值
-function badNumber(box) {
-  const bad = [...box.querySelectorAll('input[type=number]')].find(i => i.validity.badInput);
-  if (bad) { toast('有一栏不是有效的数字：改正或清空后再保存', true); bad.focus(); }
+// 数字栏打了不成数的东西（`1e`、`12-`）、日期栏只填了一半时，value 读出来都是空串，
+// 照「清空」写出去就静默删了原值（日期删了，条目就掉进首页点名）
+function halfTyped(box) {
+  const bad = [...box.querySelectorAll('input')].find(i => i.validity.badInput);
+  if (bad) { toast('有一栏没填完整（不是有效的数字或日期）：改正或清空后再保存', true); bad.focus(); }
   return !!bad;
 }
 
@@ -69,7 +70,7 @@ function inputsEditor(tab, it, td, fieldsDef, save) {
   foot.innerHTML = '<button type="button" class="btn primary mini">保存</button>';
   box.appendChild(foot);
   const commit = () => {
-    if (badNumber(box)) return;
+    if (halfTyped(box)) return;
     const patch = {};
     for (const inp of box.querySelectorAll('input[data-f]')) {
       // 数字栏清空要显式写 null：undefined 会被 JSON.stringify 丢掉，
@@ -182,9 +183,11 @@ function cycleEditor(tab, it, td) {
   sel.addEventListener('change', syncDays);
   syncDays();
   const commit = () => {
-    if (badNumber(box)) return;
-    // 天数清空写 null（键缺席＝保持原值，见 patchRow）
-    const patch = { cycle: sel.value, cycle_days: days.value === '' ? null : +days.value };
+    if (halfTyped(box)) return;
+    // 天数只给 Custom：别的周期显式写 null（藏起来的旧天数照写回去，就成了「月付 + 30 天」）；
+    // 清空同样写 null（键缺席＝保持原值，见 patchRow）
+    const custom = sel.value === 'days' && days.value !== '';
+    const patch = { cycle: sel.value, cycle_days: custom ? +days.value : null };
     patchRow(tab, it, patch, { written: closerOf() });
   };
   box.querySelector('.cp-foot button').onclick = commit;
@@ -226,7 +229,7 @@ function priceEditor(tab, it, td) {
   const amt = box.querySelector('[data-price]');
   const sel = box.querySelector('[data-cur]');
   const commit = () => {
-    if (badNumber(box)) return;
+    if (halfTyped(box)) return;
     // 清空一律显式 null：键缺席在 PATCH 语义里是"保持原值"（见 patchRow）
     patchRow(tab, it, {
       price: amt.value === '' ? null : +amt.value,
@@ -278,7 +281,7 @@ function tplEditor(tab, it, td, f) {
   foot.innerHTML = '<button type="button" class="btn primary mini">保存</button>';
   box.appendChild(foot);
   const commit = () => {
-    if (badNumber(box)) return;
+    if (halfTyped(box)) return;
     const cols = {};
     const ext = {};
     for (const el of box.querySelectorAll('[data-f]')) {

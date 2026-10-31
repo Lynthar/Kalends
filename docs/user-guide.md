@@ -80,7 +80,7 @@ KALENDS_DATA=/path/to/data ./target/release/kalends
 
 设置页的「立即备份」会当场做同样的两件事。同一天再做一次，会覆盖当天那份快照。
 
-快照与库文件里，渠道密钥和代理口令都是明文；JSONL 导出里这两样已经遮掉。
+快照与库文件里，渠道密钥和代理口令都是明文；设置页回读与 JSONL 导出里这两样都已遮掉。
 
 应用自己的快照之外，建议把整个数据目录纳入主机的整机备份，连同 `kalends.db-wal` 一起：最近的写入可能还只在它里面。
 
@@ -128,7 +128,7 @@ docker run --rm \
 
 **升级**：拉取新代码，重新 `docker build`，再 `docker compose up -d`。想留一条回滚的路，build 之前先 `docker tag kalends:local kalends:prev`，否则旧镜像会被新的覆盖。
 
-新版本要改数据库结构时，应用会在迁移之前往 `backups/` 写一份 `pre-migration-v<N>.db`，启动日志里有一行 `pre-migration snapshot: …`。这份快照写不进去（比如磁盘满了），应用会拒绝启动，腾出空间再试。
+新版本要改数据库结构时，应用会在迁移之前往 `backups/` 写一份 `pre-migration-v<N>.db`，启动日志里有一行 `pre-migration snapshot: …`。这份快照写不进去（比如磁盘满了），应用会拒绝启动，腾出空间再试。迁移有时会清掉或改写已经不起作用、或者认不出的旧值（比如写法不规范的日期）；想找回原样，把这份快照照下面的办法恢复到另一个目录，对照着看。
 
 **回滚**分两种情况：
 

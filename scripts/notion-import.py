@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 
 BASE = os.environ.get('KALENDS_URL', 'http://127.0.0.1:4180')
@@ -33,8 +34,12 @@ def post(path, payload, method='POST'):
         headers['X-Kalends-Pin'] = PIN
     req = urllib.request.Request(BASE + path, data=json.dumps(payload).encode(),
                                  headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.loads(r.read())
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        # 服务端的 400 带着原因（哪一栏、为什么），只报状态码就得回头翻代码
+        sys.exit(f'{method} {path} → {e.code}：{e.read().decode(errors="replace")}')
 
 
 def clean(d):
@@ -57,8 +62,9 @@ def plus_period(iso, cycle, cycle_days=None):
 
 
 # ── 条目的形状：引擎要用的字段是 items 的真列，域字段一律进 extra（键即字段键）──
+# 备注是一列普通的自定义列（extra.notes），顶层的 notes 接口会拒
 REAL_COLS = {'name', 'parent_id', 'status', 'price', 'currency', 'cycle', 'cycle_days',
-             'next_renewal', 'url', 'notes'}
+             'next_renewal', 'url'}
 # 三个续费库的状态词表 2026-07 起统一为英文（迁移 0006）；Notion 导出里还是中文
 STATUS_EN = {'启用': 'Active', '准备': 'Planned', '未启用': 'Unused',
              '预结束': 'Ending', '已结束': 'Ended'}
@@ -149,7 +155,7 @@ def import_subs(files):
         if conv:
             converted.append(f"{name}: USD {r.get('price_usd')} → {cur} {price}")
         body = {
-            'name': name, 'status': r.get('status') or 'Planned',
+            'name': name, 'status': STATUS_EN.get(r.get('status') or '', r.get('status') or 'Planned'),
             'category': r.get('category'), 'cycle': CYCLE.get(r.get('cycle_raw') or ''),
             'price': price, 'currency': cur,
             'next_renewal': r.get('next_renewal'),
@@ -246,7 +252,8 @@ def import_vps(files):
                 'ipv6': 1 if r.get('ipv6_raw') == '__YES__' else 0,
                 'price': r.get('price'),
                 'currency': 'USD' if r.get('price') is not None else None,
-                'cycle': cycle, 'cycle_days': cycle_days,
+                # 周期天数只给自定义周期：「年付 + 365 天」这种组合接口会拒
+                'cycle': cycle, 'cycle_days': cycle_days if cycle == 'days' else None,
                 # Notion 记的是上次续费；Kalends 只存下次到期日，推一期过去
                 'next_renewal': plus_period(r['last_renewed'], cycle, cycle_days) if r.get('last_renewed') else None,
             })
